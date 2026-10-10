@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -25,6 +26,8 @@ const sessionTTL = 7 * 24 * time.Hour
 // minPasswordLength is enforced at setup and when changing a password.
 const minPasswordLength = 8
 
+// setupMu serialises first-run setup, which is otherwise a check-then-create
+// race that concurrent requests can win several times.
 // sessionKeySetting holds the signing key for session cookies, generated on
 // first use. It lives in the database so logins survive a restart.
 const sessionKeySetting = "auth.session_key"
@@ -51,25 +54,69 @@ func (r *Router) loadSessionKey() ([]byte, error) {
 	return key, nil
 }
 
-// signSession builds a cookie value of the form username.expiry.mac.
-func signSession(key []byte, username string, expiry time.Time) string {
-	payload := username + "." + strconv.FormatInt(expiry.Unix(), 10)
+// authGenerationSetting holds a counter that invalidates every outstanding
+// session when it changes. Bumping it is how "log out everywhere" and "the
+// password changed" take effect on cookies that were already issued.
+const authGenerationSetting = "auth.generation"
+
+// generation reads the current session generation, creating it on first use.
+func (r *Router) generation() (int64, error) {
+	var g int64
+	if err := r.st.GetSetting(authGenerationSetting, &g); err != nil {
+		return 0, err
+	}
+	if g == 0 {
+		g = 1
+		if err := r.st.PutSetting(authGenerationSetting, g); err != nil {
+			return 0, err
+		}
+	}
+	return g, nil
+}
+
+// bumpGeneration invalidates every outstanding session.
+func (r *Router) bumpGeneration() error {
+	g, err := r.generation()
+	if err != nil {
+		return err
+	}
+	return r.st.PutSetting(authGenerationSetting, g+1)
+}
+
+// signSession builds a cookie value of the form base64(username)|expiry|mac.
+//
+// The username is base64-encoded because a raw username may contain the
+// separator: "admin.ops" would otherwise split into four parts and the session
+// would never verify, silently locking the operator out.
+func signSession(key []byte, username string, gen int64, expiry time.Time) string {
+	payload := encodeUsername(username) + sessionSep +
+		strconv.FormatInt(expiry.Unix(), 10) + sessionSep + strconv.FormatInt(gen, 10)
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
-	return payload + "." + hex.EncodeToString(mac.Sum(nil))
+	return payload + sessionSep + hex.EncodeToString(mac.Sum(nil))
+}
+
+// sessionSep separates the cookie's fields. It cannot appear in a base64 or hex
+// encoding, so the payload always splits into exactly three parts.
+const sessionSep = "."
+
+func encodeUsername(u string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(u))
 }
 
 // verifySession checks a cookie value and returns the username it carries.
-func verifySession(key []byte, value string) (string, error) {
-	parts := strings.Split(value, ".")
-	if len(parts) != 3 {
+// The generation must match the current one, so bumping it revokes every cookie
+// that was issued before.
+func verifySession(key []byte, value string, currentGen int64) (string, error) {
+	parts := strings.Split(value, sessionSep)
+	if len(parts) != 4 {
 		return "", errors.New("malformed session")
 	}
-	payload := parts[0] + "." + parts[1]
+	payload := parts[0] + sessionSep + parts[1] + sessionSep + parts[2]
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	want := hex.EncodeToString(mac.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(want), []byte(parts[2])) != 1 {
+	if subtle.ConstantTimeCompare([]byte(want), []byte(parts[3])) != 1 {
 		return "", errors.New("bad signature")
 	}
 	expiry, err := strconv.ParseInt(parts[1], 10, 64)
@@ -79,7 +126,18 @@ func verifySession(key []byte, value string) (string, error) {
 	if time.Now().After(time.Unix(expiry, 0)) {
 		return "", errors.New("expired")
 	}
-	return parts[0], nil
+	gen, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return "", errors.New("bad generation")
+	}
+	if gen != currentGen {
+		return "", errors.New("session revoked")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", errors.New("malformed username")
+	}
+	return string(raw), nil
 }
 
 // hashPassword returns a bcrypt hash.
@@ -88,8 +146,18 @@ func hashPassword(pw string) (string, error) {
 	return string(b), err
 }
 
-// checkPassword compares a password against its hash.
+// dummyHash is a valid bcrypt hash used to keep login timing constant when the
+// username does not exist.
+const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
+// checkPassword compares a password against its hash. An empty hash (no such
+// user) still performs a bcrypt comparison against a dummy hash, so the call
+// takes the same time either way and cannot be used to enumerate usernames.
 func checkPassword(hash, pw string) bool {
+	if hash == "" {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(pw))
+		return false
+	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
 }
 
@@ -102,16 +170,21 @@ func (r *Router) needsSetup() (bool, error) {
 	return n == 0, nil
 }
 
-func (r *Router) setSessionCookie(w http.ResponseWriter, key []byte, username string) {
+func (r *Router) setSessionCookie(w http.ResponseWriter, key []byte, username string) error {
+	gen, err := r.generation()
+	if err != nil {
+		return err
+	}
 	expiry := time.Now().Add(sessionTTL)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    signSession(key, username, expiry),
+		Value:    signSession(key, username, gen, expiry),
 		Path:     "/",
 		Expires:  expiry,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+	return nil
 }
 
 // currentUser returns the signed-in username, or "" when not signed in.
@@ -124,7 +197,11 @@ func (r *Router) currentUser(req *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	name, err := verifySession(key, c.Value)
+	gen, err := r.generation()
+	if err != nil {
+		return ""
+	}
+	name, err := verifySession(key, c.Value, gen)
 	if err != nil {
 		return ""
 	}
@@ -163,6 +240,13 @@ func (r *Router) authState(w http.ResponseWriter, req *http.Request) {
 // setup creates the first WebUI admin. It is refused once an admin exists, so
 // it cannot be used to take over an installed instance.
 func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
+	// The whole setup is serialised and the "is setup needed" check is repeated
+	// inside the lock. Without this, a burst of concurrent requests all observe
+	// "no admin yet" and each creates one, which lets an attacker plant an
+	// account on a fresh (or freshly reachable) instance.
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
+
 	setup, err := r.needsSetup()
 	if err != nil {
 		writeErr(w, 500, err)
@@ -205,7 +289,10 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	r.setSessionCookie(w, key, in.Username)
+	if err := r.setSessionCookie(w, key, in.Username); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"username": in.Username})
 }
 
@@ -220,9 +307,15 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 	}
 
 	a, err := r.st.GetAdmin(strings.TrimSpace(in.Username))
-	if err != nil || !checkPassword(a.PasswordHash, in.Password) {
-		// Same message either way, so the response does not reveal whether the
-		// username exists.
+	hash := ""
+	if err == nil && a != nil {
+		hash = a.PasswordHash
+	}
+	// Always run bcrypt, even for an unknown username. Otherwise a missing user
+	// returns in microseconds while a real one takes ~tens of milliseconds, and
+	// the difference enumerates valid usernames despite the identical message.
+	ok := checkPassword(hash, in.Password)
+	if err != nil || a == nil || !ok {
 		writeErr(w, http.StatusUnauthorized, errors.New("用户名或密码错误"))
 		return
 	}
@@ -232,11 +325,21 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	r.setSessionCookie(w, key, a.Username)
+	if err := r.setSessionCookie(w, key, a.Username); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"username": a.Username})
 }
 
 func (r *Router) logout(w http.ResponseWriter, _ *http.Request) {
+	// Clearing the cookie only affects this browser; bumping the generation is
+	// what actually revokes the token, so a copy captured elsewhere stops
+	// working too.
+	if err := r.bumpGeneration(); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
 	})
@@ -273,6 +376,12 @@ func (r *Router) changePassword(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err := r.st.SetAdminPassword(a.Username, hash); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	// A password change must sign out every existing session, otherwise a
+	// stolen cookie survives the one action taken to stop it.
+	if err := r.bumpGeneration(); err != nil {
 		writeErr(w, 500, err)
 		return
 	}

@@ -5,8 +5,12 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"qqbot/internal/config"
@@ -203,4 +207,144 @@ func TestChangePassword(t *testing.T) {
 	if code, _ := post(t, other, srv.URL+"/api/auth/login", `{"username":"admin","password":"newpassword1"}`); code != 200 {
 		t.Error("the new password should work")
 	}
+}
+
+// A captured session must stop working after logout: clearing the cookie only
+// affects the caller's browser.
+func TestLogoutRevokesTheSessionServerSide(t *testing.T) {
+	srv, _, _ := newBareServer(t)
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	post(t, cl, srv.URL+"/api/auth/setup", `{"username":"admin","password":"hunter2hunter2"}`)
+
+	// Capture the cookie, as an attacker who stole it would have.
+	var stolen string
+	for _, c := range jar.Cookies(mustParse(t, srv.URL)) {
+		if c.Name == sessionCookie {
+			stolen = c.Value
+		}
+	}
+	if stolen == "" {
+		t.Fatal("no session cookie issued")
+	}
+	if code := getJSONWith(t, cl, srv.URL+"/api/bootstrap", nil); code != 200 {
+		t.Fatal("session should work before logout")
+	}
+
+	post(t, cl, srv.URL+"/api/auth/logout", `{}`)
+
+	// Replay the captured value on a fresh client.
+	req, _ := http.NewRequest("GET", srv.URL+"/api/bootstrap", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: stolen})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a captured cookie still authenticates after logout (%d)", resp.StatusCode)
+	}
+}
+
+// Changing the password must sign out existing sessions, otherwise a stolen
+// cookie survives the one action taken to stop it.
+func TestPasswordChangeRevokesSessions(t *testing.T) {
+	srv, _, _ := newBareServer(t)
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	post(t, cl, srv.URL+"/api/auth/setup", `{"username":"admin","password":"hunter2hunter2"}`)
+
+	var stolen string
+	for _, c := range jar.Cookies(mustParse(t, srv.URL)) {
+		if c.Name == sessionCookie {
+			stolen = c.Value
+		}
+	}
+
+	if code, _ := post(t, cl, srv.URL+"/api/auth/password", `{"current":"hunter2hunter2","next":"newpassword1"}`); code != 200 {
+		t.Fatalf("password change failed: %d", code)
+	}
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/bootstrap", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: stolen})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a pre-change cookie still authenticates (%d)", resp.StatusCode)
+	}
+}
+
+// A username containing a dot used to produce a cookie that never verified,
+// locking the operator out silently.
+func TestUsernameWithDotCanLogIn(t *testing.T) {
+	for _, name := range []string{"admin.ops", "first.last", "a.b.c"} {
+		srv, _, _ := newBareServer(t)
+		jar, _ := cookiejar.New(nil)
+		cl := &http.Client{Jar: jar}
+
+		code, _ := post(t, cl, srv.URL+"/api/auth/setup",
+			`{"username":"`+name+`","password":"hunter2hunter2"}`)
+		if code != 200 {
+			t.Fatalf("%s: setup %d", name, code)
+		}
+		if code := getJSONWith(t, cl, srv.URL+"/api/bootstrap", nil); code != 200 {
+			t.Errorf("%s: the session issued by setup was rejected (%d)", name, code)
+		}
+
+		// And a fresh login works too.
+		jar2, _ := cookiejar.New(nil)
+		cl2 := &http.Client{Jar: jar2}
+		if code, _ := post(t, cl2, srv.URL+"/api/auth/login",
+			`{"username":"`+name+`","password":"hunter2hunter2"}`); code != 200 {
+			t.Fatalf("%s: login %d", name, code)
+		}
+		if code := getJSONWith(t, cl2, srv.URL+"/api/bootstrap", nil); code != 200 {
+			t.Errorf("%s: login returned 200 but the session is rejected (%d)", name, code)
+		}
+	}
+}
+
+// Concurrent setup requests must not each create an admin.
+func TestConcurrentSetupCreatesOneAdmin(t *testing.T) {
+	srv, st, _ := newBareServer(t)
+
+	var wg sync.WaitGroup
+	var ok int32
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			jar, _ := cookiejar.New(nil)
+			cl := &http.Client{Jar: jar}
+			code, _ := post(t, cl, srv.URL+"/api/auth/setup",
+				`{"username":"admin`+strconv.Itoa(i)+`","password":"hunter2hunter2"}`)
+			if code == 200 {
+				atomic.AddInt32(&ok, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	n, err := st.CountAdmins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("concurrent setup created %d admins (want 1)", n)
+	}
+	if ok != 1 {
+		t.Errorf("%d setup requests reported success (want 1)", ok)
+	}
+}
+
+func mustParse(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
