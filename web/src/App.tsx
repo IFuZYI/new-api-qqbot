@@ -3,7 +3,7 @@ import { api, type AuthState, type Bootstrap, type CheckResult, type Config, typ
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Combobox, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -805,10 +805,12 @@ function RebindDialog({
   const [qq, setQQ] = useState(member.qq ? String(member.qq) : '')
   const [accountID, setAccountID] = useState(member.newapi_user_id ? String(member.newapi_user_id) : '')
 
-  // QQ candidates: every known member/left row, plus the row itself.
+  // QQ candidates: every known member/left row, plus the row itself. keywords
+  // carry the nickname so the operator can search by name instead of the number
+  // the label leads with.
   const qqOptions = members
     .filter((m) => m.qq > 0)
-    .map((m) => ({ value: String(m.qq), label: `${m.qq}${m.nickname ? `（${m.nickname}）` : ''}` }))
+    .map((m) => ({ value: String(m.qq), label: `${m.qq}${m.nickname ? `（${m.nickname}）` : ''}`, keywords: m.nickname }))
   // Account candidates: every known account, plus the row itself. The current
   // selection is kept even if the cache does not list it, so an existing
   // binding can always be re-saved unchanged.
@@ -817,16 +819,18 @@ function RebindDialog({
     .map((m) => ({
       value: String(m.newapi_user_id),
       label: `${m.newapi_username || '—'} #${m.newapi_user_id}${m.newapi_email ? `（${m.newapi_email}）` : ''}`,
+      keywords: `${m.newapi_username || ''} ${m.newapi_user_id} ${m.newapi_email || ''}`,
     }))
   const seenQQ = new Set(qqOptions.map((o) => o.value))
   if (member.qq > 0 && !seenQQ.has(String(member.qq))) {
-    qqOptions.unshift({ value: String(member.qq), label: `${member.qq}（${member.nickname || '—'}）` })
+    qqOptions.unshift({ value: String(member.qq), label: `${member.qq}（${member.nickname || '—'}）`, keywords: member.nickname })
   }
   const seenAcc = new Set(accountOptions.map((o) => o.value))
   if (member.newapi_user_id && !seenAcc.has(String(member.newapi_user_id))) {
     accountOptions.unshift({
       value: String(member.newapi_user_id),
       label: `${member.newapi_username || '—'} #${member.newapi_user_id}`,
+      keywords: `${member.newapi_username || ''} ${member.newapi_user_id} ${member.newapi_email || ''}`,
     })
   }
 
@@ -867,24 +871,10 @@ function RebindDialog({
     >
       <div className="space-y-4">
         <Field label="QQ 号" hint="从群成员里选择">
-          <Select value={qq} onChange={setQQ} className="w-full" ariaLabel="选择 QQ 号">
-            <option value="">请选择</option>
-            {qqOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </Select>
+          <Combobox value={qq} onChange={setQQ} options={qqOptions} ariaLabel="选择 QQ 号" placeholder="搜索 QQ 号或昵称" emptyText="没有匹配的群成员" className="w-full" />
         </Field>
         <Field label="new-api 账号" hint="从已同步的账号里选择；账号邮箱是 qq@qq.com 时通常可自动绑定">
-          <Select value={accountID} onChange={setAccountID} className="w-full" ariaLabel="选择 new-api 账号">
-            <option value="">请选择</option>
-            {accountOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </Select>
+          <Combobox value={accountID} onChange={setAccountID} options={accountOptions} ariaLabel="选择 new-api 账号" placeholder="搜索用户名、账号 ID 或邮箱" emptyText="没有匹配的账号" className="w-full" />
         </Field>
         {accountOptions.length <= 1 && (
           <p className="text-[11px] leading-4 text-muted-foreground">

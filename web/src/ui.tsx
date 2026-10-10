@@ -187,6 +187,18 @@ export function Input({
   )
 }
 
+/**
+ * Select stays a native <select> — the dropdown is the browser's, so it keeps
+ * native keyboard and screen-reader behaviour. The OS arrow is the one part
+ * that cannot be themed, so it is removed (appearance-none) and redrawn from
+ * the tokens; the chevron is pointer-events-none so the whole control stays
+ * clickable.
+ *
+ * The wrapper is inline-block on purpose: in a table cell the control used to
+ * size to its content, and a block wrapper would stretch it across the column.
+ * Inside a Field (a flex column) the wrapper is blockified and stretches, and
+ * the select fills it via w-full — the layout those call sites already had.
+ */
 export function Select({
   value,
   onChange,
@@ -205,16 +217,244 @@ export function Select({
   ariaLabel?: string
 }) {
   return (
-    <select
-      id={id}
-      value={value}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      onChange={(e) => onChange(e.target.value)}
-      className={`h-8 max-w-full min-w-0 cursor-pointer rounded-control border border-input bg-background px-2 text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
-    >
-      {children}
-    </select>
+    <div className="relative inline-block max-w-full min-w-0">
+      <select
+        id={id}
+        value={value}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        onChange={(e) => onChange(e.target.value)}
+        className={`block h-8 w-full max-w-full min-w-0 cursor-pointer appearance-none rounded-control border border-input bg-background py-0 pl-2 pr-7 text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
+      >
+        {children}
+      </select>
+      {/* Dims with the control it labels: the select's own disabled:opacity-60 cannot reach a sibling. */}
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 12 12"
+        className={`pointer-events-none absolute top-1/2 right-2 size-3 -translate-y-1/2 text-muted-foreground ${disabled ? 'opacity-60' : ''}`}
+      >
+        <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
+  )
+}
+
+export type ComboOption = {
+  value: string
+  /** Shown in the input once selected, and in the list. */
+  label: string
+  /** Extra strings the filter matches on (email, id, nickname). */
+  keywords?: string
+}
+
+/**
+ * Combobox is a searchable single-select: a text input that opens a filtered
+ * list, for fields whose options are too many to scan (a whole roster) or whose
+ * stored value is not the one the operator recognises (a QQ number vs a name).
+ *
+ * It follows MultiSelect's dropdown rules — outside click and Escape close it,
+ * one box ref, listbox roles, the document listener only while open — and adds
+ * the highlight held in state, because a text input has no native listbox
+ * behaviour to lean on.
+ */
+export function Combobox({
+  value,
+  onChange,
+  options,
+  placeholder,
+  emptyText = '无匹配项',
+  ariaLabel,
+  disabled,
+  id,
+  className = '',
+}: {
+  value: string
+  onChange: (v: string) => void
+  options: ComboOption[]
+  placeholder?: string
+  emptyText?: string
+  ariaLabel?: string
+  disabled?: boolean
+  id?: string
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  // The text is only "live" while the list is open. Closed, the input is
+  // derived from `value` (see `shown`) — so a half-typed filter can never be
+  // left on screen looking like a committed selection, and Escape/blur simply
+  // drop the typed text without extra state juggling.
+  const [text, setText] = useState('')
+  const [hi, setHi] = useState(0)
+  const box = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const uid = useId()
+  const listId = `${uid}-list`
+  const optId = (i: number) => `${uid}-opt-${i}`
+
+  // The caller may hold a value the list does not carry (a stale account), so
+  // the raw value is the fallback label rather than an empty box.
+  const committed = options.find((o) => o.value === value)
+  const committedLabel = committed ? committed.label : value
+  const shown = open ? text : committedLabel
+
+  // An untouched label is not a query: filtering by it would open the list
+  // with only the current row in it, which reads as "there is nothing else".
+  const query = open && text !== committedLabel ? text.trim().toLowerCase() : ''
+  const filtered = query
+    ? options.filter(
+        (o) =>
+          o.label.toLowerCase().includes(query) ||
+          (o.keywords ? o.keywords.toLowerCase().includes(query) : false),
+      )
+    : options
+  // Clamp on read: the option list can shrink under an open dropdown (a sync
+  // finishing), and an out-of-range index would make Enter commit nothing.
+  const hiIdx = filtered.length === 0 ? -1 : Math.min(hi, filtered.length - 1)
+
+  // Close on an outside click, so the dropdown cannot get stuck open. Added
+  // only while open and removed on cleanup, like MultiSelect.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  // Keep the highlighted row in view as the highlight moves — or as typing
+  // re-shapes the list under it.
+  useEffect(() => {
+    if (!open) return
+    box.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [open, hiIdx, text])
+
+  const openList = () => {
+    if (disabled) return
+    setText(committedLabel)
+    setHi(0)
+    setOpen(true)
+    // Select the label so the first keystroke replaces it. This is safe because
+    // the mousedown that opens the list suppresses the browser's caret
+    // placement (see the input's onMouseDown), which would otherwise undo it.
+    input.current?.select()
+  }
+
+  const commit = (opt: ComboOption) => {
+    onChange(opt.value)
+    setOpen(false)
+    setHi(0)
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      if (!open) return
+      // The dialog behind us also closes on Escape; stopping the event here is
+      // what keeps Escape from dismissing the list and the modal together.
+      e.stopPropagation()
+      setOpen(false)
+      setHi(0)
+      return
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault() // the caret must not jump to either end of the text
+      if (!open) {
+        openList()
+        return
+      }
+      if (filtered.length === 0) return
+      const step = e.key === 'ArrowDown' ? 1 : -1
+      setHi((hiIdx + step + filtered.length) % filtered.length)
+      return
+    }
+    if (e.key === 'Enter') {
+      // While the list is open Enter belongs to the list, so it must not reach
+      // an enclosing form and submit it. With no matches there is nothing to
+      // commit: closing would leave the typed filter looking like a selection.
+      if (!open) return
+      e.preventDefault()
+      if (hiIdx < 0) return
+      commit(filtered[hiIdx])
+    }
+  }
+
+  return (
+    <div ref={box} className="relative inline-block max-w-full min-w-0">
+      <input
+        ref={input}
+        id={id}
+        type="text"
+        role="combobox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-activedescendant={open && hiIdx >= 0 ? optId(hiIdx) : undefined}
+        aria-autocomplete="list"
+        aria-label={ariaLabel}
+        autoComplete="off"
+        disabled={disabled}
+        value={shown}
+        placeholder={placeholder}
+        onChange={(e) => {
+          setText(e.target.value)
+          setHi(0)
+          setOpen(true) // typing after Escape reopens the list instead of dead-ending
+        }}
+        onFocus={openList}
+        // The browser's default caret placement runs after focus and would land
+        // *after* openList's select() (measured: caret at the end of the label,
+        // so the first keystroke appends instead of replacing). Taking over the
+        // gesture when closed keeps the label selected; once open the default
+        // is left alone so the caret and drag-select inside the typed filter
+        // still work.
+        onMouseDown={(e) => {
+          if (open || disabled) return
+          e.preventDefault()
+          if (document.activeElement !== input.current) input.current?.focus()
+          else openList()
+        }}
+        onClick={() => {
+          if (!open) openList()
+        }}
+        onBlur={() => setOpen(false)}
+        onKeyDown={onKeyDown}
+        className={`block h-8 w-full max-w-full min-w-0 rounded-control border border-input bg-background px-2.5 text-sm text-foreground transition-colors placeholder:text-muted-foreground hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
+      />
+      {open && (
+        <div
+          id={listId}
+          role="listbox"
+          className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
+        >
+          {filtered.length === 0 ? (
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">{emptyText}</p>
+          ) : (
+            filtered.map((o, i) => (
+              <div
+                key={o.value}
+                id={optId(i)}
+                role="option"
+                aria-selected={i === hiIdx}
+                data-active={i === hiIdx ? 'true' : undefined}
+                // mousedown must not move focus out of the input: blur would
+                // close the list and snap the box back to the committed label
+                // before the click lands, so the click would commit against a
+                // filter that is already gone. Keeping focus here leaves the
+                // click as the only thing that commits.
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setHi(i)}
+                onClick={() => commit(o)}
+                className={`cursor-pointer rounded-sm px-2 py-1.5 text-sm transition-colors ${
+                  i === hiIdx ? 'bg-accent text-accent-foreground' : 'text-foreground'
+                } hover:bg-accent`}
+              >
+                {o.label}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
