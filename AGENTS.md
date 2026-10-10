@@ -44,8 +44,8 @@ works — build the frontend only when you need the UI.
 
 The panel requires a login: on first run the UI asks for an admin username and
 password (minimum 8 characters) and that same form becomes the login afterwards.
-The admin can also be provisioned from the environment — `.env` in the data
-directory (or `QQBOT_ENV_FILE`), or the process environment, via
+The admin can also be provisioned from the environment — `.env` beside the code
+(or `QQBOT_ENV_FILE`), or the process environment, via
 `QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD` — read at startup before the
 server accepts requests, so a fresh instance is never briefly open. The same
 file sets the listen port (`QQBOT_PORT`, a bare port or a full address; an

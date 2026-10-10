@@ -12,7 +12,7 @@ go build -o qqbot ./cmd/qqbot
 ./qqbot -addr :4096 -data data -web web/dist
 ```
 
-监听地址也可由 `data/.env` 的 `QQBOT_PORT` 指定（见下）；显式 `-addr` 参数优先。
+监听地址也可由 `.env` 的 `QQBOT_PORT` 指定（见下）；显式 `-addr` 参数优先。
 
 前端（改了 `web/` 才需要）：
 
@@ -23,17 +23,18 @@ cd web && npm install && npm run build
 首次打开 `http://<host>:4096/` 会要求设置管理账号（本项目自己的账号，与 new-api 无关）。
 之后同一表单用于登录。
 
-管理账号也可以**从环境变量预置**，适合部署时无人值守：在数据目录放 `.env`（或用
-`QQBOT_ENV_FILE` 指定别的路径），写入 `QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD`，
-启动时在服务器开始接受请求**之前**读取，因此新实例不会有一瞬间对先到者敞开。进程环境变量
-优先于文件，容器/systemd 可覆盖文件而不改它。密码留空视为「不改动已有账号」，所以模板里的
-空行不会把面板唯一的门清掉；改密码并重启即重置（密码丢失时的恢复路径）。
+管理账号也可以**从环境变量预置**，适合部署时无人值守：在**仓库根目录**放 `.env`（与
+`.env.example` 同级；也可用 `QQBOT_ENV_FILE` 指定别的路径），写入
+`QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD`，启动时在服务器开始接受请求**之前**读取，
+因此新实例不会有一瞬间对先到者敞开。进程环境变量优先于文件，容器/systemd 可覆盖文件而不改它。
+密码留空视为「不改动已有账号」，所以模板里的空行不会把面板唯一的门清掉；改密码并重启即重置
+（密码丢失时的恢复路径）。
 
 同一个文件里用 `QQBOT_PORT` 配置**面板监听端口**（可写裸端口 `4096`，也可写完整地址
 `:4096` / `127.0.0.1:4096`）。优先级：显式 `-addr` 参数 > 环境变量 > 默认 `:4096`。
 
 ```bash
-# data/.env
+# .env（仓库根目录）
 QQBOT_ADMIN_USERNAME=admin
 QQBOT_ADMIN_PASSWORD=至少8位
 QQBOT_PORT=4096
@@ -47,7 +48,7 @@ QQBOT_PORT=4096
 |---|---|
 | `data/qqbot.db` | 监测群、成员、绑定、签到、分组转换规则、监测设置、管理账号、会话签名密钥、new-api 账号缓存 |
 | `data/config.yaml` | new-api 与 NapCat 的连接配置（权限 0600） |
-| `data/.env` | 可选：管理账号与监听端口的环境变量预置（权限 0600，见上）。不进版本库 |
+| `.env`（仓库根目录） | 可选：管理账号与监听端口的环境变量预置（权限 0600，见上）。不进版本库 |
 
 `config.yaml` 与 WebUI 的「连接配置」是**同一份配置**，两种改法都有效且不会互相覆盖：
 
