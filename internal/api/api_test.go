@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -847,5 +848,63 @@ func TestManualBindWorksWithoutACachedAccount(t *testing.T) {
 	}
 	if resp.Binding.NewAPIEmail != "" {
 		t.Errorf("no cached email to fill, want empty: %q", resp.Binding.NewAPIEmail)
+	}
+}
+
+// Autoconfigure must persist nothing when the NapCat write fails: storing URLs
+// and a token for adapters that were never created would leave the panel
+// claiming a working setup while every sweep fails.
+func TestAutoConfigureNapCatPersistsNothingOnFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "autofail.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := service.New(st, fakeGateway{}, fakeQQ{})
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+
+	// A known-good starting config, so we can prove it is left untouched.
+	before := config.Config{
+		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "pw"},
+		NapCat: config.NapCat{
+			WebUIURL: "http://127.0.0.1:6099", WebUIToken: "wt",
+			OneBotURL: "http://127.0.0.1:3002", OneBotToken: "old-ob-token",
+		},
+	}
+	if err := cfgMgr.Save(before); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(st, svc, cfgMgr, t.TempDir())
+	r.SetNapCatAdmin(&fakeNapCatAdmin{err: errors.New("login rate limit")})
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	resp, err := cl.Post(srv.URL+"/api/auth/setup", "application/json",
+		strings.NewReader(`{"username":"admin","password":"test-password"}`))
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	resp.Body.Close()
+
+	code := postJSONWith(t, cl, srv.URL+"/api/config/napcat/autoconfigure", map[string]any{
+		"webui_url": "http://127.0.0.1:6099", "webui_token": "wt",
+	}, nil)
+	if code != http.StatusBadGateway {
+		t.Errorf("a failed NapCat write must surface as 502, got %d", code)
+	}
+
+	// The stored config must be exactly what it was.
+	got := cfgMgr.MustLoad()
+	if got.NapCat.OneBotURL != before.NapCat.OneBotURL {
+		t.Errorf("onebot url was written despite the failure: %q", got.NapCat.OneBotURL)
+	}
+	if got.NapCat.OneBotToken != before.NapCat.OneBotToken {
+		t.Errorf("adapter token was written despite the failure: %q", got.NapCat.OneBotToken)
+	}
+	if got.NapCat.WebUIToken != before.NapCat.WebUIToken {
+		t.Errorf("webui token changed: %q", got.NapCat.WebUIToken)
 	}
 }
