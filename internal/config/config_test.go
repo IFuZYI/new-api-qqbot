@@ -347,11 +347,19 @@ func TestSectionRevisionsAreIndependent(t *testing.T) {
 
 // Saving one section must leave the other section exactly as it was, so a
 // half-filled form cannot overwrite the half it did not edit.
+//
+// Every field of the untouched half is set to a distinct value and asserted
+// afterwards: pinning only some of them would let a regression that drops the
+// unpinned ones (e.g. a merge that rebuilds NapCat from a partial struct) pass.
 func TestSaveSectionLeavesTheOtherSectionAlone(t *testing.T) {
 	m, _ := newTestManager(t)
 	full := sample()
+	full.NapCat.WebUIURL = "http://127.0.0.1:6099"
+	full.NapCat.WebUIToken = "webui-tok"
 	full.NapCat.OneBotURL = "http://127.0.0.1:3002"
 	full.NapCat.OneBotToken = "ob-tok"
+	full.NapCat.EventWSURL = "ws://127.0.0.1:3001"
+	full.NapCat.EventWSToken = "ws-tok"
 	if err := m.Save(full); err != nil {
 		t.Fatal(err)
 	}
@@ -367,11 +375,44 @@ func TestSaveSectionLeavesTheOtherSectionAlone(t *testing.T) {
 	if got.NewAPI.URL != "https://new.example.com" || got.NewAPI.Password != "pw2" {
 		t.Errorf("gateway section not saved: %+v", got.NewAPI)
 	}
-	if got.NapCat.OneBotURL != "http://127.0.0.1:3002" || got.NapCat.OneBotToken != "ob-tok" {
-		t.Errorf("NapCat section was clobbered by a gateway save: %+v", got.NapCat)
+	want := full.NapCat
+	if got.NapCat != want {
+		t.Errorf("NapCat section was clobbered by a gateway save:\n got %+v\nwant %+v", got.NapCat, want)
 	}
-	if got.NapCat.WebUIURL != "http://127.0.0.1:6099" {
-		t.Errorf("NapCat WebUI URL lost: %q", got.NapCat.WebUIURL)
+}
+
+// The mirror of the test above: saving NapCat must leave every gateway field
+// alone. Without it, a NapCat save that rebuilt the gateway half from a
+// zero-valued struct would go unnoticed.
+func TestSaveSectionNapCatLeavesTheGatewayAlone(t *testing.T) {
+	m, _ := newTestManager(t)
+	full := sample()
+	full.NewAPI.URL = "https://gw.example.com"
+	full.NewAPI.Username = "gw-user"
+	full.NewAPI.Password = "gw-pw"
+	if err := m.Save(full); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.SaveSection(SectionNapCat, Config{
+		NapCat: NapCat{
+			WebUIURL:     "http://127.0.0.1:6099",
+			WebUIToken:   "new-webui",
+			OneBotURL:    "http://127.0.0.1:3002",
+			OneBotToken:  "new-ob",
+			EventWSURL:   "ws://127.0.0.1:3001",
+			EventWSToken: "new-ws",
+		},
+	}); err != nil {
+		t.Fatalf("SaveSection: %v", err)
+	}
+
+	got := m.MustLoad()
+	if got.NapCat.OneBotToken != "new-ob" || got.NapCat.EventWSToken != "new-ws" {
+		t.Errorf("NapCat section not saved: %+v", got.NapCat)
+	}
+	if got.NewAPI != full.NewAPI {
+		t.Errorf("gateway section was clobbered by a NapCat save:\n got %+v\nwant %+v", got.NewAPI, full.NewAPI)
 	}
 }
 

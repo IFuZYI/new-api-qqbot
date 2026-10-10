@@ -554,6 +554,37 @@ func TestConfigReturnsSectionRevisions(t *testing.T) {
 	}
 }
 
+// An empty revision means "no guard". That is deliberate: a client that does
+// not track revisions (or an operator's script) may still save. Pin it so a
+// future change that made the revision mandatory cannot land silently — the
+// WebUI always echoes one, so only a non-browser caller is affected.
+func TestSectionSaveWithoutRevisionIsAllowed(t *testing.T) {
+	srv, _, cl := newTestServer(t)
+
+	// No revision field at all.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat", cfgSectionRequest{
+		Config: config.Config{NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3002"}},
+	}, nil); code != 200 {
+		t.Errorf("a section save with no revision must be accepted, got %d", code)
+	}
+
+	// Explicitly empty is the same thing.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat", cfgSectionRequest{
+		Config:   config.Config{NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3003"}},
+		Revision: "",
+	}, nil); code != 200 {
+		t.Errorf("a section save with an empty revision must be accepted, got %d", code)
+	}
+
+	// A wrong (non-empty) revision is still refused.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat", cfgSectionRequest{
+		Config:   config.Config{NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3004"}},
+		Revision: "not-the-current-revision",
+	}, nil); code != http.StatusConflict {
+		t.Errorf("a stale revision must be refused with 409, got %d", code)
+	}
+}
+
 // A section save guarded by a stale revision of that section must be refused,
 // but a stale revision of the *other* section must not matter.
 func TestSectionSaveGuardsItsOwnRevision(t *testing.T) {
