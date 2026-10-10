@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type AuthState, type Bootstrap, type Config, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
+import { api, type AuthState, type Bootstrap, type Config, type ConfigRevisions, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
@@ -932,18 +932,21 @@ function Connection({
   onRefresh: () => Promise<void>
 }) {
   const [c, setC] = useState<Config | null>(null)
-  const [revision, setRevision] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [revs, setRevs] = useState<ConfigRevisions>({ newapi: '', napcat: '' })
+  const [busy, setBusy] = useState('')
+  const [autoOpen, setAutoOpen] = useState(false)
+
+  const apply = useCallback((r: { config: Config; revisions: ConfigRevisions }) => {
+    setC(r.config)
+    setRevs(r.revisions)
+  }, [])
 
   const load = useCallback(() => {
     api
       .getConfig()
-      .then((r) => {
-        setC(r.config)
-        setRevision(r.revision)
-      })
+      .then((r) => apply(r))
       .catch(onFail)
-  }, [onFail])
+  }, [apply, onFail])
 
   useEffect(() => {
     load()
@@ -951,101 +954,229 @@ function Connection({
 
   if (!c) return <Card title="连接配置">载入中…</Card>
 
-  const save = async () => {
-    setBusy(true)
+  // The two halves save independently, so a half-filled NapCat form can never
+  // block (or overwrite) the gateway, and vice versa.
+  const saveSection = async (section: 'newapi' | 'napcat', label: string) => {
+    setBusy(section)
     try {
-      const r = await api.saveConfig(c, revision)
-      setC(r.config)
-      setRevision(r.revision)
-      onDone('连接配置已保存')
+      const r =
+        section === 'newapi'
+          ? await api.saveNewAPIConfig(c, revs.newapi)
+          : await api.saveNapCatConfig(c, revs.napcat)
+      apply(r)
+      onDone(`${label}已保存`)
       await onRefresh()
     } catch (e) {
       onFail(e)
-      // The config changed underneath us: reload so the operator sees the
-      // current values before deciding what to do.
+      // The section changed underneath us (a hand edit or another tab): reload
+      // so the operator sees the current values before deciding what to do.
       load()
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card
+        title="new-api 管理员账号"
+        actions={
+          <Button kind="primary" disabled={busy !== ''} onClick={() => saveSection('newapi', 'new-api 连接配置')}>
+            {busy === 'newapi' ? '保存中…' : '保存'}
+          </Button>
+        }
+      >
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="URL" hint="例如 https://api.example.com">
+            <Input value={c.newapi.url} onChange={(v) => setC({ ...c, newapi: { ...c.newapi, url: v } })} />
+          </Field>
+          <Field label="账号">
+            <Input
+              value={c.newapi.username}
+              onChange={(v) => setC({ ...c, newapi: { ...c.newapi, username: v } })}
+            />
+          </Field>
+          <Field label="密码" hint="留空或保持 ******** 表示不修改">
+            <Input
+              type="password"
+              value={c.newapi.password}
+              onChange={(v) => setC({ ...c, newapi: { ...c.newapi, password: v } })}
+            />
+          </Field>
+        </div>
+      </Card>
+
+      <Card
+        title="NapCat"
+        actions={
+          <>
+            <Button onClick={() => setAutoOpen(true)} disabled={busy !== ''}>
+              自动配置
+            </Button>
+            <Button kind="primary" disabled={busy !== ''} onClick={() => saveSection('napcat', 'NapCat 连接配置')}>
+              {busy === 'napcat' ? '保存中…' : '保存'}
+            </Button>
+          </>
+        }
+      >
+        <p className="mb-4 text-xs text-muted-foreground">
+          只填 <b>WebUI 地址</b>与 <b>WebUI Token</b>，点「自动配置」即可：服务会登录 NapCat，
+          自动开启 OneBot 的 HTTP 与 WebSocket 适配器，并把下面的 OneBot / 事件地址与 token 一并填好。
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="WebUI 地址" hint="浏览器里打开 NapCat 面板的地址，例如 http://127.0.0.1:6099">
+            <Input
+              value={c.napcat.webui_url}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, webui_url: v } })}
+            />
+          </Field>
+          <Field label="WebUI Token" hint="NapCat 面板的访问 Token；留空或保持 ******** 表示不修改">
+            <Input
+              type="password"
+              value={c.napcat.webui_token}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, webui_token: v } })}
+            />
+          </Field>
+          <Field label="OneBot HTTP URL" hint="巡检调用动作走这里；自动配置会填好">
+            <Input
+              value={c.napcat.onebot_url}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, onebot_url: v } })}
+            />
+          </Field>
+          <Field label="OneBot Token" hint="留空或保持 ******** 表示不修改">
+            <Input
+              type="password"
+              value={c.napcat.onebot_token}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, onebot_token: v } })}
+            />
+          </Field>
+          <Field label="事件 WebSocket URL（可选）" hint="接收新成员进群与绑定指令；留空也能工作，只是反应慢一些">
+            <Input
+              value={c.napcat.event_ws_url}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, event_ws_url: v } })}
+            />
+          </Field>
+          <Field label="事件 WebSocket Token">
+            <Input
+              type="password"
+              value={c.napcat.event_ws_token}
+              onChange={(v) => setC({ ...c, napcat: { ...c.napcat, event_ws_token: v } })}
+            />
+          </Field>
+        </div>
+      </Card>
+
+      {autoOpen && (
+        <AutoConfigureNapCat
+          config={c}
+          revision={revs.napcat}
+          onClose={() => setAutoOpen(false)}
+          onDone={(r) => {
+            apply(r)
+            setAutoOpen(false)
+            onDone('NapCat 已自动配置：OneBot 适配器已开启，连接信息已保存')
+            onRefresh()
+          }}
+          onFail={(e) => {
+            onFail(e)
+            load()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * AutoConfigureNapCat asks only for the WebUI address (and token when it is not
+ * already stored), then lets the server write NapCat's OneBot adapters. The
+ * advanced ports are optional and default to the ones the deployment notes use.
+ */
+function AutoConfigureNapCat({
+  config,
+  revision,
+  onClose,
+  onDone,
+  onFail,
+}: {
+  config: Config
+  revision: string
+  onClose: () => void
+  onDone: (r: { config: Config; revisions: ConfigRevisions }) => void
+  onFail: (e: unknown) => void
+}) {
+  const [url, setURL] = useState(config.napcat.webui_url)
+  const [token, setToken] = useState('')
+  const [httpPort, setHTTPPort] = useState('3002')
+  const [wsPort, setWSPort] = useState('3001')
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      const r = await api.autoConfigureNapCat({
+        webui_url: url,
+        webui_token: token,
+        revision,
+        http_port: Number(httpPort) || 0,
+        ws_port: Number(wsPort) || 0,
+      })
+      onDone(r)
+    } catch (e) {
+      onFail(e)
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <Card
-      title="连接配置"
+    <Modal
+      title="自动配置 NapCat"
+      onClose={onClose}
       actions={
-        <Button kind="primary" disabled={busy} onClick={save}>
-          保存
-        </Button>
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            取消
+          </Button>
+          <Button kind="primary" onClick={run} disabled={busy || url.trim() === ''}>
+            {busy ? '配置中…' : '开始配置'}
+          </Button>
+        </>
       }
     >
-      <div className="space-y-5">
-        <div>
-          <h3 className="mb-3 text-xs font-medium text-muted-foreground">new-api 管理员账号</h3>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="URL">
-              <Input value={c.newapi.url} onChange={(v) => setC({ ...c, newapi: { ...c.newapi, url: v } })} />
-            </Field>
-            <Field label="账号">
-              <Input
-                value={c.newapi.username}
-                onChange={(v) => setC({ ...c, newapi: { ...c.newapi, username: v } })}
-              />
-            </Field>
-            <Field label="密码" hint="留空或保持 ******** 表示不修改">
-              <Input
-                type="password"
-                value={c.newapi.password}
-                onChange={(v) => setC({ ...c, newapi: { ...c.newapi, password: v } })}
-              />
-            </Field>
-          </div>
-        </div>
-
-        <div>
-          <h3 className="mb-3 text-xs font-medium text-muted-foreground">NapCat</h3>
+      <div className="space-y-4">
+        <p className="text-xs text-muted-foreground">
+          服务会用它登录 NapCat，开启 OneBot 的 HTTP 与 WebSocket 适配器（无需重启），并把得到的地址与
+          token 写回「连接配置」。
+        </p>
+        <Field label="WebUI 地址">
+          <Input value={url} onChange={setURL} placeholder="http://127.0.0.1:6099" />
+        </Field>
+        <Field
+          label="WebUI Token"
+          hint={config.napcat.webui_token ? '留空则沿用已保存的 Token' : '首次配置必填'}
+        >
+          <Input type="password" value={token} onChange={setToken} />
+        </Field>
+        <button
+          type="button"
+          className="text-xs text-muted-foreground underline"
+          onClick={() => setShowAdvanced((v) => !v)}
+        >
+          {showAdvanced ? '收起高级选项' : '高级选项（适配器端口）'}
+        </button>
+        {showAdvanced && (
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="WebUI URL" hint="用于读取/改写 OneBot 配置，并在没有 OneBot 适配器时兜底调用">
-              <Input
-                value={c.napcat.webui_url}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, webui_url: v } })}
-              />
+            <Field label="OneBot HTTP 端口">
+              <Input value={httpPort} onChange={setHTTPPort} />
             </Field>
-            <Field label="WebUI Token" hint="留空或保持 ******** 表示不修改">
-              <Input
-                type="password"
-                value={c.napcat.webui_token}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, webui_token: v } })}
-              />
-            </Field>
-            <Field label="OneBot HTTP URL" hint="巡检调用动作走这里，例如 http://127.0.0.1:3002">
-              <Input
-                value={c.napcat.onebot_url}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, onebot_url: v } })}
-              />
-            </Field>
-            <Field label="OneBot Token" hint="留空或保持 ******** 表示不修改">
-              <Input
-                type="password"
-                value={c.napcat.onebot_token}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, onebot_token: v } })}
-              />
-            </Field>
-            <Field label="事件 WebSocket URL（可选）" hint="用于接收新成员进群与绑定指令；留空也能工作，只是反应慢一些">
-              <Input
-                value={c.napcat.event_ws_url}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, event_ws_url: v } })}
-              />
-            </Field>
-            <Field label="事件 WebSocket Token">
-              <Input
-                type="password"
-                value={c.napcat.event_ws_token}
-                onChange={(v) => setC({ ...c, napcat: { ...c.napcat, event_ws_token: v } })}
-              />
+            <Field label="OneBot WebSocket 端口">
+              <Input value={wsPort} onChange={setWSPort} />
             </Field>
           </div>
-        </div>
+        )}
       </div>
-    </Card>
+    </Modal>
   )
 }

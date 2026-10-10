@@ -270,3 +270,186 @@ func TestWebUIGetAndSetOneBotConfig(t *testing.T) {
 		t.Error("SetConfig must send the config as a JSON string, not an object")
 	}
 }
+
+// An operator pastes the address they see in the browser (the panel at
+// .../webui/), but NapCat's API is at the root. The path must be dropped or
+// every call hits the SPA's HTML instead of JSON.
+func TestNormalizeWebUIURLStripsPath(t *testing.T) {
+	cases := map[string]string{
+		"http://localhost:6099/webui/":  "http://localhost:6099",
+		"http://127.0.0.1:6099/webui":   "http://127.0.0.1:6099",
+		"http://127.0.0.1:6099/":        "http://127.0.0.1:6099",
+		"http://127.0.0.1:6099":         "http://127.0.0.1:6099",
+		"127.0.0.1:6099/webui/":         "http://127.0.0.1:6099",
+		"https://napcat.example.com/w/": "https://napcat.example.com",
+	}
+	for in, want := range cases {
+		if got := NormalizeWebUIURL(in); got != want {
+			t.Errorf("NormalizeWebUIURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := NormalizeWebUIURL(""); got != "" {
+		t.Errorf("empty should stay empty, got %q", got)
+	}
+}
+
+func TestWebUIHostExtractsHostname(t *testing.T) {
+	cases := map[string]string{
+		"http://localhost:6099/webui/": "localhost",
+		"http://127.0.0.1:6099":        "127.0.0.1",
+		"napcat.internal:6099":         "napcat.internal",
+		"":                             "127.0.0.1",
+	}
+	for in, want := range cases {
+		if got := WebUIHost(in); got != want {
+			t.Errorf("WebUIHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// EnsureAdapters must turn on both adapters in one write, preserve adapters it
+// does not own, and report the URLs the caller stores.
+func TestEnsureAdaptersWritesBothAdapters(t *testing.T) {
+	var setConfig string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{` +
+				`"httpServers":[],"websocketServers":[],` +
+				`"websocketClients":[{"name":"someone-elses","enable":true,"url":"ws://x"}]}}}`))
+		case "/api/OB11Config/SetConfig":
+			var body map[string]string
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			setConfig = body["config"]
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+
+	res, err := c.EnsureAdapters(AdapterOptions{ConnectHost: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	if res.Token == "" || len(res.Token) != 32 {
+		t.Errorf("expected a 32-hex token, got %q", res.Token)
+	}
+	if res.OneBotURL != "http://127.0.0.1:3002" {
+		t.Errorf("onebot url = %q", res.OneBotURL)
+	}
+	if res.EventWSURL != "ws://127.0.0.1:3001" {
+		t.Errorf("event ws url = %q", res.EventWSURL)
+	}
+
+	var sent struct {
+		Network map[string][]map[string]any `json:"network"`
+	}
+	if err := json.Unmarshal([]byte(setConfig), &sent); err != nil {
+		t.Fatalf("sent config is not JSON: %v\n%s", err, setConfig)
+	}
+	http := sent.Network["httpServers"]
+	ws := sent.Network["websocketServers"]
+	if len(http) != 1 || http[0]["name"] != HTTPAdapterName || http[0]["enable"] != true {
+		t.Errorf("http adapter not enabled: %+v", http)
+	}
+	if http[0]["token"] != res.Token {
+		t.Errorf("http adapter token mismatch: %+v", http[0])
+	}
+	if len(ws) != 1 || ws[0]["name"] != WSAdapterName || ws[0]["enable"] != true {
+		t.Errorf("ws adapter not enabled: %+v", ws)
+	}
+	if ws[0]["enableForcePushEvent"] != true {
+		t.Errorf("ws adapter must push events: %+v", ws[0])
+	}
+	// The operator's own adapter must survive.
+	if len(sent.Network["websocketClients"]) != 1 {
+		t.Errorf("an unrelated adapter was dropped: %+v", sent.Network["websocketClients"])
+	}
+}
+
+// A re-run must not rotate the token out from under a live client, and must not
+// duplicate the adapters.
+func TestEnsureAdaptersReusesTokenAndIsIdempotent(t *testing.T) {
+	const existing = "test-onebot-token-not-a-real-secret"
+	var sent struct {
+		Network map[string][]map[string]any `json:"network"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{` +
+				`"httpServers":[{"name":"` + HTTPAdapterName + `","enable":true,"port":3002,"host":"127.0.0.1","token":"` + existing + `"}],` +
+				`"websocketServers":[{"name":"` + WSAdapterName + `","enable":true,"host":"127.0.0.1","port":3001,"token":"` + existing + `"}]}}}`))
+		case "/api/OB11Config/SetConfig":
+			var body map[string]string
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			_ = json.Unmarshal([]byte(body["config"]), &sent)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+
+	res, err := c.EnsureAdapters(AdapterOptions{ConnectHost: "localhost"})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	if res.Token != existing {
+		t.Errorf("token rotated: got %q, want %q", res.Token, existing)
+	}
+	if n := len(sent.Network["httpServers"]); n != 1 {
+		t.Errorf("http adapters duplicated: %d", n)
+	}
+	if n := len(sent.Network["websocketServers"]); n != 1 {
+		t.Errorf("ws adapters duplicated: %d", n)
+	}
+	// The reported URL uses the host the operator gave, not the bind host.
+	if res.OneBotURL != "http://localhost:3002" {
+		t.Errorf("onebot url = %q", res.OneBotURL)
+	}
+}
+
+// EnsureAdapters must not trample a custom port the operator already set on our
+// own adapter... unless they asked for one; here we pass a port and expect it.
+func TestEnsureAdaptersHonoursRequestedPorts(t *testing.T) {
+	var sent struct {
+		Network map[string][]map[string]any `json:"network"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{"httpServers":[],"websocketServers":[]}}}`))
+		case "/api/OB11Config/SetConfig":
+			var body map[string]string
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			_ = json.Unmarshal([]byte(body["config"]), &sent)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+	res, err := c.EnsureAdapters(AdapterOptions{ConnectHost: "127.0.0.1", HTTPPort: 4002, WSPort: 4001})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	if sent.Network["httpServers"][0]["port"] != float64(4002) {
+		t.Errorf("http port not applied: %+v", sent.Network["httpServers"][0])
+	}
+	if sent.Network["websocketServers"][0]["port"] != float64(4001) {
+		t.Errorf("ws port not applied: %+v", sent.Network["websocketServers"][0])
+	}
+	if res.OneBotURL != "http://127.0.0.1:4002" {
+		t.Errorf("onebot url = %q", res.OneBotURL)
+	}
+}

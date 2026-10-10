@@ -77,3 +77,4 @@
 - `docs/adr/0005-rules-driven-conversion.md` — 分组转换由规则驱动
 - `docs/adr/0006-admin-credential-from-env.md` — 管理账号与监听端口可由环境变量预置
 - `docs/adr/0007-user-directory-both-keys.md` — 用户目录以 QQ 与 new-api 账号双键取并集
+- `docs/adr/0008-connection-config-split-and-napcat-autoconfig.md` — 连接配置分区块保存，NapCat 按 WebUI 地址自动配置

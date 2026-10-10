@@ -314,6 +314,117 @@ func TestRevisionTracksContent(t *testing.T) {
 	}
 }
 
+// The two connection cards are guarded separately: saving the gateway must not
+// make an open NapCat card look stale (and vice versa). That only works if the
+// section revisions are independent.
+func TestSectionRevisionsAreIndependent(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.Save(sample()); err != nil {
+		t.Fatal(err)
+	}
+	newapiRev := m.SectionRevision(SectionNewAPI)
+	napcatRev := m.SectionRevision(SectionNapCat)
+	if newapiRev == "" || napcatRev == "" {
+		t.Fatal("section revisions must be non-empty")
+	}
+	if newapiRev == napcatRev {
+		t.Error("the two sections must hash differently")
+	}
+
+	// Change only the gateway: its revision moves, the NapCat one does not.
+	changed := sample()
+	changed.NewAPI.URL = "https://changed.example.com"
+	if err := m.Save(changed); err != nil {
+		t.Fatal(err)
+	}
+	if m.SectionRevision(SectionNewAPI) == newapiRev {
+		t.Error("gateway revision did not move after a gateway change")
+	}
+	if m.SectionRevision(SectionNapCat) != napcatRev {
+		t.Error("changing the gateway must not move the NapCat revision")
+	}
+}
+
+// Saving one section must leave the other section exactly as it was, so a
+// half-filled form cannot overwrite the half it did not edit.
+func TestSaveSectionLeavesTheOtherSectionAlone(t *testing.T) {
+	m, _ := newTestManager(t)
+	full := sample()
+	full.NapCat.OneBotURL = "http://127.0.0.1:3002"
+	full.NapCat.OneBotToken = "ob-tok"
+	if err := m.Save(full); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save only the gateway, with a zeroed NapCat half (as the WebUI does).
+	if err := m.SaveSection(SectionNewAPI, Config{
+		NewAPI: NewAPI{URL: "https://new.example.com", Username: "u2", Password: "pw2"},
+	}); err != nil {
+		t.Fatalf("SaveSection: %v", err)
+	}
+
+	got := m.MustLoad()
+	if got.NewAPI.URL != "https://new.example.com" || got.NewAPI.Password != "pw2" {
+		t.Errorf("gateway section not saved: %+v", got.NewAPI)
+	}
+	if got.NapCat.OneBotURL != "http://127.0.0.1:3002" || got.NapCat.OneBotToken != "ob-tok" {
+		t.Errorf("NapCat section was clobbered by a gateway save: %+v", got.NapCat)
+	}
+	if got.NapCat.WebUIURL != "http://127.0.0.1:6099" {
+		t.Errorf("NapCat WebUI URL lost: %q", got.NapCat.WebUIURL)
+	}
+}
+
+// A section save must keep the stored secret when the form sends the redaction
+// placeholder or an empty value.
+func TestSaveSectionKeepsSecrets(t *testing.T) {
+	m, _ := newTestManager(t)
+	full := sample()
+	full.NewAPI.Password = "real-pw"
+	full.NapCat.WebUIToken = "real-webui"
+	full.NapCat.OneBotToken = "real-ob"
+	if err := m.Save(full); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.SaveSection(SectionNewAPI, Config{NewAPI: NewAPI{
+		URL: "https://api.fuzy.site", Username: "napcat", Password: RedactedPassword,
+	}}); err != nil {
+		t.Fatalf("SaveSection newapi: %v", err)
+	}
+	if err := m.SaveSection(SectionNapCat, Config{NapCat: NapCat{
+		WebUIURL: "http://127.0.0.1:6099", WebUIToken: RedactedPassword,
+		OneBotURL: "http://127.0.0.1:3002", OneBotToken: "",
+	}}); err != nil {
+		t.Fatalf("SaveSection napcat: %v", err)
+	}
+
+	got := m.MustLoad()
+	if got.NewAPI.Password != "real-pw" {
+		t.Errorf("gateway password lost: %q", got.NewAPI.Password)
+	}
+	if got.NapCat.WebUIToken != "real-webui" || got.NapCat.OneBotToken != "real-ob" {
+		t.Errorf("a NapCat token was lost: %+v", got.NapCat)
+	}
+}
+
+// A section save must still validate its own half.
+func TestSaveSectionValidates(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.Save(sample()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SaveSection(SectionNewAPI, Config{NewAPI: NewAPI{URL: "not-a-url", Username: "u", Password: "p"}}); err == nil {
+		t.Error("an invalid gateway URL must be rejected")
+	}
+	if err := m.SaveSection(SectionNapCat, Config{NapCat: NapCat{}}); err == nil {
+		t.Error("a NapCat section with no transport must be rejected")
+	}
+	if err := m.SaveSection("nonsense", sample()); err == nil {
+		t.Error("an unknown section must be rejected")
+	}
+}
+
 // Adding or fixing one line in the file must not silently drop the fields the
 // file does not mention - the password and the tokens in particular.
 func TestPartialFileMergesInsteadOfWiping(t *testing.T) {

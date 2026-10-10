@@ -7,6 +7,7 @@ package napcat
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -227,12 +228,47 @@ type WebUI struct {
 }
 
 // NewWebUI builds a WebUI client for e.g. http://127.0.0.1:6099.
+//
+// The address is normalised to its origin first. Operators paste the address
+// they see in the browser - which is the panel at .../webui/ - but NapCat's API
+// lives at the root (/api/...), so a path is stripped rather than carried into
+// every request. Without this, every call would hit .../webui/api/... and get
+// the SPA's HTML back instead of JSON.
 func NewWebUI(baseURL, token string) *WebUI {
 	return &WebUI{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: NormalizeWebUIURL(baseURL),
 		token:   token,
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// NormalizeWebUIURL reduces a NapCat WebUI address to its origin
+// (scheme://host[:port]). A value without a scheme gets http://, since the
+// panel is normally plain HTTP on the loopback interface.
+func NormalizeWebUIURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// WebUIHost returns the host part of a NapCat WebUI address, for building the
+// OneBot URLs the adapters will be reached at. It falls back to 127.0.0.1 when
+// the address cannot be parsed.
+func WebUIHost(raw string) string {
+	u, err := url.Parse(NormalizeWebUIURL(raw))
+	if err != nil || u.Hostname() == "" {
+		return "127.0.0.1"
+	}
+	return u.Hostname()
 }
 
 // SetCredential installs a previously obtained credential.
@@ -439,6 +475,184 @@ func (w *WebUI) EnableHTTPServer(name, host string, port int, token string) erro
 	}
 	cfg.Network["httpServers"] = raw
 	return w.SetOneBotConfig(cfg)
+}
+
+// Adapter names this service owns. They are stable so a re-run replaces its own
+// adapters in place instead of piling up duplicates, and so an unrelated
+// adapter the operator configured is left alone.
+const (
+	HTTPAdapterName = "qqbot-http"
+	WSAdapterName   = "qqbot-ws"
+)
+
+// Default adapter ports. They match the ones the deployment notes record.
+const (
+	DefaultHTTPPort = 3002
+	DefaultWSPort   = 3001
+)
+
+// AdapterOptions configures EnsureAdapters.
+type AdapterOptions struct {
+	// Token authenticates the adapters. When empty, the token already on this
+	// service's adapters is reused (so a re-run does not rotate the secret out
+	// from under a live client); when there is none either, a fresh one is
+	// generated.
+	Token string
+	// ConnectHost is the host this service uses to reach NapCat, taken from the
+	// WebUI URL the operator pasted (e.g. "localhost"). It only shapes the URLs
+	// returned; the adapters themselves bind on BindHost.
+	ConnectHost string
+	// BindHost is the interface the adapters listen on. Defaults to 127.0.0.1:
+	// the OneBot adapters must not be exposed beyond the host.
+	BindHost string
+	HTTPPort int
+	WSPort   int
+}
+
+// AdapterResult is what the caller stores as its own NapCat connection settings.
+type AdapterResult struct {
+	Token      string `json:"token"`
+	OneBotURL  string `json:"onebot_url"`
+	EventWSURL string `json:"event_ws_url"`
+}
+
+// EnsureAdapters turns on the OneBot HTTP and WebSocket server adapters this
+// service needs, in one hot write, and reports the URLs and token to store.
+//
+// This is what makes "give me the WebUI URL and I'll set up the rest" true:
+// the operator supplies only the WebUI address and its token, and NapCat's
+// OneBot config is written for them (no manual editing, no restart - NapCat
+// saves and reloads the network adapters in place). Adapters this service does
+// not own are preserved, and the existing token is reused on a re-run so a
+// running client is not locked out.
+func (w *WebUI) EnsureAdapters(opts AdapterOptions) (*AdapterResult, error) {
+	if opts.BindHost == "" {
+		opts.BindHost = "127.0.0.1"
+	}
+	if opts.ConnectHost == "" {
+		opts.ConnectHost = opts.BindHost
+	}
+	if opts.HTTPPort == 0 {
+		opts.HTTPPort = DefaultHTTPPort
+	}
+	if opts.WSPort == 0 {
+		opts.WSPort = DefaultWSPort
+	}
+
+	cfg, err := w.GetOneBotConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	token := strings.TrimSpace(opts.Token)
+	if token == "" {
+		token = adapterToken(cfg, "httpServers", HTTPAdapterName)
+	}
+	if token == "" {
+		token = adapterToken(cfg, "websocketServers", WSAdapterName)
+	}
+	if token == "" {
+		token, err = generateAdapterToken()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	httpAdapters, err := decodeAdapters(cfg.Network["httpServers"])
+	if err != nil {
+		return nil, err
+	}
+	httpAdapters = upsertAdapter(httpAdapters, HTTPAdapterName, map[string]any{
+		"name": HTTPAdapterName, "enable": true, "port": opts.HTTPPort, "host": opts.BindHost,
+		"enableCors": true, "enableWebsocket": false,
+		"messagePostFormat": "array", "token": token, "debug": false,
+	})
+	if cfg.Network == nil {
+		cfg.Network = map[string]json.RawMessage{}
+	}
+	cfg.Network["httpServers"] = mustJSON(httpAdapters)
+
+	wsAdapters, err := decodeAdapters(cfg.Network["websocketServers"])
+	if err != nil {
+		return nil, err
+	}
+	wsAdapters = upsertAdapter(wsAdapters, WSAdapterName, map[string]any{
+		"name": WSAdapterName, "enable": true, "host": opts.BindHost, "port": opts.WSPort,
+		"messagePostFormat": "array", "reportSelfMessage": false,
+		"token": token, "enableForcePushEvent": true, "debug": false,
+		"heartInterval": 30000,
+	})
+	cfg.Network["websocketServers"] = mustJSON(wsAdapters)
+
+	if err := w.SetOneBotConfig(cfg); err != nil {
+		return nil, err
+	}
+	return &AdapterResult{
+		Token:      token,
+		OneBotURL:  fmt.Sprintf("http://%s:%d", opts.ConnectHost, opts.HTTPPort),
+		EventWSURL: fmt.Sprintf("ws://%s:%d", opts.ConnectHost, opts.WSPort),
+	}, nil
+}
+
+// decodeAdapters reads one adapter list. A missing or empty list is not an
+// error: the group simply has no adapters of that kind yet.
+func decodeAdapters(raw json.RawMessage) ([]map[string]any, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var out []map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode adapters: %w", err)
+	}
+	return out, nil
+}
+
+// upsertAdapter replaces the adapter with this name (keeping its position) or
+// appends it, so a re-run is idempotent and unrelated adapters survive.
+func upsertAdapter(list []map[string]any, name string, want map[string]any) []map[string]any {
+	for i, a := range list {
+		if s, _ := a["name"].(string); s == name {
+			list[i] = want
+			return list
+		}
+	}
+	return append(list, want)
+}
+
+// adapterToken returns the token on the named adapter, or "" when there is none.
+func adapterToken(cfg *OneBotConfig, list, name string) string {
+	adapters, err := decodeAdapters(cfg.Network[list])
+	if err != nil {
+		return ""
+	}
+	for _, a := range adapters {
+		if s, _ := a["name"].(string); s == name {
+			if t, _ := a["token"].(string); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// mustJSON marshals a value that is known to be JSON-encodable (maps of strings
+// and numbers), returning a null literal rather than panicking if it is not.
+func mustJSON(v any) json.RawMessage {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return raw
+}
+
+// generateAdapterToken returns a fresh 32-hex-character token, matching the
+// shape NapCat itself generates.
+func generateAdapterToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate adapter token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ParseWSURL normalises a user-entered WebSocket URL.

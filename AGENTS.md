@@ -129,6 +129,11 @@ below) and never as part of `go test`.
 - **NapCat's WebUI credential is signed with a per-process secret** unless
   `NAPCAT_WEBUI_JWT_SECRET_KEY` is set, so it dies with the NapCat process and
   must be re-obtained (tolerating the login rate limit) after a restart.
+- **A NapCat WebUI address is normalised to its origin before use.** Operators
+  paste the address in the browser bar, which is the panel at `.../webui/`, but
+  NapCat's API lives at the root (`/api/...`); a carried path makes every call
+  hit the SPA's HTML instead of JSON. `napcat.NormalizeWebUIURL` strips it, and
+  the connection page's auto-configure is what wires the OneBot adapters up.
 - **`get_group_signed_list` errors when a group has no sign-in board**, and
   returns only today's page. Treat it as a union across polls; a group without a
   board is normal, not a failure — the client reports it as

@@ -234,6 +234,78 @@ func (m *Manager) Save(c Config) error {
 	return m.writeFile(c)
 }
 
+// Section names identify the two independently-editable halves of the
+// configuration. The WebUI saves them separately so a change to one cannot
+// write the other back from a stale form (which is how a hand edit used to be
+// lost), and so a broken NapCat setting never blocks saving the gateway.
+const (
+	SectionNewAPI = "newapi"
+	SectionNapCat = "napcat"
+)
+
+// SectionRevision returns a revision scoped to one section.
+//
+// A single whole-config revision would be wrong here: saving the gateway would
+// change it and make an open NapCat form look stale (and vice versa), producing
+// spurious conflicts. Hashing just the section means each form is only told
+// "no" when its own half actually moved.
+func (m *Manager) SectionRevision(section string) string {
+	c := m.MustLoad()
+	var raw []byte
+	var err error
+	switch section {
+	case SectionNewAPI:
+		raw, err = yaml.Marshal(c.NewAPI)
+	case SectionNapCat:
+		raw, err = yaml.Marshal(c.NapCat)
+	default:
+		return ""
+	}
+	if err != nil {
+		return ""
+	}
+	return hashBytes(raw)
+}
+
+// SaveSection replaces one section, leaving the other untouched.
+//
+// It re-reads the effective configuration first, so a hand edit to the other
+// section (or to this one, caught earlier by the revision guard) is preserved
+// rather than overwritten with the form's stale copy. The redaction placeholder
+// keeps the stored secret when the operator did not retype it.
+func (m *Manager) SaveSection(section string, in Config) error {
+	cur := m.MustLoad()
+	switch section {
+	case SectionNewAPI:
+		n := in.NewAPI
+		if n.Password == RedactedPassword || n.Password == "" {
+			n.Password = cur.NewAPI.Password
+		}
+		if err := n.Validate(); err != nil {
+			return err
+		}
+		cur.NewAPI = n
+	case SectionNapCat:
+		n := in.NapCat
+		if n.WebUIToken == RedactedPassword || n.WebUIToken == "" {
+			n.WebUIToken = cur.NapCat.WebUIToken
+		}
+		if n.OneBotToken == RedactedPassword || n.OneBotToken == "" {
+			n.OneBotToken = cur.NapCat.OneBotToken
+		}
+		if n.EventWSToken == RedactedPassword || n.EventWSToken == "" {
+			n.EventWSToken = cur.NapCat.EventWSToken
+		}
+		if err := n.Validate(); err != nil {
+			return err
+		}
+		cur.NapCat = n
+	default:
+		return fmt.Errorf("unknown config section %q", section)
+	}
+	return m.Save(cur)
+}
+
 func (m *Manager) saveToStore(c Config) error {
 	if err := m.st.PutSetting(newAPIKey, c.NewAPI); err != nil {
 		return err

@@ -20,6 +20,25 @@ export interface Config {
   napcat: NapCatConfig
 }
 
+/** Per-section revisions, so the two connection cards are guarded separately. */
+export interface ConfigRevisions {
+  newapi: string
+  napcat: string
+}
+
+export interface ConfigResponse {
+  config: Config
+  revision: string
+  revisions: ConfigRevisions
+}
+
+/** What NapCat auto-configuration wired up. */
+export interface NapCatAdapterResult {
+  token: string
+  onebot_url: string
+  event_ws_url: string
+}
+
 export interface Settings {
   member_patrol_enabled: boolean
   member_sync_minutes: number
@@ -198,11 +217,32 @@ export const api = {
     }),
 
   bootstrap: () => req<Bootstrap>('/api/bootstrap'),
-  getConfig: () => req<{ config: Config; revision: string }>('/api/config'),
+  getConfig: () => req<ConfigResponse>('/api/config'),
   saveConfig: (c: Config, revision: string) =>
-    req<{ config: Config; revision: string }>('/api/config', {
+    req<ConfigResponse>('/api/config', {
       method: 'POST',
       body: JSON.stringify({ config: c, revision }),
+    }),
+  /** Save only the gateway half; the NapCat card is left untouched. */
+  saveNewAPIConfig: (c: Config, revision: string) =>
+    req<ConfigResponse>('/api/config/newapi', {
+      method: 'POST',
+      body: JSON.stringify({ config: { newapi: c.newapi }, revision }),
+    }),
+  /** Save only the NapCat half. */
+  saveNapCatConfig: (c: Config, revision: string) =>
+    req<ConfigResponse>('/api/config/napcat', {
+      method: 'POST',
+      body: JSON.stringify({ config: { napcat: c.napcat }, revision }),
+    }),
+  /**
+   * Provision NapCat's OneBot adapters from just its WebUI address, then store
+   * the resulting OneBot/event URLs and token.
+   */
+  autoConfigureNapCat: (body: { webui_url: string; webui_token: string; revision: string; http_port?: number; ws_port?: number }) =>
+    req<ConfigResponse & { napcat: NapCatAdapterResult }>('/api/config/napcat/autoconfigure', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   groups: () => req<{ items: Group[] }>('/api/groups'),

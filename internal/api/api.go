@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"qqbot/internal/config"
+	"qqbot/internal/napcat"
 	"qqbot/internal/service"
 	"qqbot/internal/store"
 )
@@ -22,8 +24,21 @@ type Router struct {
 	cfg *config.Manager
 	mux *http.ServeMux
 
+	// napcatAdmin writes NapCat's OneBot adapters on the connection page's
+	// behalf ("give me the WebUI URL and I'll set up the rest"). Optional: when
+	// unset the auto-configure endpoint reports that it is unavailable, and
+	// every other endpoint is unaffected.
+	napcatAdmin NapCatAdmin
+
 	// setupMu serialises first-run setup (see auth.go).
 	setupMu sync.Mutex
+}
+
+// NapCatAdmin can log in to a NapCat WebUI and write its OneBot adapters. It is
+// an interface so the connection page's auto-configure path is testable without
+// a live NapCat.
+type NapCatAdmin interface {
+	EnsureAdapters(webuiURL, webuiToken string, opts napcat.AdapterOptions) (*napcat.AdapterResult, error)
 }
 
 // NewRouter builds the API router. The WebUI is served from webDist and
@@ -34,6 +49,10 @@ func NewRouter(st *store.Store, svc *service.Service, cfg *config.Manager, webDi
 	r.mux.Handle("/", staticHandler(webDist))
 	return r
 }
+
+// SetNapCatAdmin installs the adapter-provisioning dependency used by the
+// connection page's auto-configure action.
+func (r *Router) SetNapCatAdmin(a NapCatAdmin) { r.napcatAdmin = a }
 
 // Handler returns the root handler.
 func (r *Router) Handler() http.Handler { return r.mux }
@@ -51,6 +70,14 @@ func (r *Router) routes() {
 	r.mux.HandleFunc("GET /api/bootstrap", r.requireAuth(r.bootstrap))
 	r.mux.HandleFunc("GET /api/config", r.requireAuth(r.getConfig))
 	r.mux.HandleFunc("POST /api/config", r.requireAuth(r.saveConfig))
+	// Section-scoped saves: the connection page keeps new-api and NapCat as two
+	// independent cards, so a change to one never writes the other back from a
+	// stale form.
+	r.mux.HandleFunc("POST /api/config/newapi", r.requireAuth(r.saveNewAPIConfig))
+	r.mux.HandleFunc("POST /api/config/napcat", r.requireAuth(r.saveNapCatConfig))
+	// Auto-configure NapCat from just its WebUI address: log in, write the
+	// OneBot adapters, and store the resulting OneBot/event URLs and token.
+	r.mux.HandleFunc("POST /api/config/napcat/autoconfigure", r.requireAuth(r.autoConfigureNapCat))
 
 	r.mux.HandleFunc("GET /api/groups", r.requireAuth(r.listGroups))
 	r.mux.HandleFunc("POST /api/groups", r.requireAuth(r.saveGroups))
@@ -127,10 +154,16 @@ func (r *Router) bootstrap(w http.ResponseWriter, _ *http.Request) {
 
 func (r *Router) getConfig(w http.ResponseWriter, _ *http.Request) {
 	// The revision lets the form detect that the configuration changed (a hand
-	// edit to the file, or another tab) before it overwrites it.
+	// edit to the file, or another tab) before it overwrites it. There is one
+	// per section, so editing the gateway does not make an open NapCat card
+	// look stale (and vice versa).
 	writeJSON(w, 200, map[string]any{
 		"config":   r.cfg.MustLoad().Redacted(),
 		"revision": r.cfg.Revision(),
+		"revisions": map[string]string{
+			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
+			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
+		},
 	})
 }
 
@@ -168,9 +201,146 @@ func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{
-		"config":   cfgIn.Redacted(),
+	writeJSON(w, 200, r.configResponse(cfgIn))
+}
+
+// configResponse is the shape the connection page reads back after a save.
+func (r *Router) configResponse(c config.Config) map[string]any {
+	return map[string]any{
+		"config":   c.Redacted(),
 		"revision": r.cfg.Revision(),
+		"revisions": map[string]string{
+			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
+			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
+		},
+	}
+}
+
+// saveNewAPIConfig writes only the gateway half. The NapCat card is untouched,
+// so a half-filled NapCat form cannot fail (or overwrite) a gateway save.
+func (r *Router) saveNewAPIConfig(w http.ResponseWriter, req *http.Request) {
+	r.saveSection(w, req, config.SectionNewAPI, func(in config.Config) config.Config {
+		return config.Config{NewAPI: in.NewAPI}
+	})
+}
+
+// saveNapCatConfig writes only the NapCat half.
+func (r *Router) saveNapCatConfig(w http.ResponseWriter, req *http.Request) {
+	r.saveSection(w, req, config.SectionNapCat, func(in config.Config) config.Config {
+		return config.Config{NapCat: in.NapCat}
+	})
+}
+
+// saveSection is the shared body of the two section saves: it guards on the
+// section's own revision, applies the change and echoes the new revisions.
+func (r *Router) saveSection(
+	w http.ResponseWriter,
+	req *http.Request,
+	section string,
+	pick func(config.Config) config.Config,
+) {
+	var in struct {
+		Config   config.Config `json:"config"`
+		Revision string        `json:"revision"`
+	}
+	if err := decode(req, &in); err != nil {
+		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	if in.Revision != "" && in.Revision != r.cfg.SectionRevision(section) {
+		writeErr(w, http.StatusConflict, errors.New(
+			"这部分配置已被修改（可能是你手改了 config.yaml，或另一个页面保存过）。请重新载入后再保存。"))
+		return
+	}
+	if err := r.cfg.SaveSection(section, pick(in.Config)); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, r.configResponse(r.cfg.MustLoad()))
+}
+
+// autoConfigureNapCat takes the WebUI address and token the operator typed,
+// logs in, writes the OneBot HTTP + WebSocket adapters NapCat needs, and stores
+// the resulting OneBot URL, event URL and shared token back into the NapCat
+// section. This is the "only the WebUI URL is required" path.
+func (r *Router) autoConfigureNapCat(w http.ResponseWriter, req *http.Request) {
+	if r.napcatAdmin == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("本实例未启用 NapCat 自动配置"))
+		return
+	}
+	var in struct {
+		WebUIURL   string `json:"webui_url"`
+		WebUIToken string `json:"webui_token"`
+		Revision   string `json:"revision"`
+		// Ports are optional; 0 means "use the defaults".
+		HTTPPort int `json:"http_port"`
+		WSPort   int `json:"ws_port"`
+	}
+	if err := decode(req, &in); err != nil {
+		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+
+	cur := r.cfg.MustLoad()
+	// A blank token in the form means "use the stored one", so the operator does
+	// not have to retype the WebUI token to re-run auto-configuration.
+	token := in.WebUIToken
+	if token == "" || token == config.RedactedPassword {
+		token = cur.NapCat.WebUIToken
+	}
+	webuiURL := strings.TrimSpace(in.WebUIURL)
+	if webuiURL == "" {
+		webuiURL = cur.NapCat.WebUIURL
+	}
+	if webuiURL == "" || token == "" {
+		writeErr(w, 400, errors.New("请先填写 NapCat WebUI 地址与 Token"))
+		return
+	}
+	if err := (config.NapCat{WebUIURL: webuiURL, WebUIToken: token}).Validate(); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+
+	res, err := r.napcatAdmin.EnsureAdapters(webuiURL, token, napcat.AdapterOptions{
+		// Reuse the token this service already uses for its adapters, so a
+		// re-run does not rotate it out from under the running patrols.
+		Token:       cur.NapCat.OneBotToken,
+		ConnectHost: napcat.WebUIHost(webuiURL),
+		HTTPPort:    in.HTTPPort,
+		WSPort:      in.WSPort,
+	})
+	if err != nil {
+		writeErr(w, 502, fmt.Errorf("配置 NapCat 失败：%w", err))
+		return
+	}
+
+	// Persist what we just wired up, together with the WebUI settings that made
+	// it possible. The revision guard is applied here too so a concurrent hand
+	// edit is not silently discarded.
+	if in.Revision != "" && in.Revision != r.cfg.SectionRevision(config.SectionNapCat) {
+		writeErr(w, http.StatusConflict, errors.New(
+			"NapCat 配置已被修改，请重新载入后再试。"))
+		return
+	}
+	updated := cur.NapCat
+	updated.WebUIURL = webuiURL
+	updated.WebUIToken = token
+	updated.OneBotURL = res.OneBotURL
+	updated.OneBotToken = res.Token
+	updated.EventWSURL = res.EventWSURL
+	updated.EventWSToken = res.Token
+	if err := r.cfg.SaveSection(config.SectionNapCat, config.Config{NapCat: updated}); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"config":   r.cfg.MustLoad().Redacted(),
+		"revision": r.cfg.Revision(),
+		"revisions": map[string]string{
+			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
+			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
+		},
+		"napcat": res,
 	})
 }
 

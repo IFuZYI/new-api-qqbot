@@ -487,3 +487,223 @@ func TestStaleConfigSaveIsRefused(t *testing.T) {
 		t.Errorf("a save with the current revision must succeed, got %d", code)
 	}
 }
+
+// cfgSectionRequest/cfgSectionResponse mirror the section-scoped save envelope.
+type cfgSectionRequest struct {
+	Config   config.Config `json:"config"`
+	Revision string        `json:"revision"`
+}
+
+type cfgSectionResponse struct {
+	Config    config.Config     `json:"config"`
+	Revision  string            `json:"revision"`
+	Revisions map[string]string `json:"revisions"`
+}
+
+// Saving the gateway must not touch the NapCat half, and vice versa: the two
+// connection cards are independent so a half-filled form cannot clobber the
+// other side.
+func TestConfigSectionSaveIsIndependent(t *testing.T) {
+	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
+
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: config.Config{
+		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "pw"},
+		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "wt"},
+	}}, nil)
+
+	// Save only the gateway (as the new-api card does).
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/newapi", cfgSectionRequest{
+		Config: config.Config{NewAPI: config.NewAPI{
+			URL: "https://new.example.com", Username: "u2", Password: "pw2",
+		}},
+	}, nil); code != 200 {
+		t.Fatalf("section save status %d", code)
+	}
+
+	got := cfgMgr.MustLoad()
+	if got.NewAPI.URL != "https://new.example.com" {
+		t.Errorf("gateway not saved: %q", got.NewAPI.URL)
+	}
+	if got.NapCat.WebUIURL != "http://127.0.0.1:6099" || got.NapCat.WebUIToken != "wt" {
+		t.Errorf("NapCat half clobbered by a gateway save: %+v", got.NapCat)
+	}
+}
+
+// GET /api/config must return a revision per section, so each card can detect a
+// change to its own half without being disturbed by the other.
+func TestConfigReturnsSectionRevisions(t *testing.T) {
+	srv, _, cl := newTestServer(t)
+
+	var got cfgSectionResponse
+	if code := getJSONWith(t, cl, srv.URL+"/api/config", &got); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	if got.Revisions[config.SectionNewAPI] == "" || got.Revisions[config.SectionNapCat] == "" {
+		t.Errorf("both section revisions must be present: %+v", got.Revisions)
+	}
+	if got.Revisions[config.SectionNewAPI] == got.Revisions[config.SectionNapCat] {
+		t.Error("the two section revisions must differ")
+	}
+}
+
+// A section save guarded by a stale revision of that section must be refused,
+// but a stale revision of the *other* section must not matter.
+func TestSectionSaveGuardsItsOwnRevision(t *testing.T) {
+	srv, _, cl := newTestServer(t)
+
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: config.Config{
+		NewAPI: config.NewAPI{URL: "https://one.example.com", Username: "u", Password: "p"},
+		NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3002"},
+	}}, nil)
+
+	var first cfgSectionResponse
+	getJSONWith(t, cl, srv.URL+"/api/config", &first)
+
+	// Somebody changes the NapCat half.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat", cfgSectionRequest{
+		Config:   config.Config{NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3999"}},
+		Revision: first.Revisions[config.SectionNapCat],
+	}, nil); code != 200 {
+		t.Fatalf("napcat save status %d", code)
+	}
+
+	// A gateway save that carries the pre-change gateway revision must still
+	// succeed: the gateway half did not move.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/newapi", cfgSectionRequest{
+		Config:   config.Config{NewAPI: config.NewAPI{URL: "https://two.example.com", Username: "u", Password: "p"}},
+		Revision: first.Revisions[config.SectionNewAPI],
+	}, nil); code != 200 {
+		t.Errorf("a gateway save must not be blocked by a NapCat change, got %d", code)
+	}
+
+	// But a stale NapCat revision must be refused.
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat", cfgSectionRequest{
+		Config:   config.Config{NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3002"}},
+		Revision: first.Revisions[config.SectionNapCat],
+	}, nil); code != http.StatusConflict {
+		t.Errorf("a stale NapCat revision must be refused with 409, got %d", code)
+	}
+}
+
+// fakeNapCatAdmin records what auto-configure was asked to do and returns a
+// canned result, so the endpoint is testable without a live NapCat.
+type fakeNapCatAdmin struct {
+	gotURL   string
+	gotToken string
+	gotOpts  napcat.AdapterOptions
+	err      error
+}
+
+func (f *fakeNapCatAdmin) EnsureAdapters(url, token string, opts napcat.AdapterOptions) (*napcat.AdapterResult, error) {
+	f.gotURL, f.gotToken, f.gotOpts = url, token, opts
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &napcat.AdapterResult{
+		Token:      "aabbccddeeff00112233445566778899",
+		OneBotURL:  "http://127.0.0.1:3002",
+		EventWSURL: "ws://127.0.0.1:3001",
+	}, nil
+}
+
+// The auto-configure endpoint logs in with the supplied WebUI credential, asks
+// for the adapters, and stores the resulting OneBot/event settings.
+func TestAutoConfigureNapCatStoresAdapters(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "auto.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := service.New(st, fakeGateway{}, fakeQQ{})
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+	fake := &fakeNapCatAdmin{}
+	r := NewRouter(st, svc, cfgMgr, t.TempDir())
+	r.SetNapCatAdmin(fake)
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	resp, err := cl.Post(srv.URL+"/api/auth/setup", "application/json",
+		strings.NewReader(`{"username":"admin","password":"test-password"}`))
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	resp.Body.Close()
+
+	if code := postJSONWith(t, cl, srv.URL+"/api/config/napcat/autoconfigure", map[string]any{
+		"webui_url":   "http://127.0.0.1:6099/webui/",
+		"webui_token": "webui-secret",
+	}, nil); code != 200 {
+		t.Fatalf("autoconfigure status %d", code)
+	}
+
+	if fake.gotURL != "http://127.0.0.1:6099/webui/" {
+		t.Errorf("webui url passed through wrong: %q", fake.gotURL)
+	}
+	if fake.gotToken != "webui-secret" {
+		t.Errorf("webui token not passed: %q", fake.gotToken)
+	}
+	if fake.gotOpts.ConnectHost != "127.0.0.1" {
+		t.Errorf("connect host not derived from the webui url: %q", fake.gotOpts.ConnectHost)
+	}
+
+	stored := cfgMgr.MustLoad()
+	if stored.NapCat.OneBotURL != "http://127.0.0.1:3002" {
+		t.Errorf("onebot url not stored: %q", stored.NapCat.OneBotURL)
+	}
+	if stored.NapCat.EventWSURL != "ws://127.0.0.1:3001" {
+		t.Errorf("event ws url not stored: %q", stored.NapCat.EventWSURL)
+	}
+	if stored.NapCat.OneBotToken != "aabbccddeeff00112233445566778899" {
+		t.Errorf("adapter token not stored: %q", stored.NapCat.OneBotToken)
+	}
+	if stored.NapCat.EventWSToken != stored.NapCat.OneBotToken {
+		t.Errorf("event token should match the adapter token")
+	}
+	if stored.NapCat.WebUIToken != "webui-secret" {
+		t.Errorf("webui token not stored: %q", stored.NapCat.WebUIToken)
+	}
+}
+
+// When auto-configure is not wired up, the endpoint says so instead of 404ing
+// or pretending to have done something.
+func TestAutoConfigureNapCatWithoutAdminIsNotImplemented(t *testing.T) {
+	srv, _, cl := newTestServer(t)
+	code := postJSONWith(t, cl, srv.URL+"/api/config/napcat/autoconfigure", map[string]any{
+		"webui_url": "http://127.0.0.1:6099", "webui_token": "t",
+	}, nil)
+	if code != http.StatusNotImplemented {
+		t.Errorf("expected 501 when auto-configure is unavailable, got %d", code)
+	}
+}
+
+// Auto-configure with neither a URL nor a stored one is a client error, not a
+// failed gateway call.
+func TestAutoConfigureNapCatRequiresURL(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "auto2.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := service.New(st, fakeGateway{}, fakeQQ{})
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+	r := NewRouter(st, svc, cfgMgr, t.TempDir())
+	r.SetNapCatAdmin(&fakeNapCatAdmin{})
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	resp, err := cl.Post(srv.URL+"/api/auth/setup", "application/json",
+		strings.NewReader(`{"username":"admin","password":"test-password"}`))
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	resp.Body.Close()
+
+	code := postJSONWith(t, cl, srv.URL+"/api/config/napcat/autoconfigure", map[string]any{}, nil)
+	if code != 400 {
+		t.Errorf("expected 400 when no WebUI URL is known, got %d", code)
+	}
+}

@@ -100,6 +100,7 @@ func main() {
 	}, bindAdapter{svc}).Run(ctx)
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
+	router.SetNapCatAdmin(napcatAdmin{})
 
 	// The admin credential was read from the environment above. Provisioning it
 	// before the server accepts requests means a fresh instance is never
@@ -306,6 +307,22 @@ func (l *lazyQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error
 		return nil, err
 	}
 	return w.GetGroupSignedList(groupID)
+}
+
+// napcatAdmin logs in to a NapCat WebUI and writes its OneBot adapters, which
+// is what the connection page's "auto-configure" button drives.
+type napcatAdmin struct{}
+
+// EnsureAdapters logs in with the supplied WebUI credential and provisions the
+// HTTP + WebSocket adapters. It is stateless: the credential comes from the
+// request, so nothing is cached that could go stale after a NapCat restart
+// (whose WebUI credential is signed with a per-process secret).
+func (napcatAdmin) EnsureAdapters(webuiURL, webuiToken string, opts napcat.AdapterOptions) (*napcat.AdapterResult, error) {
+	w := napcat.NewWebUI(webuiURL, webuiToken)
+	if err := w.Login(); err != nil {
+		return nil, err
+	}
+	return w.EnsureAdapters(opts)
 }
 
 // bindAdapter narrows the service to the one method the event listener needs.
