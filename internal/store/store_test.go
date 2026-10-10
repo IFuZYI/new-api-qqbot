@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -208,5 +209,48 @@ func TestSettingsRoundTrip(t *testing.T) {
 	}
 	if out.Min != 100 || out.Max != 200 {
 		t.Errorf("round trip failed: %+v", out)
+	}
+}
+
+// The member and check-in patrols write from separate goroutines. Without a
+// busy timeout the second writer fails immediately with SQLITE_BUSY and its
+// entire sweep is lost, so concurrent writers must queue instead.
+func TestConcurrentWritersDoNotFailWithBusy(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpsertGroups([]MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 12; j++ {
+				qq := int64(i*1000 + j)
+				if err := s.EnsureMember(1, qq, "n"); err != nil {
+					errs <- err
+					return
+				}
+				if err := s.RecordCheckin(Checkin{QQ: qq, Date: "2026-10-10", GroupID: 1}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a concurrent writer failed: %v", err)
+	}
+
+	ms, err := s.ListMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 96 {
+		t.Errorf("member count = %d, want 96 (writes were lost)", len(ms))
 	}
 }

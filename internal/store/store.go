@@ -109,12 +109,32 @@ var ErrNotFound = gorm.ErrRecordNotFound
 type Store struct{ db *gorm.DB }
 
 // Open opens (creating if needed) the SQLite database at path and migrates it.
+//
+// The pragmas matter: the member and check-in patrols run on separate
+// goroutines and both write, so without a busy timeout the second writer fails
+// the instant the first holds the write lock (SQLITE_BUSY) and its whole sweep
+// is lost. WAL plus a generous busy timeout lets the writers queue instead.
 func Open(path string) (*Store, error) {
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+	dsn := path + "?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		// One connection is the standard SQLite configuration and it is what
+		// makes concurrent writers safe: with two connections, two sweeps can
+		// each hold a read lock and then both try to upgrade, which deadlocks
+		// and the busy timeout does not help. Serialising at the pool removes
+		// that path outright. The workload is small and bursty, so the lost
+		// read parallelism costs nothing.
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(0)
 	}
 	if err := db.AutoMigrate(
 		&MonitoredGroup{}, &Member{}, &MemberGroup{},
