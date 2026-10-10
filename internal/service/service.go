@@ -6,7 +6,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -19,19 +18,15 @@ import (
 // Settings is the operator-configurable state. It is stored as one JSON blob
 // under the "settings" key, so adding a field needs no migration.
 type Settings struct {
-	// Patrol cadence, in minutes. Each is independent: the sign-in board is
-	// today-only and needs a short cycle, the roster does not.
+	// Roster patrol cadence, in minutes. It can be switched off: it is the
+	// backstop, not the only path - the group-increase event records a new
+	// member immediately and the bind command records the member who used it.
 	//
-	// Both patrols can be switched off. They are the backstop, not the only
-	// path: the group-increase event records a new member immediately, the bind
-	// command records the member who used it, and a bind settles the group. The
-	// check-in board, however, has no event at all (NapCat exposes no check-in
-	// notice), so turning the check-in patrol off stops check-ins being
-	// recorded and therefore stops rewards - the UI says so.
-	MemberPatrolEnabled  bool `json:"member_patrol_enabled"`
-	MemberSyncMinutes    int  `json:"member_sync_minutes"`
-	CheckinPatrolEnabled bool `json:"checkin_patrol_enabled"`
-	CheckinSyncMinutes   int  `json:"checkin_sync_minutes"`
+	// There is no check-in cadence any more: a member's message in a monitored
+	// group IS the check-in (see ADR-0009), so nothing about check-ins is
+	// polled or configurable here.
+	MemberPatrolEnabled bool `json:"member_patrol_enabled"`
+	MemberSyncMinutes   int  `json:"member_sync_minutes"`
 
 	// Daily reward, drawn uniformly from [RewardMin, RewardMax] per member per
 	// day. Equal values mean a fixed award.
@@ -45,13 +40,11 @@ type Settings struct {
 // DefaultSettings returns the shipped defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		MemberPatrolEnabled:  true,
-		MemberSyncMinutes:    120,
-		CheckinPatrolEnabled: true,
-		CheckinSyncMinutes:   30,
-		RewardMin:            100,
-		RewardMax:            200,
-		Timezone:             "Asia/Shanghai",
+		MemberPatrolEnabled: true,
+		MemberSyncMinutes:   120,
+		RewardMin:           100,
+		RewardMax:           200,
+		Timezone:            "Asia/Shanghai",
 	}
 }
 
@@ -73,7 +66,6 @@ type Gateway interface {
 type QQ interface {
 	GetGroupList() ([]napcat.Group, error)
 	GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error)
-	GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error)
 }
 
 // Service coordinates the store, the gateway and QQ.
@@ -115,9 +107,6 @@ func withDefaults(in Settings) Settings {
 	if in.MemberSyncMinutes <= 0 {
 		in.MemberSyncMinutes = d.MemberSyncMinutes
 	}
-	if in.CheckinSyncMinutes <= 0 {
-		in.CheckinSyncMinutes = d.CheckinSyncMinutes
-	}
 	if in.Timezone == "" {
 		in.Timezone = d.Timezone
 	}
@@ -151,11 +140,20 @@ func (s *Service) Today() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	loc, err := time.LoadLocation(st.Timezone)
+	return dateIn(time.Now(), st.Timezone), nil
+}
+
+// dateIn renders a moment as a date string in the given timezone. It is the one
+// place "which day is it" is decided, shared by Today and the check-in
+// recording path so both agree on the boundary. An unknown timezone falls back
+// to UTC rather than failing: a bad stored value must not stop check-ins being
+// recorded.
+func dateIn(t time.Time, timezone string) string {
+	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		loc = time.UTC
 	}
-	return time.Now().In(loc).Format("2006-01-02"), nil
+	return t.In(loc).Format("2006-01-02")
 }
 
 // SyncGroups refreshes the stored group list from QQ, keeping the operator's
@@ -207,47 +205,23 @@ func (s *Service) SyncAllMembers() error {
 	return errors.Join(errs...)
 }
 
-// SyncCheckins reads one group's sign-in board for date and records it. The
-// board is today-only and paginated, so repeated calls merge into a union.
-func (s *Service) SyncCheckins(groupID int64, date string) (int, error) {
-	ss, err := s.qq.GetGroupSignedList(groupID)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, m := range ss {
-		if err := s.st.RecordCheckin(store.Checkin{
-			QQ: m.QQ, Date: date, GroupID: groupID, SignedAt: m.Time,
-			// NapCat's rank is fractional (see flexFloat); it is display-only,
-			// so round it for storage rather than rejecting the row.
-			Rank: int(math.Round(float64(m.Rank))),
-		}); err != nil {
-			return n, err
-		}
-		n++
-	}
-	return n, nil
-}
-
-// SyncAllCheckins sweeps the sign-in boards of every enabled group.
-func (s *Service) SyncAllCheckins(date string) error {
-	gs, err := s.st.EnabledGroups()
+// RecordCheckinByMessage records a check-in observed as a group message. A
+// member sending any message in a monitored group is the definition (see
+// ADR-0009), so there is no board to read, no rank to store, and no filtering:
+// the event listener is the sole caller.
+//
+// The date is resolved from the message's arrival time in the configured
+// timezone, the same rule Today() uses. Recording is an upsert on (qq, date),
+// so the day's many messages collapse into one row and a repeat message is
+// idempotent by construction.
+func (s *Service) RecordCheckinByMessage(groupID, qq int64, at time.Time) error {
+	cfg, err := s.Settings()
 	if err != nil {
 		return err
 	}
-	var errs []error
-	for _, g := range gs {
-		if _, err := s.SyncCheckins(g.GroupID, date); err != nil {
-			// A group with no sign-in board is normal, not a failure: reporting
-			// it would leave the check-in patrol permanently red whenever any
-			// monitored group lacks a board.
-			if errors.Is(err, napcat.ErrNoSigninBoard) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("group %d: %w", g.GroupID, err))
-		}
-	}
-	return errors.Join(errs...)
+	return s.st.RecordCheckin(store.Checkin{
+		QQ: qq, Date: dateIn(at, cfg.Timezone), GroupID: groupID, SignedAt: at.Unix(),
+	})
 }
 
 // BindResult summarizes one auto-binding pass.

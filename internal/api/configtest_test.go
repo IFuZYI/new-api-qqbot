@@ -208,8 +208,9 @@ func TestTestNapCatProbesEachTransportSeparately(t *testing.T) {
 	}
 }
 
-// An unconfigured transport is skipped, not failed: without an event socket the
-// service still works (ADR-0003), so calling it a failure would be misleading.
+// An unconfigured transport is skipped, not failed. For the event socket that
+// is a real limitation (check-ins depend on it, ADR-0009), but it is still not
+// a *failed probe* - the UI's detail copy is what warns the operator.
 func TestTestNapCatSkipsUnconfiguredTransports(t *testing.T) {
 	fake := &fakeProber{onebotInfo: &napcat.LoginInfo{UserID: 123, Nickname: "bot"}}
 	srv, cl, _ := newProbeEnv(t, fake)

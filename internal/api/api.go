@@ -654,18 +654,6 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"rules": res})
 
-	case "checkin":
-		if err := r.svc.SyncAllCheckins(date); err != nil {
-			writeErr(w, 502, err)
-			return
-		}
-		cs, err := r.st.CheckinsOn(date)
-		if err != nil {
-			writeErr(w, 500, err)
-			return
-		}
-		writeJSON(w, 200, map[string]any{"date": date, "checked": len(cs)})
-
 	case "award":
 		res, err := r.svc.Award(date)
 		if err != nil {

@@ -15,7 +15,7 @@
 | 注册已关、Turnstile 关、密码登录开、new-api 自己的签到关 | `GET /api/status` |
 | 机器人 `3688665216`（fuzy）在线，在群 `1129535731`（3 人） | OneBot `get_group_list` / `get_login_info` |
 | NapCat WebUI 有直连 OneBot 桥，且 OneBot 配置可**热改**（无需重启） | `POST /api/Debug/call`；`/api/OB11Config/SetConfig` → `save`+`reloadNetwork` |
-| NapCat **没有签到事件**，打卡只能轮询 `get_group_signed_list` | 事件目录无签到类事件 |
+| NapCat **没有签到事件**，但群消息事件就是打卡的来源（见 ADR-0009） | 事件目录无签到类事件；`message` 事件带 `group_id`/`user_id` |
 
 ## 权限决定：只用 Admin，不提 root
 
@@ -51,9 +51,12 @@
 
 ## 巡检
 
-轮询是唯一真相来源，各自独立周期（见 ADR-0003）：用户列表 2h、打卡榜单 30min，都可配。
-打卡按 `(qq, 日期)` 做**并集**去重。OneBot 事件只用于加速（如 `group_increase`），
-不参与正确性论证。
+**群成员与群列表**仍以轮询为唯一真相来源（见 ADR-0003）：用户列表 2h，可配。成员巡检与
+`group_increase` 事件共同保证成员最终一致。
+
+**打卡不再轮询**：定义改为「成员在监测群发出任意一条消息」，只从事件 WebSocket 记录（见
+ADR-0009）。事件流断开期间会漏打卡，这是明确接受的代价；发奖固定每分钟跑一次。打卡按
+`(qq, 日期)` 幂等入库。
 
 ## 本机 NapCat 已完成的配置
 
@@ -72,9 +75,10 @@
 - `GLOSSARY.md` — 领域术语
 - `docs/adr/0001-napcat-webui-onebot-bridge.md` — 走 WebUI 的 OneBot 桥
 - `docs/adr/0002-binding-owned-locally.md` — 绑定存本库，new-api 只读
-- `docs/adr/0003-polling-authoritative-events-optional.md` — 巡检是唯一真相来源
+- `docs/adr/0003-polling-authoritative-events-optional.md` — 巡检是唯一真相来源（打卡部分已被 0009 取代）
 - `docs/adr/0004-reward-random-range.md` — 奖励区间随机
 - `docs/adr/0005-rules-driven-conversion.md` — 分组转换由规则驱动
 - `docs/adr/0006-admin-credential-from-env.md` — 管理账号与监听端口可由环境变量预置
 - `docs/adr/0007-user-directory-both-keys.md` — 用户目录以 QQ 与 new-api 账号双键取并集
 - `docs/adr/0008-connection-config-split-and-napcat-autoconfig.md` — 连接配置分区块保存，NapCat 按 WebUI 地址自动配置
+- `docs/adr/0009-checkin-by-group-message.md` — 打卡 = 在监测群发言，签到榜轮询删除

@@ -40,9 +40,6 @@ func (fakeQQ) GetGroupList() ([]napcat.Group, error) {
 func (fakeQQ) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error) {
 	return []napcat.GroupMember{{QQ: 54321, Nickname: "alice", Card: "爱丽丝"}}, nil
 }
-func (fakeQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
-	return []napcat.SignedMember{{QQ: 54321, Nick: "爱丽丝", Rank: 1, Time: 1791630000}}, nil
-}
 
 // testEnv is an authenticated test server: the cookie jar carries the session
 // created by first-run setup.

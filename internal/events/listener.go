@@ -1,10 +1,8 @@
 // Package events listens on NapCat's OneBot WebSocket for push events and acts
-// on them. The patrols remain the backstop (see ADR-0003); this listener is
-// what lets the two event-driven cases react immediately: the ">>绑定<<" command
-// a member sends, and a member joining a group.
-//
-// There is deliberately no check-in handling here: NapCat exposes no check-in
-// notice event, so the sign-in board can only be read by polling.
+// on them. A check-in is defined as a member sending any message in a monitored
+// group, so this listener is the sole source of check-ins (see ADR-0009); it
+// also handles the ">>绑定<<" command a member sends, and records a member
+// joining a group so the roster patrol is not the only way they become known.
 package events
 
 import (
@@ -28,6 +26,8 @@ type Service interface {
 	// EnsureMember records a member observed via an event, so the roster patrol
 	// is not the only way a member becomes known.
 	EnsureMember(groupID, qq int64, nickname string) error
+	// RecordCheckinByMessage records a check-in observed as a group message.
+	RecordCheckinByMessage(groupID, qq int64, at time.Time) error
 }
 
 // MessageEvent is the OneBot message event the listener cares about.
@@ -64,8 +64,9 @@ func New(endpoint Endpoint, svc Service) *Listener {
 }
 
 // Run connects and keeps reconnecting until ctx is cancelled. It never returns
-// an error: a missing or broken event stream must not take the service down,
-// because the patrols are the backstop.
+// an error: a missing or broken stream must not take the service down. While
+// it is down no check-in is recorded (accepted, see ADR-0009); the roster
+// patrol and the award loop keep running regardless.
 func (l *Listener) Run(ctx context.Context) {
 	backoff := 2 * time.Second
 	const maxBackoff = 2 * time.Minute
@@ -78,7 +79,7 @@ func (l *Listener) Run(ctx context.Context) {
 		url, token := l.endpoint()
 		if strings.TrimSpace(url) == "" {
 			if !loggedIdle {
-				log.Print("[events] no event WebSocket configured; relying on the patrols only")
+				log.Print("[events] no event WebSocket configured; no check-ins will be recorded")
 				loggedIdle = true
 			}
 			select {
@@ -223,10 +224,19 @@ func (l *Listener) handleMessage(raw []byte) {
 	if ev.GroupID == 0 || ev.UserID == 0 {
 		return
 	}
-	if strings.TrimSpace(ev.RawMessage) != BindCommand {
+	if !l.monitored(ev.GroupID) {
 		return
 	}
-	if !l.monitored(ev.GroupID) {
+
+	// Every message is a check-in, recorded before any other handling: a
+	// member speaking in a monitored group is the definition, so the bind
+	// command counts too and no message is filtered. Recording is idempotent
+	// per (qq, date), so the day's many messages collapse into one row.
+	if err := l.svc.RecordCheckinByMessage(ev.GroupID, ev.UserID, time.Now()); err != nil {
+		log.Printf("[events] recording check-in for %d in %d failed: %v", ev.UserID, ev.GroupID, err)
+	}
+
+	if strings.TrimSpace(ev.RawMessage) != BindCommand {
 		return
 	}
 	if err := l.svc.BindByCommand(ev.GroupID, ev.UserID); err != nil {

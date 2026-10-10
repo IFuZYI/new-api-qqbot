@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,18 +49,6 @@ func (m GroupMember) DisplayName() string {
 		return m.Card
 	}
 	return m.Nickname
-}
-
-// SignedMember is one entry of a group's sign-in board. The board is today-only
-// and paginated, so callers must treat repeated reads as a union.
-//
-// Rank is fractional by construction (see flexFloat); it is display-only and
-// must not be treated as a stable identifier.
-type SignedMember struct {
-	QQ   int64     `json:"user_id"`
-	Nick string    `json:"nick"`
-	Time int64     `json:"time"`
-	Rank flexFloat `json:"rank"`
 }
 
 // Client calls OneBot actions over an HTTP endpoint.
@@ -122,18 +109,6 @@ func (c *Client) Call(action string, params map[string]any, out any) error {
 	return decodeAction(action, body, out)
 }
 
-// ErrNoSigninBoard means the group simply has no sign-in board. That is a
-// normal condition (most groups do not have one), not a failure, so callers
-// must not treat it as an error to report.
-var ErrNoSigninBoard = errors.New("group has no sign-in board")
-
-// noSigninBoardMarkers are the upstream messages NapCat raises for a group
-// without a board. GetGroupSignedList throws when the response carries no page.
-var noSigninBoardMarkers = []string{
-	"无法获取该群组打卡列表",
-	"no sign-in board",
-}
-
 // decodeAction unwraps an OneBot envelope. A non-zero retcode is an error even
 // when the payload is well formed; retcode 0 with an empty list is a valid
 // answer, not a failure.
@@ -146,11 +121,6 @@ func decodeAction(action string, body []byte, out any) error {
 		msg := env.Message
 		if msg == "" {
 			msg = env.Wording
-		}
-		for _, marker := range noSigninBoardMarkers {
-			if strings.Contains(msg, marker) {
-				return fmt.Errorf("%s: %w", action, ErrNoSigninBoard)
-			}
 		}
 		return fmt.Errorf("%s: retcode %d: %s", action, env.Retcode, msg)
 	}
@@ -180,16 +150,6 @@ func (c *Client) GetGroupMemberList(groupID int64) ([]GroupMember, error) {
 		return nil, err
 	}
 	return ms, nil
-}
-
-// GetGroupSignedList returns today's sign-in board for a group.
-func (c *Client) GetGroupSignedList(groupID int64) ([]SignedMember, error) {
-	var ss []SignedMember
-	err := c.Call("get_group_signed_list", map[string]any{"group_id": groupID}, &ss)
-	if err != nil {
-		return nil, err
-	}
-	return ss, nil
 }
 
 // LoginInfo identifies the bot account.
@@ -401,15 +361,6 @@ func (w *WebUI) GetGroupMemberList(groupID int64) ([]GroupMember, error) {
 		return nil, err
 	}
 	return ms, nil
-}
-
-// GetGroupSignedList via the WebUI bridge.
-func (w *WebUI) GetGroupSignedList(groupID int64) ([]SignedMember, error) {
-	var ss []SignedMember
-	if err := w.callAction("get_group_signed_list", map[string]any{"group_id": groupID}, &ss); err != nil {
-		return nil, err
-	}
-	return ss, nil
 }
 
 // GetLoginInfo via the WebUI bridge.

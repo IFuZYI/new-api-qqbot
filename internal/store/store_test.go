@@ -110,8 +110,8 @@ func TestBindingIsOnePerQQAndReplaceable(t *testing.T) {
 	}
 }
 
-// The sign-in board is today-only and polled repeatedly, so recording the same
-// (qq, date) twice must be a no-op that preserves the first award decision.
+// A member sends many messages a day, so recording the same (qq, date) again
+// must be a no-op that preserves the first award decision.
 func TestCheckinIsIdempotentPerQQPerDate(t *testing.T) {
 	s := newTestStore(t)
 
@@ -119,8 +119,8 @@ func TestCheckinIsIdempotentPerQQPerDate(t *testing.T) {
 	if err := s.RecordCheckin(c); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
-	// a later poll reports the same member again, possibly with a new rank
-	c.Rank = 1
+	// a later message reports the same member again, with a newer time
+	c.SignedAt = 200
 	c.RewardQuota = 999
 	if err := s.RecordCheckin(c); err != nil {
 		t.Fatalf("RecordCheckin 2: %v", err)
@@ -150,7 +150,7 @@ func TestCheckinDaysCountsDistinctDates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// re-poll on the same day must not inflate the day count
+	// a repeat message on the same day must not inflate the day count
 	if err := s.RecordCheckin(Checkin{QQ: 54321, Date: "2026-10-10", GroupID: 1, RewardQuota: 100}); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestMarkRewardedIsOnceOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("first MarkRewarded should report the award was claimed")
 	}
-	// a second attempt (retry, restart, duplicate poll) must not re-award
+	// a second attempt (retry, restart, duplicate message) must not re-award
 	ok, err = s.MarkRewarded(54321, "2026-10-10", time.Now())
 	if err != nil {
 		t.Fatalf("MarkRewarded 2: %v", err)
