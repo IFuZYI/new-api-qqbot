@@ -82,6 +82,9 @@ type Admin struct {
 	CreatedAt    int64  `json:"created_at"`
 }
 
+// ErrNotFound is returned when a requested row does not exist.
+var ErrNotFound = gorm.ErrRecordNotFound
+
 // Store is the database handle.
 type Store struct{ db *gorm.DB }
 
@@ -368,6 +371,22 @@ func (s *Store) MarkRewarded(qq int64, date string, at time.Time) (bool, error) 
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// SetRewardAmount records the amount chosen for a (qq, date) without claiming
+// it. Storing the value before the gateway call keeps it stable across a crash.
+func (s *Store) SetRewardAmount(qq int64, date string, amount int) error {
+	return s.db.Model(&Checkin{}).
+		Where("qq = ? AND date = ?", qq, date).
+		Update("reward_quota", amount).Error
+}
+
+// ReleaseReward clears the claim on a (qq, date) so a failed award is retried.
+// It also resets the recorded amount, so the retry draws afresh.
+func (s *Store) ReleaseReward(qq int64, date string) error {
+	return s.db.Model(&Checkin{}).
+		Where("qq = ? AND date = ?", qq, date).
+		Updates(map[string]any{"rewarded_at": 0, "reward_quota": 0}).Error
 }
 
 // CheckinsOn returns every check-in recorded for a date.
