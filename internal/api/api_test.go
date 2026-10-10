@@ -714,3 +714,85 @@ func TestAutoConfigureNapCatRequiresURL(t *testing.T) {
 		t.Errorf("expected 400 when no WebUI URL is known, got %d", code)
 	}
 }
+
+// Binding from the account side must record the account's real username and
+// email, not the blanks the form sends. The operator picks an account from a
+// list, so the authoritative values are the ones the gateway reported: a row
+// stored with an empty email can never be matched against a member's
+// qq@qq.com again, and the account would look unbound in the directory.
+func TestManualBindFillsAccountDetailsFromCache(t *testing.T) {
+	srv, st, cl := newTestServer(t)
+	if err := st.UpsertMembers(1, []store.Member{{QQ: 2470777872, Nickname: "FuZY"}}); err != nil {
+		t.Fatal(err)
+	}
+	// The account cache as SyncNewAPIUsers would have written it.
+	if err := st.ReplaceNewAPIUsers([]store.NewAPIUser{
+		{ID: 4, Username: "fuzyQQ", Email: "2470777872@qq.com", Group: "default"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var resp struct {
+		Binding store.Binding `json:"binding"`
+	}
+	// The form sends only the two ids, as the account-side dialog does.
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
+		"qq": 2470777872, "newapi_user_id": 4,
+	}, &resp); code != 200 {
+		t.Fatalf("bind status %d", code)
+	}
+	if resp.Binding.NewAPIUsername != "fuzyQQ" {
+		t.Errorf("username not filled from the cache: %q", resp.Binding.NewAPIUsername)
+	}
+	if resp.Binding.NewAPIEmail != "2470777872@qq.com" {
+		t.Errorf("email not filled from the cache: %q", resp.Binding.NewAPIEmail)
+	}
+
+	// And the directory must now show the two sides as one bound row.
+	var got struct {
+		Items []service.UserRow `json:"items"`
+	}
+	getJSONWith(t, cl, srv.URL+"/api/users", &got)
+	merged := 0
+	for _, r := range got.Items {
+		if r.QQ == 2470777872 && r.NewAPIUserID == 4 {
+			merged++
+			if !r.Bound {
+				t.Error("the merged row must be marked bound")
+			}
+		}
+	}
+	if merged != 1 {
+		t.Errorf("the QQ and the account must appear as exactly one row, got %d: %+v", merged, got.Items)
+	}
+}
+
+// An account-side bind must work when the row carries no QQ: the operator picks
+// the QQ in the dialog. (The old dialog sent qq=0 and the request failed.)
+func TestManualBindFromAccountSideWithPickedQQ(t *testing.T) {
+	srv, st, cl := newTestServer(t)
+	if err := st.ReplaceNewAPIUsers([]store.NewAPIUser{
+		{ID: 4, Username: "fuzyQQ", Email: "2470777872@qq.com"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var resp struct {
+		Binding store.Binding `json:"binding"`
+	}
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
+		"qq": 2470777872, "newapi_user_id": 4,
+	}, &resp); code != 200 {
+		t.Fatalf("bind from the account side failed with %d", code)
+	}
+	if resp.Binding.QQ != 2470777872 || resp.Binding.NewAPIUserID != 4 {
+		t.Errorf("unexpected binding: %+v", resp.Binding)
+	}
+
+	// A bind with no QQ is still refused: the dialog must supply one.
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
+		"qq": 0, "newapi_user_id": 4,
+	}, nil); code != 400 {
+		t.Errorf("a missing QQ must be a 400, got %d", code)
+	}
+}

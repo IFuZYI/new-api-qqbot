@@ -681,7 +681,7 @@ function Users({
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
                       <Button kind="ghost" onClick={() => setEditing(m)}>
-                        {m.bound ? '换绑' : '绑定'}
+                        {m.bound ? '换绑' : m.kind === 'account' ? '绑定 QQ' : '绑定'}
                       </Button>
                       {m.bound && (
                         <Button
@@ -717,6 +717,7 @@ function Users({
       {editing && (
         <RebindDialog
           member={editing}
+          members={items}
           onClose={() => setEditing(null)}
           onDone={async (msg) => {
             setEditing(null)
@@ -731,29 +732,75 @@ function Users({
   )
 }
 
+/**
+ * RebindDialog links a QQ and a new-api account.
+ *
+ * It works from either side, because the operator arrives from whichever row
+ * showed the problem: an unbound member (pick the account) or an account nobody
+ * has joined with (pick the QQ). Both sides are dropdowns built from the rows
+ * already on screen, so the operator selects real values instead of typing an
+ * account id they would have to look up in new-api's own admin page.
+ */
 function RebindDialog({
   member,
+  members,
   onClose,
   onDone,
   onFail,
 }: {
   member: UserRow
+  members: UserRow[]
   onClose: () => void
   onDone: (m: string) => void
   onFail: (e: unknown) => void
 }) {
-  const [id, setId] = useState(String(member.newapi_user_id ?? ''))
-  const [name, setName] = useState(member.newapi_username ?? '')
+  // The row may be an account (no QQ yet) or a member (no account yet), so both
+  // sides start from whatever it carries and are editable either way.
+  const [qq, setQQ] = useState(member.qq ? String(member.qq) : '')
+  const [accountID, setAccountID] = useState(member.newapi_user_id ? String(member.newapi_user_id) : '')
+
+  // QQ candidates: every known member/left row, plus the row itself.
+  const qqOptions = members
+    .filter((m) => m.qq > 0)
+    .map((m) => ({ value: String(m.qq), label: `${m.qq}${m.nickname ? `（${m.nickname}）` : ''}` }))
+  // Account candidates: every known account, plus the row itself. The current
+  // selection is kept even if the cache does not list it, so an existing
+  // binding can always be re-saved unchanged.
+  const accountOptions = members
+    .filter((m) => m.newapi_user_id)
+    .map((m) => ({
+      value: String(m.newapi_user_id),
+      label: `${m.newapi_username || '—'} #${m.newapi_user_id}${m.newapi_email ? `（${m.newapi_email}）` : ''}`,
+    }))
+  const seenQQ = new Set(qqOptions.map((o) => o.value))
+  if (member.qq > 0 && !seenQQ.has(String(member.qq))) {
+    qqOptions.unshift({ value: String(member.qq), label: `${member.qq}（${member.nickname || '—'}）` })
+  }
+  const seenAcc = new Set(accountOptions.map((o) => o.value))
+  if (member.newapi_user_id && !seenAcc.has(String(member.newapi_user_id))) {
+    accountOptions.unshift({
+      value: String(member.newapi_user_id),
+      label: `${member.newapi_username || '—'} #${member.newapi_user_id}`,
+    })
+  }
+
+  const qqNum = Number(qq)
+  const accNum = Number(accountID)
+  const problem =
+    !Number.isInteger(qqNum) || qqNum <= 0
+      ? '请选择 QQ'
+      : !Number.isInteger(accNum) || accNum <= 0
+        ? '请选择 new-api 账号'
+        : ''
 
   const save = async () => {
-    const n = Number(id)
-    if (!Number.isInteger(n) || n <= 0) {
-      onFail(new Error('new-api 账号 ID 必须是正整数'))
+    if (problem) {
+      onFail(new Error(problem))
       return
     }
     try {
-      await api.createBinding({ qq: member.qq, newapi_user_id: n, newapi_username: name })
-      onDone(`已把 QQ ${member.qq} 换绑到 new-api 账号 #${n}`)
+      await api.createBinding({ qq: qqNum, newapi_user_id: accNum })
+      onDone(`已把 QQ ${qqNum} 绑定到 new-api 账号 #${accNum}`)
     } catch (e) {
       onFail(e)
     }
@@ -761,24 +808,43 @@ function RebindDialog({
 
   return (
     <Modal
-      title={`换绑 QQ ${member.qq}`}
+      title={member.bound ? `换绑 QQ ${member.qq || '—'}` : '绑定 QQ 与 new-api 账号'}
       onClose={onClose}
       actions={
         <>
           <Button onClick={onClose}>取消</Button>
-          <Button kind="primary" onClick={save}>
+          <Button kind="primary" disabled={problem !== ''} onClick={save}>
             保存
           </Button>
         </>
       }
     >
       <div className="space-y-3">
-        <Field label="new-api 账号 ID" hint="在 new-api 后台用户列表里可以看到该账号的 ID">
-          <Input value={id} onChange={setId} placeholder="例如 12" />
+        <Field label="QQ 号" hint="从群成员里选择">
+          <Select value={qq} onChange={setQQ} className="w-full">
+            <option value="">请选择</option>
+            {qqOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
         </Field>
-        <Field label="new-api 用户名（可选）" hint="仅用于显示">
-          <Input value={name} onChange={setName} placeholder="例如 alice" />
+        <Field label="new-api 账号" hint="从已同步的账号里选择；账号邮箱是 qq@qq.com 时通常可自动绑定">
+          <Select value={accountID} onChange={setAccountID} className="w-full">
+            <option value="">请选择</option>
+            {accountOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
         </Field>
+        {accountOptions.length <= 1 && (
+          <p className="text-[11px] text-muted-foreground">
+            账号列表为空？先在上方点「同步 new-api 账号」把账号拉取下来。
+          </p>
+        )}
       </div>
     </Modal>
   )

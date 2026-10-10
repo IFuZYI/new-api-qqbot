@@ -478,7 +478,14 @@ func (r *Router) listBindings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": bs})
 }
 
-// createBinding is the manual 换绑 path: the operator names any new-api account.
+// createBinding is the manual 换绑 path: the operator names a QQ and a new-api
+// account.
+//
+// The account's details are filled in from the cached account list when the
+// caller does not supply them, so binding from the account side (where the
+// operator picked an account, not typed its email) still records a complete
+// row - and a binding whose stored email is blank can never be matched against
+// a member's qq@qq.com again.
 func (r *Router) createBinding(w http.ResponseWriter, req *http.Request) {
 	var in struct {
 		QQ             int64  `json:"qq"`
@@ -497,6 +504,17 @@ func (r *Router) createBinding(w http.ResponseWriter, req *http.Request) {
 	if in.NewAPIUserID == 0 {
 		writeErr(w, 400, errors.New("newapi_user_id is required"))
 		return
+	}
+	// Fill the account's identity from the cache rather than trusting the form:
+	// the operator picks an account from a list, so the authoritative username
+	// and email are the ones the gateway reported, not a possibly-blank field.
+	if a, err := r.st.GetNewAPIUser(in.NewAPIUserID); err == nil {
+		if in.NewAPIUsername == "" {
+			in.NewAPIUsername = a.Username
+		}
+		if in.NewAPIEmail == "" {
+			in.NewAPIEmail = a.Email
+		}
 	}
 	if err := r.st.SetBinding(store.Binding{
 		QQ: in.QQ, NewAPIUserID: in.NewAPIUserID,
