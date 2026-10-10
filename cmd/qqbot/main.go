@@ -37,6 +37,32 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		log.Fatalf("create data dir: %v", err)
 	}
+
+	// The environment (.env in the data directory, or the process environment)
+	// is read first: it carries both the admin credential and the listen port.
+	// Reading it before the server starts means a fresh instance is never
+	// briefly open to whoever reaches it first.
+	env, err := config.LoadEnv(*dataDir)
+	if err != nil {
+		log.Printf("warning: could not read the env file: %v", err)
+	}
+
+	// Precedence for the listen address: an explicit -addr flag wins, then
+	// QQBOT_PORT from the environment, then the flag's default. The flag is
+	// checked for having been set rather than compared to its default, so a
+	// deliberate "-addr :4096" still overrides a configured port.
+	explicitAddr := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			explicitAddr = true
+		}
+	})
+	if !explicitAddr {
+		if p := config.EnvPortFromEnv(env); p != "" {
+			*addr = p
+		}
+	}
+
 	st, err := store.Open(filepath.Join(*dataDir, "qqbot.db"))
 	if err != nil {
 		log.Fatalf("open database: %v", err)
@@ -75,15 +101,10 @@ func main() {
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 
-	// The admin credential can be provisioned from the environment (.env in the
-	// data directory, or the process environment). Doing this before the server
-	// accepts requests means a fresh instance is never briefly open to whoever
-	// reaches it first. Without it, the WebUI's first-run form creates the admin
-	// as before.
-	env, err := config.LoadEnv(*dataDir)
-	if err != nil {
-		log.Printf("warning: could not read the env file: %v", err)
-	}
+	// The admin credential was read from the environment above. Provisioning it
+	// before the server accepts requests means a fresh instance is never
+	// briefly open to whoever reaches it first; without it, the WebUI's
+	// first-run form creates the admin as before.
 	if creds := config.AdminCredsFromEnv(env); creds.Set {
 		if err := router.EnsureAdminFromEnv(creds); err != nil {
 			log.Fatalf("configure admin from %s: %v", config.EnvAdminPassword, err)

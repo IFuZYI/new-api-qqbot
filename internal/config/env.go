@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,11 @@ const (
 	// EnvAdminPassword sets the admin password. When set (and non-blank) the
 	// admin account is created or its password reset at startup.
 	EnvAdminPassword = "QQBOT_ADMIN_PASSWORD"
+	// EnvPort sets the WebUI's listen address. A bare port ("4096") is
+	// accepted as well as a full address (":4096", "127.0.0.1:4096"), so a
+	// provisioning template that only knows the port does not have to know
+	// Go's address syntax.
+	EnvPort = "QQBOT_PORT"
 	// EnvFilePath points at an env file other than <data>/.env.
 	EnvFilePath = "QQBOT_ENV_FILE"
 
@@ -35,6 +41,35 @@ type AdminCreds struct {
 	Set      bool
 	Username string
 	Password string
+}
+
+// NormalizeAddr turns a configured listen value into a Go listen address.
+//
+// A bare port ("4096") becomes ":4096"; anything that already looks like an
+// address (":4096", "127.0.0.1:4096", "[::1]:4096") is returned unchanged. It
+// returns "" for a blank value, meaning "no override".
+//
+// It is deliberately permissive about what it *accepts* (an operator typing
+// "4096" is the obvious case) but strict about what it returns: a value it
+// cannot make sense of is passed through so net.Listen reports it, rather than
+// being silently rewritten into something the operator did not ask for.
+func NormalizeAddr(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	// All digits: a bare port. Prefix the colon so net.Listen binds on every
+	// interface, matching the -addr flag's ":4096" default.
+	if _, err := strconv.Atoi(v); err == nil {
+		return ":" + v
+	}
+	return v
+}
+
+// EnvPortFromEnv returns the normalized listen address from the environment,
+// or "" when it is not configured.
+func EnvPortFromEnv(env map[string]string) string {
+	return NormalizeAddr(env[EnvPort])
 }
 
 // AdminCredsFromEnv builds the credential from an already-merged environment.
@@ -90,7 +125,7 @@ func LoadEnv(dataDir string) (map[string]string, error) {
 	for k, v := range fileVals {
 		out[k] = v
 	}
-	for _, k := range []string{EnvAdminUsername, EnvAdminPassword} {
+	for _, k := range []string{EnvAdminUsername, EnvAdminPassword, EnvPort} {
 		if v, ok := os.LookupEnv(k); ok {
 			out[k] = v
 		}

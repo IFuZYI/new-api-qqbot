@@ -192,3 +192,72 @@ func TestLoadEnvStopsAtAnExistingEmptyFile(t *testing.T) {
 		t.Errorf("an existing but empty file should stop the search, got %v", got)
 	}
 }
+
+// A bare port is the obvious thing for an operator to write, so it is accepted
+// and turned into a Go listen address.
+func TestNormalizeAddrAcceptsABarePort(t *testing.T) {
+	cases := map[string]string{
+		"4096":           ":4096",
+		" 4096 ":         ":4096",
+		":4096":          ":4096",
+		"127.0.0.1:4096": "127.0.0.1:4096",
+		"[::1]:4096":     "[::1]:4096",
+		"0.0.0.0:80":     "0.0.0.0:80",
+		"":               "",
+		"   ":            "",
+	}
+	for in, want := range cases {
+		if got := NormalizeAddr(in); got != want {
+			t.Errorf("NormalizeAddr(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A value that is not a port is passed through untouched, so net.Listen reports
+// it rather than the code silently rewriting it.
+func TestNormalizeAddrPassesThroughNonPorts(t *testing.T) {
+	for _, in := range []string{"localhost:4096", "abc", ":http", "1.2.3.4"} {
+		if got := NormalizeAddr(in); got != in {
+			t.Errorf("NormalizeAddr(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+func TestEnvPortFromEnv(t *testing.T) {
+	if got := EnvPortFromEnv(map[string]string{}); got != "" {
+		t.Errorf("an unset port must yield an empty override, got %q", got)
+	}
+	if got := EnvPortFromEnv(map[string]string{EnvPort: "8080"}); got != ":8080" {
+		t.Errorf("EnvPortFromEnv = %q, want :8080", got)
+	}
+	if got := EnvPortFromEnv(map[string]string{EnvPort: "127.0.0.1:9000"}); got != "127.0.0.1:9000" {
+		t.Errorf("EnvPortFromEnv = %q, want it unchanged", got)
+	}
+}
+
+// The port is read from the same merged environment as the credential: file
+// value by default, process environment wins.
+func TestLoadEnvReadsThePortAndLetsTheProcessWin(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("QQBOT_PORT=4096\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if EnvPortFromEnv(got) != ":4096" {
+		t.Errorf("the file's port was not read: %v", got)
+	}
+
+	t.Setenv(EnvPort, "7777")
+	got, err = LoadEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if EnvPortFromEnv(got) != ":7777" {
+		t.Errorf("the process environment must win for the port: %v", got)
+	}
+}
