@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -134,8 +135,10 @@ func TestGetGroupSignedListSurfacesBoardError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the board cannot be read")
 	}
-	if !strings.Contains(err.Error(), "打卡") {
-		t.Errorf("error should carry the upstream message, got %v", err)
+	// A boardless group is normal, so it is reported as a distinct sentinel the
+	// caller can recognise and ignore - not as a generic failure.
+	if !errors.Is(err, ErrNoSigninBoard) {
+		t.Errorf("want ErrNoSigninBoard, got %v", err)
 	}
 }
 

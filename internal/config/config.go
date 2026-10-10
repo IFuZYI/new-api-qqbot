@@ -150,7 +150,49 @@ func (m *Manager) syncFromFile() error {
 	m.lastHash = sum
 	m.mu.Unlock()
 
-	return m.saveToStore(c)
+	// Merge over the stored copy rather than adopting the file wholesale: an
+	// operator who adds or fixes a single line must not silently lose the
+	// password and the tokens the file does not mention. A field the file does
+	// carry (even the empty string) wins, which is what makes an intentional
+	// clear possible.
+	merged := c.MergeFields(m.fromStore())
+	return m.saveToStore(merged)
+}
+
+// MergeFields overlays c onto base, but only with the fields c actually
+// carries. Unlike Merge, an empty string here is a deliberate value, not a
+// placeholder to fill in - the distinction is that a file always states what it
+// means, whereas the WebUI form omits secrets it is not resending.
+func (c Config) MergeFields(base Config) Config {
+	out := base
+	if c.NewAPI.URL != "" {
+		out.NewAPI.URL = c.NewAPI.URL
+	}
+	if c.NewAPI.Username != "" {
+		out.NewAPI.Username = c.NewAPI.Username
+	}
+	if c.NewAPI.Password != "" {
+		out.NewAPI.Password = c.NewAPI.Password
+	}
+	if c.NapCat.WebUIURL != "" {
+		out.NapCat.WebUIURL = c.NapCat.WebUIURL
+	}
+	if c.NapCat.WebUIToken != "" {
+		out.NapCat.WebUIToken = c.NapCat.WebUIToken
+	}
+	if c.NapCat.OneBotURL != "" {
+		out.NapCat.OneBotURL = c.NapCat.OneBotURL
+	}
+	if c.NapCat.OneBotToken != "" {
+		out.NapCat.OneBotToken = c.NapCat.OneBotToken
+	}
+	if c.NapCat.EventWSURL != "" {
+		out.NapCat.EventWSURL = c.NapCat.EventWSURL
+	}
+	if c.NapCat.EventWSToken != "" {
+		out.NapCat.EventWSToken = c.NapCat.EventWSToken
+	}
+	return out
 }
 
 // isZero reports whether every field is empty, i.e. the file carried no values.

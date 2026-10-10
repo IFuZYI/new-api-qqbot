@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -120,6 +121,18 @@ func (c *Client) Call(action string, params map[string]any, out any) error {
 	return decodeAction(action, body, out)
 }
 
+// ErrNoSigninBoard means the group simply has no sign-in board. That is a
+// normal condition (most groups do not have one), not a failure, so callers
+// must not treat it as an error to report.
+var ErrNoSigninBoard = errors.New("group has no sign-in board")
+
+// noSigninBoardMarkers are the upstream messages NapCat raises for a group
+// without a board. GetGroupSignedList throws when the response carries no page.
+var noSigninBoardMarkers = []string{
+	"无法获取该群组打卡列表",
+	"no sign-in board",
+}
+
 // decodeAction unwraps an OneBot envelope. A non-zero retcode is an error even
 // when the payload is well formed; retcode 0 with an empty list is a valid
 // answer, not a failure.
@@ -132,6 +145,11 @@ func decodeAction(action string, body []byte, out any) error {
 		msg := env.Message
 		if msg == "" {
 			msg = env.Wording
+		}
+		for _, marker := range noSigninBoardMarkers {
+			if strings.Contains(msg, marker) {
+				return fmt.Errorf("%s: %w", action, ErrNoSigninBoard)
+			}
 		}
 		return fmt.Errorf("%s: retcode %d: %s", action, env.Retcode, msg)
 	}

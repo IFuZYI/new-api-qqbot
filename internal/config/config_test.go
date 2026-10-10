@@ -313,3 +313,35 @@ func TestRevisionTracksContent(t *testing.T) {
 		t.Error("revision did not change after the config changed")
 	}
 }
+
+// Adding or fixing one line in the file must not silently drop the fields the
+// file does not mention - the password and the tokens in particular.
+func TestPartialFileMergesInsteadOfWiping(t *testing.T) {
+	m, _ := newTestManager(t)
+	full := sample()
+	full.NewAPI.Password = "secret-pw"
+	full.NapCat.WebUIToken = "webui-tok"
+	full.NapCat.OneBotToken = "onebot-tok"
+	if err := m.Save(full); err != nil {
+		t.Fatal(err)
+	}
+
+	// The operator edits only the URL.
+	if err := os.WriteFile(m.Path(), []byte("newapi:\n  url: https://changed.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := m.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NewAPI.URL != "https://changed.example.com" {
+		t.Errorf("the edited URL was not adopted: %q", got.NewAPI.URL)
+	}
+	if got.NewAPI.Password != "secret-pw" {
+		t.Errorf("a partial file wiped the password: %q", got.NewAPI.Password)
+	}
+	if got.NapCat.WebUIToken != "webui-tok" || got.NapCat.OneBotToken != "onebot-tok" {
+		t.Errorf("a partial file wiped a token: %+v", got.NapCat)
+	}
+}

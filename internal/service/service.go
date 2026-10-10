@@ -235,6 +235,12 @@ func (s *Service) SyncAllCheckins(date string) error {
 	var errs []error
 	for _, g := range gs {
 		if _, err := s.SyncCheckins(g.GroupID, date); err != nil {
+			// A group with no sign-in board is normal, not a failure: reporting
+			// it would leave the check-in patrol permanently red whenever any
+			// monitored group lacks a board.
+			if errors.Is(err, napcat.ErrNoSigninBoard) {
+				continue
+			}
 			errs = append(errs, fmt.Errorf("group %d: %w", g.GroupID, err))
 		}
 	}

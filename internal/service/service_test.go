@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -543,5 +544,40 @@ func TestSettingsDefaultPatrolsEnabled(t *testing.T) {
 	}
 	if !s.MemberPatrolEnabled || !s.CheckinPatrolEnabled {
 		t.Errorf("both patrols must default to on: %+v", s)
+	}
+}
+
+// A group with no sign-in board is a normal condition, not a failure: the
+// check-in patrol must not show a permanent error just because a monitored
+// group lacks a board.
+func TestBoardlessGroupIsNotAFailure(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	nc.boardErr[1] = fmt.Errorf("get_group_signed_list: %w", napcat.ErrNoSigninBoard)
+
+	if err := svc.SyncAllCheckins("2026-10-10"); err != nil {
+		t.Errorf("a boardless group must not be reported as a failure: %v", err)
+	}
+}
+
+// A real failure must still surface, or the patrol would look healthy while
+// silently recording nothing.
+func TestRealCheckinFailureStillSurfaces(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	nc.boardErr[1] = errors.New("connection refused")
+
+	if err := svc.SyncAllCheckins("2026-10-10"); err == nil {
+		t.Error("a genuine failure must be reported")
 	}
 }
