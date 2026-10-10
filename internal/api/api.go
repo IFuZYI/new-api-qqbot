@@ -58,6 +58,13 @@ func (r *Router) routes() {
 
 	r.mux.HandleFunc("GET /api/members", r.requireAuth(r.listMembers))
 
+	// User directory: a union of QQ members and new-api accounts, keyed on
+	// both sides so accounts nobody has joined with are visible too.
+	r.mux.HandleFunc("GET /api/users", r.requireAuth(r.listUsers))
+	r.mux.HandleFunc("POST /api/users/sync", r.requireAuth(r.syncUsers))
+	r.mux.HandleFunc("POST /api/users/{id}/group", r.requireAuth(r.setUserGroup))
+	r.mux.HandleFunc("POST /api/users/groups", r.requireAuth(r.setUserGroups))
+
 	r.mux.HandleFunc("GET /api/bindings", r.requireAuth(r.listBindings))
 	r.mux.HandleFunc("POST /api/bindings", r.requireAuth(r.createBinding))
 	r.mux.HandleFunc("POST /api/bindings/{qq}/delete", r.requireAuth(r.deleteBinding))

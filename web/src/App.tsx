@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type AuthState, type Bootstrap, type Config, type Group, type Member, type MembersResponse, type Settings } from './api'
+import { api, type AuthState, type Bootstrap, type Config, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
@@ -375,25 +375,126 @@ function Users({
   onFail: (e: unknown) => void
   onRefresh: () => Promise<void>
 }) {
-  const [data, setData] = useState<MembersResponse | null>(null)
-  const [editing, setEditing] = useState<Member | null>(null)
-  const [only, setOnly] = useState<'all' | 'bound' | 'unbound'>('all')
+  const [data, setData] = useState<UsersResponse | null>(null)
+  const [editing, setEditing] = useState<UserRow | null>(null)
+  const [groups, setGroups] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+
+  // Filters. `q` is debounced into `keyword` so typing does not fire a request
+  // per keystroke.
+  const [bound, setBound] = useState<'' | 'bound' | 'unbound'>('')
+  const [inGroup, setInGroup] = useState<'' | 'in' | 'out'>('')
+  const [kind, setKind] = useState<'' | 'member' | 'left' | 'account'>('')
+  const [group, setGroup] = useState('')
+  const [q, setQ] = useState('')
+  const [keyword, setKeyword] = useState('')
+
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [batchGroup, setBatchGroup] = useState('')
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setKeyword(q.trim()), 300)
+    return () => window.clearTimeout(t)
+  }, [q])
+
+  const filter: UserFilter = { bound, in_group: inGroup, kind, group, q: keyword }
 
   const load = useCallback(async () => {
     try {
-      setData(await api.members())
+      setData(await api.users(filter))
     } catch (e) {
       onFail(e)
     }
-  }, [onFail])
+    // filter is rebuilt each render; depend on its fields instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bound, inGroup, kind, group, keyword, onFail])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const items = (data?.items ?? []).filter((m) =>
-    only === 'all' ? true : only === 'bound' ? m.bound : !m.bound,
-  )
+  useEffect(() => {
+    // Group names come from the gateway; a failure only costs the picker.
+    api
+      .newAPIGroups()
+      .then((g) => setGroups(Object.keys(g).sort()))
+      .catch(() => setGroups([]))
+  }, [])
+
+  // Drop selections for rows that a filter change removed from the view, so a
+  // batch never touches something the operator can no longer see.
+  useEffect(() => {
+    const visible = new Set((data?.items ?? []).map((r) => r.newapi_user_id).filter(Boolean))
+    setSelected((prev) => {
+      const next = new Set<number>()
+      for (const id of prev) if (visible.has(id)) next.add(id)
+      return next
+    })
+  }, [data])
+
+  const items = data?.items ?? []
+  const selectable = items.filter((r) => r.newapi_user_id)
+
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const toggleAll = () =>
+    setSelected((prev) =>
+      prev.size === selectable.length ? new Set() : new Set(selectable.map((r) => r.newapi_user_id!)),
+    )
+
+  const sync = async () => {
+    setBusy(true)
+    try {
+      const res = await api.syncUsers()
+      onDone(`已从 new-api 同步 ${res.accounts} 个账号`)
+      await load()
+    } catch (e) {
+      onFail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const applyBatch = async () => {
+    if (selected.size === 0) return
+    if (!batchGroup) {
+      onFail(new Error('请先选择目标分组'))
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await api.setUserGroups([...selected], batchGroup)
+      if (res.failed === 0) {
+        onDone(`已把 ${res.succeeded} 个账号调整到「${batchGroup}」`)
+      } else {
+        const first = res.results.find((r) => !r.ok)
+        onDone(`成功 ${res.succeeded} 个，失败 ${res.failed} 个${first ? `（例如 #${first.user_id}: ${first.error}）` : ''}`)
+      }
+      setSelected(new Set())
+      await load()
+      await onRefresh()
+    } catch (e) {
+      onFail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resetFilters = () => {
+    setBound('')
+    setInGroup('')
+    setKind('')
+    setGroup('')
+    setQ('')
+  }
+
+  const s = data?.summary
 
   return (
     <>
@@ -401,51 +502,153 @@ function Users({
         title="用户管理"
         actions={
           <>
-            <Select value={only} onChange={(v) => setOnly(v as typeof only)}>
-              <option value="all">全部</option>
-              <option value="bound">已绑定</option>
-              <option value="unbound">未绑定</option>
-            </Select>
-            <Button onClick={load}>刷新</Button>
+            <Button disabled={busy} onClick={sync}>
+              从 new-api 同步账号
+            </Button>
+            <Button disabled={busy} onClick={load}>
+              刷新
+            </Button>
           </>
         }
       >
+        {s && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            共 {s.total} 行　·　在群 {s.in_group}　·　已退群 {s.left}　·　已绑定 {s.bound}　·　未绑定{' '}
+            {s.unbound}　·　未进群账号 {s.not_joined}
+          </p>
+        )}
+
+        <div className="mb-3 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <Field label="绑定状态">
+            <Select value={bound} onChange={(v) => setBound(v as typeof bound)} className="w-full">
+              <option value="">全部</option>
+              <option value="bound">已绑定</option>
+              <option value="unbound">未绑定</option>
+            </Select>
+          </Field>
+          <Field label="群状态">
+            <Select value={inGroup} onChange={(v) => setInGroup(v as typeof inGroup)} className="w-full">
+              <option value="">全部</option>
+              <option value="in">在群</option>
+              <option value="out">已退群 / 未进群</option>
+            </Select>
+          </Field>
+          <Field label="分组">
+            <Select value={group} onChange={setGroup} className="w-full">
+              <option value="">全部分组</option>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="类型">
+            <Select value={kind} onChange={(v) => setKind(v as typeof kind)} className="w-full">
+              <option value="">全部</option>
+              <option value="member">在群成员</option>
+              <option value="left">已退群成员</option>
+              <option value="account">未进群账号</option>
+            </Select>
+          </Field>
+          <Field label="搜索" hint="QQ / 昵称 / new-api 用户名 / 邮箱">
+            <Input value={q} onChange={setQ} placeholder="例如 54321 或 alice" />
+          </Field>
+        </div>
+
+        {selected.size > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-2">
+            <span className="text-xs">已选 {selected.size} 个账号</span>
+            <Select value={batchGroup} onChange={setBatchGroup}>
+              <option value="">选择目标分组…</option>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+            <Button kind="primary" disabled={busy || !batchGroup} onClick={applyBatch}>
+              批量调整分组
+            </Button>
+            <Button kind="ghost" onClick={() => setSelected(new Set())}>
+              取消选择
+            </Button>
+          </div>
+        )}
+
         {items.length === 0 ? (
-          <Empty>没有成员。先到「群管理」刷新并同步成员。</Empty>
+          <Empty>
+            没有匹配的用户。先到「群管理」刷新并同步成员；要看到没人进群的 new-api 账号，请点「从
+            new-api 同步账号」。
+          </Empty>
         ) : (
-          <Table head={['QQ', '昵称', 'new-api 账号', '绑定方式', '今日已签到', '累计天数', '今日奖励', '操作']}>
-            {items.map((m) => (
-              <tr key={m.qq} className="border-b border-border/60">
-                <td className="px-3 py-2 font-mono text-xs">{m.qq}</td>
-                <td className="px-3 py-2">{m.nickname}</td>
-                <td className="px-3 py-2">
-                  {m.bound ? (
-                    <span>
-                      {m.newapi_username || '—'}
-                      <span className="ml-1 text-xs text-muted-foreground">#{m.newapi_user_id}</span>
-                    </span>
-                  ) : (
-                    <Badge tone="warn">未绑定</Badge>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{m.bind_source || '—'}</td>
-                <td className="px-3 py-2">
-                  {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
-                </td>
-                <td className="px-3 py-2">{m.checkin_days}</td>
-                <td className="px-3 py-2">{m.reward_today || '—'}</td>
-                <td className="px-3 py-2">
-                  <div className="flex gap-1">
-                    <Button kind="ghost" onClick={() => setEditing(m)}>
-                      换绑
-                    </Button>
-                    {m.bound && (
-                      <Button
-                        kind="ghost"
-                        onClick={async () => {
+          <>
+            <Table
+              head={[
+                <input
+                  key="all"
+                  type="checkbox"
+                  checked={selectable.length > 0 && selected.size === selectable.length}
+                  onChange={toggleAll}
+                  title="全选可调整的账号"
+                />,
+                'QQ',
+                '昵称',
+                'new-api 账号',
+                '分组',
+                '绑定方式',
+                '今日已签到',
+                '累计天数',
+                '今日奖励',
+                '操作',
+              ]}
+            >
+              {items.map((m) => (
+                <tr key={`${m.kind}-${m.qq}-${m.newapi_user_id ?? 0}`} className="border-b border-border/60">
+                  <td className="px-3 py-2">
+                    {m.newapi_user_id ? (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(m.newapi_user_id)}
+                        onChange={() => toggle(m.newapi_user_id!)}
+                      />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">{m.qq || '—'}</td>
+                  <td className="px-3 py-2">
+                    {m.nickname || '—'}
+                    {m.kind === 'account' && (
+                      <span className="ml-1">
+                        <Badge tone="info">未进群</Badge>
+                      </span>
+                    )}
+                    {m.kind === 'left' && (
+                      <span className="ml-1">
+                        <Badge tone="warn">已退群</Badge>
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {m.bound || m.kind === 'account' ? (
+                      <span>
+                        {m.newapi_username || '—'}
+                        <span className="ml-1 text-xs text-muted-foreground">#{m.newapi_user_id}</span>
+                      </span>
+                    ) : (
+                      <Badge tone="warn">未绑定</Badge>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {m.newapi_user_id ? (
+                      <Select
+                        value={m.newapi_group ?? ''}
+                        onChange={async (v) => {
+                          if (!v || v === m.newapi_group) return
                           try {
-                            await api.deleteBinding(m.qq)
-                            onDone(`已解绑 ${m.qq}`)
+                            await api.setUserGroup(m.newapi_user_id!, v)
+                            onDone(`已把 #${m.newapi_user_id} 调整到「${v}」`)
                             await load()
                             await onRefresh()
                           } catch (e) {
@@ -453,14 +656,58 @@ function Users({
                           }
                         }}
                       >
-                        解绑
-                      </Button>
+                        <option value={m.newapi_group ?? ''}>{m.newapi_group || '—'}</option>
+                        {groups
+                          .filter((g) => g !== m.newapi_group)
+                          .map((g) => (
+                            <option key={g} value={g}>
+                              {g}
+                            </option>
+                          ))}
+                      </Select>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
                     )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </Table>
+                  </td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{m.bind_source || '—'}</td>
+                  <td className="px-3 py-2">
+                    {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
+                  </td>
+                  <td className="px-3 py-2">{m.checkin_days}</td>
+                  <td className="px-3 py-2">{m.reward_today || '—'}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex gap-1">
+                      <Button kind="ghost" onClick={() => setEditing(m)}>
+                        {m.bound ? '换绑' : '绑定'}
+                      </Button>
+                      {m.bound && (
+                        <Button
+                          kind="ghost"
+                          onClick={async () => {
+                            try {
+                              await api.deleteBinding(m.qq)
+                              onDone(`已解绑 ${m.qq}`)
+                              await load()
+                              await onRefresh()
+                            } catch (e) {
+                              onFail(e)
+                            }
+                          }}
+                        >
+                          解绑
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </Table>
+            <div className="mt-2 flex justify-end">
+              <Button kind="ghost" onClick={resetFilters}>
+                清除筛选
+              </Button>
+            </div>
+          </>
         )}
       </Card>
 
@@ -487,7 +734,7 @@ function RebindDialog({
   onDone,
   onFail,
 }: {
-  member: Member
+  member: UserRow
   onClose: () => void
   onDone: (m: string) => void
   onFail: (e: unknown) => void

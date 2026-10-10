@@ -29,6 +29,7 @@ func (fakeGateway) AddQuota(userID, value int) error            { return nil }
 func (fakeGateway) Groups() (map[string]struct{}, error) {
 	return map[string]struct{}{"default": {}, "authorized": {}, "vip": {}}, nil
 }
+func (fakeGateway) ListUsers() ([]newapi.User, error) { return nil, nil }
 
 type fakeQQ struct{}
 

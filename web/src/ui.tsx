@@ -127,15 +127,15 @@ export function Badge({
   )
 }
 
-export function Table({ head, children }: { head: string[]; children: ReactNode }) {
+export function Table({ head, children }: { head: ReactNode[]; children: ReactNode }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="text-left text-xs text-muted-foreground">
-            {head.map((h) => (
+            {head.map((h, i) => (
               <th
-                key={h}
+                key={i}
                 className="whitespace-nowrap border-b border-border bg-[var(--table-header)] px-3 py-2 font-normal"
               >
                 {h}

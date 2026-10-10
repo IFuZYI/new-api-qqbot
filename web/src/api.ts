@@ -58,6 +58,61 @@ export interface MembersResponse {
   date: string
 }
 
+/** One row of the user directory: a QQ member, a left member, or a lone account. */
+export interface UserRow {
+  kind: 'member' | 'left' | 'account'
+  qq: number
+  nickname: string
+  group_ids: number[] | null
+  in_group: boolean
+
+  bound: boolean
+  newapi_user_id?: number
+  newapi_username?: string
+  newapi_email?: string
+  newapi_group?: string
+  newapi_status?: number
+  bind_source?: string
+
+  checked_today: boolean
+  checkin_days: number
+  reward_today: number
+}
+
+export interface UserSummary {
+  total: number
+  bound: number
+  unbound: number
+  in_group: number
+  left: number
+  accounts: number
+  not_joined: number
+}
+
+export interface UsersResponse {
+  items: UserRow[]
+  total: number
+  date: string
+  summary: UserSummary
+}
+
+export interface UserFilter {
+  bound?: '' | 'bound' | 'unbound'
+  in_group?: '' | 'in' | 'out'
+  group?: string
+  q?: string
+  kind?: '' | 'member' | 'left' | 'account'
+}
+
+export interface GroupChangeResult {
+  user_id: number
+  username?: string
+  qq?: number
+  group: string
+  ok: boolean
+  error?: string
+}
+
 export interface Binding {
   qq: number
   newapi_user_id: number
@@ -156,6 +211,26 @@ export const api = {
     req<Group[]>('/api/groups', { method: 'POST', body: JSON.stringify({ group_ids: ids }) }),
 
   members: () => req<MembersResponse>('/api/members'),
+
+  users: (f: UserFilter = {}) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(f)) {
+      if (v !== undefined && v !== '') q.set(k, String(v))
+    }
+    const qs = q.toString()
+    return req<UsersResponse>(`/api/users${qs ? `?${qs}` : ''}`)
+  },
+  syncUsers: () => req<{ accounts: number }>('/api/users/sync', { method: 'POST', body: '{}' }),
+  setUserGroup: (id: number, group: string) =>
+    req<{ ok: boolean; newapi_user_id: number; group: string }>(`/api/users/${id}/group`, {
+      method: 'POST',
+      body: JSON.stringify({ group }),
+    }),
+  setUserGroups: (userIds: number[], group: string) =>
+    req<{ results: GroupChangeResult[]; succeeded: number; failed: number }>('/api/users/groups', {
+      method: 'POST',
+      body: JSON.stringify({ user_ids: userIds, group }),
+    }),
 
   bindings: () => req<{ items: Binding[] }>('/api/bindings'),
   createBinding: (b: { qq: number; newapi_user_id: number; newapi_username?: string; newapi_email?: string }) =>
