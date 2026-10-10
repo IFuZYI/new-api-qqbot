@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type Bootstrap, type Config, type Group, type Member, type MembersResponse, type Settings } from './api'
+import { api, type AuthState, type Bootstrap, type Config, type Group, type Member, type MembersResponse, type Settings } from './api'
+import Login from './Login'
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, OkNote, Table } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'settings' | 'connection'
@@ -13,10 +14,19 @@ const TABS: { id: Tab; label: string }[] = [
 ]
 
 export default function App() {
+  const [auth, setAuth] = useState<AuthState | null>(null)
   const [tab, setTab] = useState<Tab>('overview')
   const [boot, setBoot] = useState<Bootstrap | null>(null)
   const [err, setErr] = useState('')
   const [ok, setOk] = useState('')
+
+  const checkAuth = useCallback(async () => {
+    try {
+      setAuth(await api.authState())
+    } catch (e) {
+      setErr(String(e))
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -28,8 +38,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    void checkAuth()
+  }, [checkAuth])
+
+  useEffect(() => {
+    if (auth?.authenticated) void refresh()
+  }, [auth, refresh])
 
   const flash = (msg: string) => {
     setOk(msg)
@@ -41,6 +55,27 @@ export default function App() {
     setOk('')
   }
 
+  if (!auth) {
+    return (
+      <div className="flex min-h-full items-center justify-center p-4 text-xs text-[var(--muted)]">
+        载入中…
+      </div>
+    )
+  }
+
+  if (!auth.authenticated) {
+    return <Login needsSetup={auth.needs_setup} onDone={checkAuth} />
+  }
+
+  const logout = async () => {
+    try {
+      await api.logout()
+      await checkAuth()
+    } catch (e) {
+      fail(e)
+    }
+  }
+
   return (
     <div className="min-h-full">
       <header className="border-b border-[var(--border)] bg-[var(--panel)]">
@@ -49,11 +84,17 @@ export default function App() {
             <h1 className="text-base font-semibold">QQBot 群监测</h1>
             <span className="text-xs text-[var(--muted)]">QQ 群 ↔ new-api 绑定与签到</span>
           </div>
-          {boot && (
-            <Badge tone={boot.configured ? 'ok' : 'warn'}>
-              {boot.configured ? '已配置' : '未配置'}
-            </Badge>
-          )}
+          <div className="flex items-center gap-3">
+            {boot && (
+              <Badge tone={boot.configured ? 'ok' : 'warn'}>
+                {boot.configured ? '已配置' : '未配置'}
+              </Badge>
+            )}
+            <span className="text-xs text-[var(--muted)]">{auth.username}</span>
+            <Button kind="ghost" onClick={logout}>
+              退出
+            </Button>
+          </div>
         </div>
         <nav className="mx-auto flex max-w-6xl gap-1 px-4">
           {TABS.map((t) => (
@@ -79,7 +120,14 @@ export default function App() {
         {tab === 'overview' && <Overview boot={boot} onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'groups' && <Groups onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
-        {tab === 'settings' && <SettingsView onDone={flash} onFail={fail} onRefresh={refresh} />}
+        {tab === 'settings' && (
+          <SettingsView
+            onDone={flash}
+            onFail={fail}
+            onRefresh={refresh}
+            username={auth.username}
+          />
+        )}
         {tab === 'connection' && <Connection onDone={flash} onFail={fail} onRefresh={refresh} />}
       </main>
     </div>
@@ -466,13 +514,17 @@ function SettingsView({
   onDone,
   onFail,
   onRefresh,
+  username,
 }: {
   onDone: (m: string) => void
   onFail: (e: unknown) => void
   onRefresh: () => Promise<void>
+  username: string
 }) {
   const [s, setS] = useState<Settings | null>(null)
   const [busy, setBusy] = useState(false)
+  const [cur, setCur] = useState('')
+  const [next, setNext] = useState('')
 
   useEffect(() => {
     api.settings().then(setS).catch(onFail)
@@ -497,38 +549,71 @@ function SettingsView({
   }
 
   return (
-    <Card
-      title="监测设置"
-      actions={
-        <Button kind="primary" disabled={busy} onClick={save}>
-          保存
-        </Button>
-      }
-    >
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="源分组" hint="只把处于这个分组的账号提升出去">
-          <Input value={s.source_group} onChange={str('source_group')} />
-        </Field>
-        <Field label="目标分组" hint="提升到这个分组；必须已在 new-api 里配置好">
-          <Input value={s.target_group} onChange={str('target_group')} />
-        </Field>
-        <Field label="成员列表巡检周期（分钟）">
-          <Input type="number" value={s.member_sync_minutes} onChange={num('member_sync_minutes')} />
-        </Field>
-        <Field label="打卡榜巡检周期（分钟）" hint="榜单只含当日且分页，周期短一些更不容易漏">
-          <Input type="number" value={s.checkin_sync_minutes} onChange={num('checkin_sync_minutes')} />
-        </Field>
-        <Field label="签到奖励下限（quota）">
-          <Input type="number" value={s.reward_min} onChange={num('reward_min')} />
-        </Field>
-        <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
-          <Input type="number" value={s.reward_max} onChange={num('reward_max')} />
-        </Field>
-        <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
-          <Input value={s.timezone} onChange={str('timezone')} />
-        </Field>
-      </div>
-    </Card>
+    <>
+      <Card
+        title="监测设置"
+        actions={
+          <Button kind="primary" disabled={busy} onClick={save}>
+            保存
+          </Button>
+        }
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="源分组" hint="只把处于这个分组的账号提升出去">
+            <Input value={s.source_group} onChange={str('source_group')} />
+          </Field>
+          <Field label="目标分组" hint="提升到这个分组；必须已在 new-api 里配置好">
+            <Input value={s.target_group} onChange={str('target_group')} />
+          </Field>
+          <Field label="成员列表巡检周期（分钟）">
+            <Input type="number" value={s.member_sync_minutes} onChange={num('member_sync_minutes')} />
+          </Field>
+          <Field label="打卡榜巡检周期（分钟）" hint="榜单只含当日且分页，周期短一些更不容易漏">
+            <Input type="number" value={s.checkin_sync_minutes} onChange={num('checkin_sync_minutes')} />
+          </Field>
+          <Field label="签到奖励下限（quota）">
+            <Input type="number" value={s.reward_min} onChange={num('reward_min')} />
+          </Field>
+          <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
+            <Input type="number" value={s.reward_max} onChange={num('reward_max')} />
+          </Field>
+          <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
+            <Input value={s.timezone} onChange={str('timezone')} />
+          </Field>
+        </div>
+      </Card>
+
+      <Card title={`修改密码（${username}）`}>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="当前密码">
+            <Input type="password" value={cur} onChange={setCur} />
+          </Field>
+          <Field label="新密码" hint="至少 8 位">
+            <Input type="password" value={next} onChange={setNext} />
+          </Field>
+          <div className="flex items-end">
+            <Button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true)
+                try {
+                  await api.changePassword(cur, next)
+                  setCur('')
+                  setNext('')
+                  onDone('密码已修改')
+                } catch (e) {
+                  onFail(e)
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            >
+              修改密码
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </>
   )
 }
 

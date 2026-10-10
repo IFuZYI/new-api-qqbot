@@ -33,28 +33,36 @@ func NewRouter(st *store.Store, svc *service.Service, webDist string) *Router {
 func (r *Router) Handler() http.Handler { return r.mux }
 
 func (r *Router) routes() {
+	// Authentication. These must be reachable without a session: the UI needs
+	// authState to choose between the login form and first-run setup.
+	r.mux.HandleFunc("GET /api/auth/state", r.authState)
+	r.mux.HandleFunc("POST /api/auth/setup", r.setup)
+	r.mux.HandleFunc("POST /api/auth/login", r.login)
+	r.mux.HandleFunc("POST /api/auth/logout", r.logout)
+
 	// Serve the built WebUI. Assets live under /assets; everything else that is
 	// not an API route falls back to index.html so the SPA can route client-side.
-	r.mux.HandleFunc("GET /api/bootstrap", r.bootstrap)
-	r.mux.HandleFunc("GET /api/config", r.getConfig)
-	r.mux.HandleFunc("POST /api/config", r.saveConfig)
+	r.mux.HandleFunc("GET /api/bootstrap", r.requireAuth(r.bootstrap))
+	r.mux.HandleFunc("GET /api/config", r.requireAuth(r.getConfig))
+	r.mux.HandleFunc("POST /api/config", r.requireAuth(r.saveConfig))
 
-	r.mux.HandleFunc("GET /api/groups", r.listGroups)
-	r.mux.HandleFunc("POST /api/groups", r.saveGroups)
-	r.mux.HandleFunc("POST /api/groups/refresh", r.refreshGroups)
+	r.mux.HandleFunc("GET /api/groups", r.requireAuth(r.listGroups))
+	r.mux.HandleFunc("POST /api/groups", r.requireAuth(r.saveGroups))
+	r.mux.HandleFunc("POST /api/groups/refresh", r.requireAuth(r.refreshGroups))
 
-	r.mux.HandleFunc("GET /api/members", r.listMembers)
+	r.mux.HandleFunc("GET /api/members", r.requireAuth(r.listMembers))
 
-	r.mux.HandleFunc("GET /api/bindings", r.listBindings)
-	r.mux.HandleFunc("POST /api/bindings", r.createBinding)
-	r.mux.HandleFunc("POST /api/bindings/{qq}/delete", r.deleteBinding)
+	r.mux.HandleFunc("GET /api/bindings", r.requireAuth(r.listBindings))
+	r.mux.HandleFunc("POST /api/bindings", r.requireAuth(r.createBinding))
+	r.mux.HandleFunc("POST /api/bindings/{qq}/delete", r.requireAuth(r.deleteBinding))
 
-	r.mux.HandleFunc("GET /api/settings", r.getSettings)
-	r.mux.HandleFunc("POST /api/settings", r.saveSettings)
+	r.mux.HandleFunc("GET /api/settings", r.requireAuth(r.getSettings))
+	r.mux.HandleFunc("POST /api/settings", r.requireAuth(r.saveSettings))
 
-	r.mux.HandleFunc("GET /api/checkins", r.listCheckins)
+	r.mux.HandleFunc("GET /api/checkins", r.requireAuth(r.listCheckins))
 
-	r.mux.HandleFunc("POST /api/actions/{name}", r.action)
+	r.mux.HandleFunc("POST /api/auth/password", r.requireAuth(r.changePassword))
+	r.mux.HandleFunc("POST /api/actions/{name}", r.requireAuth(r.action))
 }
 
 // ---------- helpers ----------

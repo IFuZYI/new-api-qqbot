@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,21 @@ func (fakeQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
 	return []napcat.SignedMember{{QQ: 54321, Nick: "爱丽丝", Rank: 1, Time: 1791630000}}, nil
 }
 
-func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+// testEnv is an authenticated test server: the cookie jar carries the session
+// created by first-run setup.
+type testEnv struct {
+	srv    *httptest.Server
+	st     *store.Store
+	client *http.Client
+}
+
+func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *http.Client) {
+	t.Helper()
+	env := newTestEnv(t)
+	return env.srv, env.st, env.client
+}
+
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
@@ -47,12 +62,35 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	svc := service.New(st, fakeGateway{}, fakeQQ{})
 	srv := httptest.NewServer(NewRouter(st, svc, t.TempDir()).Handler())
 	t.Cleanup(srv.Close)
-	return srv, st
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	// First-run setup also signs in, so the jar holds a usable session.
+	resp, err := client.Post(srv.URL+"/api/auth/setup", "application/json",
+		strings.NewReader(`{"username":"admin","password":"test-password"}`))
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("setup failed with %d", resp.StatusCode)
+	}
+
+	return &testEnv{srv: srv, st: st, client: client}
 }
 
 func getJSON(t *testing.T, url string, out any) int {
 	t.Helper()
-	resp, err := http.Get(url)
+	return getJSONWith(t, http.DefaultClient, url, out)
+}
+
+func getJSONWith(t *testing.T, c *http.Client, url string, out any) int {
+	t.Helper()
+	resp, err := c.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -67,8 +105,13 @@ func getJSON(t *testing.T, url string, out any) int {
 
 func postJSON(t *testing.T, url string, body any, out any) int {
 	t.Helper()
+	return postJSONWith(t, http.DefaultClient, url, body, out)
+}
+
+func postJSONWith(t *testing.T, c *http.Client, url string, body any, out any) int {
+	t.Helper()
 	raw, _ := json.Marshal(body)
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(raw)))
+	resp, err := c.Post(url, "application/json", strings.NewReader(string(raw)))
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
@@ -84,13 +127,13 @@ func postJSON(t *testing.T, url string, body any, out any) int {
 // The UI drives everything off these two calls, so they must work before
 // anything is configured.
 func TestBootstrapReportsUnconfigured(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _, cl := newTestServer(t)
 
 	var got struct {
 		Configured bool             `json:"configured"`
 		Settings   service.Settings `json:"settings"`
 	}
-	if code := getJSON(t, srv.URL+"/api/bootstrap", &got); code != 200 {
+	if code := getJSONWith(t, cl, srv.URL+"/api/bootstrap", &got); code != 200 {
 		t.Fatalf("status %d", code)
 	}
 	if got.Configured {
@@ -102,14 +145,14 @@ func TestBootstrapReportsUnconfigured(t *testing.T) {
 }
 
 func TestConfigRoundTripHidesSecrets(t *testing.T) {
-	srv, st := newTestServer(t)
+	srv, st, cl := newTestServer(t)
 
 	in := config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "secret-pw"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "webui-tok"},
 	}
 	var saved config.Config
-	if code := postJSON(t, srv.URL+"/api/config", in, &saved); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/config", in, &saved); code != 200 {
 		t.Fatalf("save status %d", code)
 	}
 	if saved.NewAPI.Password != config.RedactedPassword {
@@ -117,7 +160,7 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 	}
 
 	var got config.Config
-	getJSON(t, srv.URL+"/api/config", &got)
+	getJSONWith(t, cl, srv.URL+"/api/config", &got)
 	if got.NewAPI.Password != config.RedactedPassword {
 		t.Errorf("GET must redact the password: %q", got.NewAPI.Password)
 	}
@@ -134,17 +177,17 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 
 // Saving the form without retyping the password must not erase it.
 func TestConfigSaveKeepsPasswordWhenRedactedPlaceholderSent(t *testing.T) {
-	srv, st := newTestServer(t)
+	srv, st, cl := newTestServer(t)
 
-	postJSON(t, srv.URL+"/api/config", config.Config{
+	postJSONWith(t, cl, srv.URL+"/api/config", config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "real-pw"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "tok"},
 	}, nil)
 
 	var got config.Config
-	getJSON(t, srv.URL+"/api/config", &got)
+	getJSONWith(t, cl, srv.URL+"/api/config", &got)
 	got.NewAPI.URL = "https://other.example.com" // operator edits only the URL
-	postJSON(t, srv.URL+"/api/config", got, nil)
+	postJSONWith(t, cl, srv.URL+"/api/config", got, nil)
 
 	stored, _ := config.Load(st)
 	if stored.NewAPI.Password != "real-pw" {
@@ -156,21 +199,21 @@ func TestConfigSaveKeepsPasswordWhenRedactedPlaceholderSent(t *testing.T) {
 }
 
 func TestConfigRejectsInvalidInput(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _, cl := newTestServer(t)
 	bad := config.Config{
 		NewAPI: config.NewAPI{URL: "not-a-url", Username: "u", Password: "p"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "t"},
 	}
-	if code := postJSON(t, srv.URL+"/api/config", bad, nil); code == 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/config", bad, nil); code == 200 {
 		t.Error("an invalid URL must be rejected")
 	}
 }
 
 func TestGroupsRefreshStoresSelection(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _, cl := newTestServer(t)
 
 	var groups []store.MonitoredGroup
-	if code := postJSON(t, srv.URL+"/api/groups/refresh", map[string]any{}, &groups); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, &groups); code != 200 {
 		t.Fatalf("refresh status %d", code)
 	}
 	if len(groups) != 1 || groups[0].GroupID != 1129535731 {
@@ -183,11 +226,11 @@ func TestGroupsRefreshStoresSelection(t *testing.T) {
 }
 
 func TestGroupSelectionPersists(t *testing.T) {
-	srv, _ := newTestServer(t)
-	postJSON(t, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
+	srv, _, cl := newTestServer(t)
+	postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
 
 	var groups []store.MonitoredGroup
-	if code := postJSON(t, srv.URL+"/api/groups", map[string]any{
+	if code := postJSONWith(t, cl, srv.URL+"/api/groups", map[string]any{
 		"group_ids": []int64{},
 	}, &groups); code != 200 {
 		t.Fatalf("status %d", code)
@@ -198,8 +241,8 @@ func TestGroupSelectionPersists(t *testing.T) {
 }
 
 func TestMembersEndpointIncludesBindingState(t *testing.T) {
-	srv, st := newTestServer(t)
-	postJSON(t, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
+	srv, st, cl := newTestServer(t)
+	postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
 	if err := st.UpsertMembers(1129535731, []store.Member{{QQ: 54321, Nickname: "爱丽丝"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +255,7 @@ func TestMembersEndpointIncludesBindingState(t *testing.T) {
 		} `json:"items"`
 		Total int `json:"total"`
 	}
-	if code := getJSON(t, srv.URL+"/api/members", &got); code != 200 {
+	if code := getJSONWith(t, cl, srv.URL+"/api/members", &got); code != 200 {
 		t.Fatalf("status %d", code)
 	}
 	if got.Total != 1 || got.Items[0].QQ != 54321 || got.Items[0].Bound {
@@ -222,20 +265,20 @@ func TestMembersEndpointIncludesBindingState(t *testing.T) {
 	if err := st.SetBinding(store.Binding{QQ: 54321, NewAPIUserID: 7, NewAPIUsername: "seven"}); err != nil {
 		t.Fatal(err)
 	}
-	getJSON(t, srv.URL+"/api/members", &got)
+	getJSONWith(t, cl, srv.URL+"/api/members", &got)
 	if !got.Items[0].Bound {
 		t.Error("binding state not reflected in the member list")
 	}
 }
 
 func TestManualBindAndUnbind(t *testing.T) {
-	srv, st := newTestServer(t)
+	srv, st, cl := newTestServer(t)
 	if err := st.UpsertMembers(1, []store.Member{{QQ: 54321, Nickname: "a"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	var b store.Binding
-	if code := postJSON(t, srv.URL+"/api/bindings", map[string]any{
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
 		"qq": 54321, "newapi_user_id": 42, "newapi_username": "forty-two",
 	}, &b); code != 200 {
 		t.Fatalf("bind status %d", code)
@@ -244,7 +287,7 @@ func TestManualBindAndUnbind(t *testing.T) {
 		t.Errorf("unexpected binding: %+v", b)
 	}
 
-	if code := postJSON(t, srv.URL+"/api/bindings/54321/delete", map[string]any{}, nil); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings/54321/delete", map[string]any{}, nil); code != 200 {
 		t.Fatalf("unbind status %d", code)
 	}
 	if _, err := st.GetBinding(54321); err == nil {
@@ -253,66 +296,66 @@ func TestManualBindAndUnbind(t *testing.T) {
 }
 
 func TestSettingsEndpointValidates(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _, cl := newTestServer(t)
 
 	var s service.Settings
-	getJSON(t, srv.URL+"/api/settings", &s)
+	getJSONWith(t, cl, srv.URL+"/api/settings", &s)
 	if s.TargetGroup != "authorized" {
 		t.Fatalf("unexpected defaults: %+v", s)
 	}
 
 	s.RewardMin, s.RewardMax = 500, 100
-	if code := postJSON(t, srv.URL+"/api/settings", s, nil); code == 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/settings", s, nil); code == 200 {
 		t.Error("min > max must be rejected")
 	}
 	s.RewardMin, s.RewardMax = 100, 500
-	if code := postJSON(t, srv.URL+"/api/settings", s, nil); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/settings", s, nil); code != 200 {
 		t.Errorf("valid settings rejected, status %d", code)
 	}
 }
 
 func TestActionsRunTheSweeps(t *testing.T) {
-	srv, _ := newTestServer(t)
-	postJSON(t, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
+	srv, _, cl := newTestServer(t)
+	postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
 
 	var res struct {
 		Members int `json:"members"`
 		Bound   int `json:"bound"`
 	}
-	if code := postJSON(t, srv.URL+"/api/actions/sync", map[string]any{}, &res); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/actions/sync", map[string]any{}, &res); code != 200 {
 		t.Fatalf("sync status %d", code)
 	}
 	if res.Members != 1 {
 		t.Errorf("sync should have stored the roster: %+v", res)
 	}
 
-	if code := postJSON(t, srv.URL+"/api/actions/bind", map[string]any{}, nil); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/actions/bind", map[string]any{}, nil); code != 200 {
 		t.Errorf("bind action status %d", code)
 	}
-	if code := postJSON(t, srv.URL+"/api/actions/promote", map[string]any{}, nil); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/actions/promote", map[string]any{}, nil); code != 200 {
 		t.Errorf("promote action status %d", code)
 	}
-	if code := postJSON(t, srv.URL+"/api/actions/award", map[string]any{}, nil); code != 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/actions/award", map[string]any{}, nil); code != 200 {
 		t.Errorf("award action status %d", code)
 	}
 }
 
 func TestUnknownActionIsNotFound(t *testing.T) {
-	srv, _ := newTestServer(t)
-	if code := postJSON(t, srv.URL+"/api/actions/nope", map[string]any{}, nil); code != 404 {
+	srv, _, cl := newTestServer(t)
+	if code := postJSONWith(t, cl, srv.URL+"/api/actions/nope", map[string]any{}, nil); code != 404 {
 		t.Errorf("want 404, got %d", code)
 	}
 }
 
 func TestCheckinsEndpoint(t *testing.T) {
-	srv, st := newTestServer(t)
+	srv, st, cl := newTestServer(t)
 	if err := st.RecordCheckin(store.Checkin{QQ: 54321, Date: "2026-10-10", RewardQuota: 150}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
 		Items []store.Checkin `json:"items"`
 	}
-	if code := getJSON(t, srv.URL+"/api/checkins?date=2026-10-10", &got); code != 200 {
+	if code := getJSONWith(t, cl, srv.URL+"/api/checkins?date=2026-10-10", &got); code != 200 {
 		t.Fatalf("status %d", code)
 	}
 	if len(got.Items) != 1 || got.Items[0].RewardQuota != 150 {

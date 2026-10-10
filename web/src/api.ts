@@ -93,7 +93,31 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+export interface AuthState {
+  needs_setup: boolean
+  authenticated: boolean
+  username: string
+}
+
 export const api = {
+  authState: () => req<AuthState>('/api/auth/state'),
+  setup: (username: string, password: string) =>
+    req<{ username: string }>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  login: (username: string, password: string) =>
+    req<{ username: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => req<{ ok: boolean }>('/api/auth/logout', { method: 'POST', body: '{}' }),
+  changePassword: (current: string, next: string) =>
+    req<{ ok: boolean }>('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ current, next }),
+    }),
+
   bootstrap: () => req<Bootstrap>('/api/bootstrap'),
   getConfig: () => req<Config>('/api/config'),
   saveConfig: (c: Config) => req<Config>('/api/config', { method: 'POST', body: JSON.stringify(c) }),

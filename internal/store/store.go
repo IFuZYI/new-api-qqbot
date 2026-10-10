@@ -454,6 +454,13 @@ func (s *Store) GetAdmin(username string) (*Admin, error) {
 	return &a, nil
 }
 
+// SetAdminPassword replaces an admin's password hash.
+func (s *Store) SetAdminPassword(username, passwordHash string) error {
+	return s.db.Model(&Admin{}).
+		Where("username = ?", username).
+		Update("password_hash", passwordHash).Error
+}
+
 // CountAdmins returns how many WebUI admins exist, so the first run can prompt
 // for initial setup.
 func (s *Store) CountAdmins() (int64, error) {
