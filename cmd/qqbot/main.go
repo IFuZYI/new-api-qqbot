@@ -17,6 +17,7 @@ import (
 
 	"qqbot/internal/api"
 	"qqbot/internal/config"
+	"qqbot/internal/events"
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
 	"qqbot/internal/scheduler"
@@ -54,6 +55,17 @@ func main() {
 	defer stop()
 
 	go sched.Run(ctx)
+
+	// The event listener only shortens reaction time (binding commands); the
+	// sweeps above remain the source of truth, so a missing event stream is
+	// harmless. It blocks until shutdown, so it must run in its own goroutine.
+	go events.New(func() (string, string) {
+		cfg, err := config.Load(st)
+		if err != nil {
+			return "", ""
+		}
+		return cfg.NapCat.EventWSURL, cfg.NapCat.EventWSToken
+	}, bindAdapter{svc}).Run(ctx)
 
 	router := api.NewRouter(st, svc, *webDist)
 	srv := &http.Server{
@@ -187,6 +199,18 @@ func (l *lazyQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error
 		return nil, err
 	}
 	return w.GetGroupSignedList(groupID)
+}
+
+// bindAdapter narrows the service to the one method the event listener needs.
+type bindAdapter struct{ svc *service.Service }
+
+func (b bindAdapter) IsMonitoredGroup(groupID int64) (bool, error) {
+	return b.svc.IsMonitoredGroup(groupID)
+}
+
+func (b bindAdapter) BindByCommand(qq int64) error {
+	_, err := b.svc.BindByCommand(qq)
+	return err
 }
 
 var errNotConfigured = &notConfiguredError{}

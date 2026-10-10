@@ -294,6 +294,21 @@ func (s *Service) BindByCommand(qq int64) (*store.Binding, error) {
 	return s.st.GetBinding(qq)
 }
 
+// IsMonitoredGroup reports whether a group is selected for monitoring, so
+// commands from unrelated groups are ignored.
+func (s *Service) IsMonitoredGroup(groupID int64) (bool, error) {
+	gs, err := s.st.EnabledGroups()
+	if err != nil {
+		return false, err
+	}
+	for _, g := range gs {
+		if g.GroupID == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // qqEmail derives a QQ number's conventional email address.
 func qqEmail(qq int64) string { return fmt.Sprintf("%d@qq.com", qq) }
 
