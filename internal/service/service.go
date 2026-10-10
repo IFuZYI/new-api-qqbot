@@ -53,6 +53,7 @@ const settingsKey = "settings"
 // Gateway is the subset of the new-api client the service needs.
 type Gateway interface {
 	FindUserByEmail(addr string) (*newapi.User, error)
+	GetUser(id int) (*newapi.User, error)
 	SetGroup(u *newapi.User, group string) error
 	AddQuota(userID, value int) error
 }
@@ -306,6 +307,10 @@ type PromoteResult struct {
 // Promote moves every bound member whose account sits in the source group into
 // the target group. Accounts in any other group are left alone, and a failure
 // on one account does not abort the sweep.
+//
+// The account is re-read by id before writing, because new-api's update
+// replaces the fields it accepts: sending a sparse object would blank the
+// account's display name.
 func (s *Service) Promote() (PromoteResult, error) {
 	var res PromoteResult
 	cfg, err := s.Settings()
@@ -327,11 +332,10 @@ func (s *Service) Promote() (PromoteResult, error) {
 			return res, err
 		}
 
-		u, err := s.gw.FindUserByEmail(qqEmail(m.QQ))
-		if err != nil || u == nil {
-			// Fall back to the id recorded at binding time when the email is
-			// no longer resolvable.
-			u = &newapi.User{ID: b.NewAPIUserID, Username: b.NewAPIUsername, Group: cfg.SourceGroup}
+		u, err := s.gw.GetUser(b.NewAPIUserID)
+		if err != nil {
+			res.Failed++
+			continue
 		}
 		if u.Group != cfg.SourceGroup {
 			res.Skipped++

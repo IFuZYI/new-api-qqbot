@@ -21,10 +21,11 @@ type Router struct {
 	mux *http.ServeMux
 }
 
-// NewRouter builds the API router.
-func NewRouter(st *store.Store, svc *service.Service) *Router {
+// NewRouter builds the API router. The WebUI is served from webDist.
+func NewRouter(st *store.Store, svc *service.Service, webDist string) *Router {
 	r := &Router{st: st, svc: svc, mux: http.NewServeMux()}
 	r.routes()
+	r.mux.Handle("/", staticHandler(webDist))
 	return r
 }
 
@@ -32,6 +33,8 @@ func NewRouter(st *store.Store, svc *service.Service) *Router {
 func (r *Router) Handler() http.Handler { return r.mux }
 
 func (r *Router) routes() {
+	// Serve the built WebUI. Assets live under /assets; everything else that is
+	// not an API route falls back to index.html so the SPA can route client-side.
 	r.mux.HandleFunc("GET /api/bootstrap", r.bootstrap)
 	r.mux.HandleFunc("GET /api/config", r.getConfig)
 	r.mux.HandleFunc("POST /api/config", r.saveConfig)

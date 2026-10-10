@@ -12,3 +12,6 @@
 
 # scratch
 /tmp/
+
+# web
+/web/node_modules/

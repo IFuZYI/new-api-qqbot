@@ -14,6 +14,7 @@ import (
 type fakeNewAPI struct {
 	byEmail   map[string]*newapi.User
 	ambig     map[string]bool
+	dir       map[int]*newapi.User
 	groupSets []groupSet
 	quotaAdds []quotaAdd
 	failSet   error
@@ -38,7 +39,28 @@ func (f *fakeNewAPI) FindUserByEmail(addr string) (*newapi.User, error) {
 	if f.ambig[addr] {
 		return nil, newapi.ErrAmbiguousEmail
 	}
-	return f.byEmail[addr], nil
+	u := f.byEmail[addr]
+	if u != nil {
+		// The gateway knows this account, so it is addressable by id too.
+		f.users()[u.ID] = u
+	}
+	return u, nil
+}
+
+// users is the account directory the fake mutates, so a promotion is visible on
+// the next read (as it is on the real gateway).
+func (f *fakeNewAPI) users() map[int]*newapi.User {
+	if f.dir == nil {
+		f.dir = map[int]*newapi.User{}
+	}
+	return f.dir
+}
+
+func (f *fakeNewAPI) GetUser(id int) (*newapi.User, error) {
+	if u, ok := f.users()[id]; ok {
+		return u, nil
+	}
+	return nil, errors.New("user not found")
 }
 
 func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
@@ -47,6 +69,7 @@ func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
 	}
 	f.groupSets = append(f.groupSets, groupSet{userID: u.ID, group: group})
 	u.Group = group
+	f.users()[u.ID] = u
 	return nil
 }
 

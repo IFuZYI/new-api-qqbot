@@ -28,6 +28,7 @@ func main() {
 	var (
 		addr    = flag.String("addr", ":4096", "HTTP listen address for the WebUI")
 		dataDir = flag.String("data", "data", "directory holding the SQLite database")
+		webDist = flag.String("web", "web/dist", "directory holding the built WebUI")
 	)
 	flag.Parse()
 
@@ -54,7 +55,7 @@ func main() {
 
 	go sched.Run(ctx)
 
-	router := api.NewRouter(st, svc)
+	router := api.NewRouter(st, svc, *webDist)
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           router.Handler(),
@@ -99,6 +100,14 @@ func (l *lazyGateway) FindUserByEmail(addr string) (*newapi.User, error) {
 		return nil, err
 	}
 	return c.FindUserByEmail(addr)
+}
+
+func (l *lazyGateway) GetUser(id int) (*newapi.User, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.GetUser(id)
 }
 
 func (l *lazyGateway) SetGroup(u *newapi.User, group string) error {

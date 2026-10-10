@@ -18,8 +18,11 @@ import (
 type fakeGateway struct{}
 
 func (fakeGateway) FindUserByEmail(addr string) (*newapi.User, error) { return nil, nil }
-func (fakeGateway) SetGroup(u *newapi.User, group string) error       { return nil }
-func (fakeGateway) AddQuota(userID, value int) error                  { return nil }
+func (fakeGateway) GetUser(id int) (*newapi.User, error) {
+	return &newapi.User{ID: id, Username: "u", Group: "default"}, nil
+}
+func (fakeGateway) SetGroup(u *newapi.User, group string) error { return nil }
+func (fakeGateway) AddQuota(userID, value int) error            { return nil }
 
 type fakeQQ struct{}
 
@@ -42,7 +45,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	svc := service.New(st, fakeGateway{}, fakeQQ{})
-	srv := httptest.NewServer(NewRouter(st, svc).Handler())
+	srv := httptest.NewServer(NewRouter(st, svc, t.TempDir()).Handler())
 	t.Cleanup(srv.Close)
 	return srv, st
 }
