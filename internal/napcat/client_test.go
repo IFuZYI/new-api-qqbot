@@ -351,8 +351,12 @@ func TestEnsureAdaptersWritesBothAdapters(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/OB11Config/GetConfig":
+			// Every list carries an adapter this service does not own, including
+			// a sibling in the two lists it writes. A rewrite that rebuilds a
+			// list instead of upserting into it would drop them.
 			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{` +
-				`"httpServers":[],"websocketServers":[],` +
+				`"httpServers":[{"name":"someone-elses-http","enable":true,"port":3999}],` +
+				`"websocketServers":[{"name":"someone-elses-ws","enable":true,"port":3998}],` +
 				`"websocketClients":[{"name":"someone-elses","enable":true,"url":"ws://x"}]}}}`))
 		case "/api/OB11Config/SetConfig":
 			var body map[string]string
@@ -389,21 +393,53 @@ func TestEnsureAdaptersWritesBothAdapters(t *testing.T) {
 	if err := json.Unmarshal([]byte(setConfig), &sent); err != nil {
 		t.Fatalf("sent config is not JSON: %v\n%s", err, setConfig)
 	}
-	http := sent.Network["httpServers"]
-	ws := sent.Network["websocketServers"]
-	if len(http) != 1 || http[0]["name"] != HTTPAdapterName || http[0]["enable"] != true {
-		t.Errorf("http adapter not enabled: %+v", http)
+
+	// Each list must hold exactly our adapter plus the operator's, so the
+	// rewrite neither duplicated ours nor dropped theirs.
+	byName := func(list string) map[string]map[string]any {
+		out := map[string]map[string]any{}
+		for _, a := range sent.Network[list] {
+			if n, _ := a["name"].(string); n != "" {
+				out[n] = a
+			}
+		}
+		return out
 	}
-	if http[0]["token"] != res.Token {
-		t.Errorf("http adapter token mismatch: %+v", http[0])
+
+	http := byName("httpServers")
+	if len(http) != 2 {
+		t.Errorf("httpServers should hold ours and the operator's, got %d: %+v", len(http), sent.Network["httpServers"])
 	}
-	if len(ws) != 1 || ws[0]["name"] != WSAdapterName || ws[0]["enable"] != true {
-		t.Errorf("ws adapter not enabled: %+v", ws)
+	if _, ok := http["someone-elses-http"]; !ok {
+		t.Error("the operator's http adapter was dropped")
 	}
-	if ws[0]["enableForcePushEvent"] != true {
-		t.Errorf("ws adapter must push events: %+v", ws[0])
+	ours := http[HTTPAdapterName]
+	if ours == nil {
+		t.Fatalf("%s missing: %+v", HTTPAdapterName, sent.Network["httpServers"])
 	}
-	// The operator's own adapter must survive.
+	if ours["enable"] != true {
+		t.Errorf("our http adapter is not enabled: %+v", ours)
+	}
+	if ours["token"] != res.Token {
+		t.Errorf("http adapter token mismatch: %+v", ours)
+	}
+
+	ws := byName("websocketServers")
+	if len(ws) != 2 {
+		t.Errorf("websocketServers should hold ours and the operator's, got %d: %+v", len(ws), sent.Network["websocketServers"])
+	}
+	if _, ok := ws["someone-elses-ws"]; !ok {
+		t.Error("the operator's ws adapter was dropped")
+	}
+	oursWS := ws[WSAdapterName]
+	if oursWS == nil {
+		t.Fatalf("%s missing: %+v", WSAdapterName, sent.Network["websocketServers"])
+	}
+	if oursWS["enableForcePushEvent"] != true {
+		t.Errorf("ws adapter must push events: %+v", oursWS)
+	}
+
+	// A list this service never touches must survive verbatim.
 	if len(sent.Network["websocketClients"]) != 1 {
 		t.Errorf("an unrelated adapter was dropped: %+v", sent.Network["websocketClients"])
 	}
