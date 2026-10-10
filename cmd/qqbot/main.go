@@ -268,9 +268,13 @@ func (b bindAdapter) IsMonitoredGroup(groupID int64) (bool, error) {
 	return b.svc.IsMonitoredGroup(groupID)
 }
 
-func (b bindAdapter) BindByCommand(qq int64) error {
-	_, err := b.svc.BindByCommand(qq)
+func (b bindAdapter) BindByCommand(groupID, qq int64) error {
+	_, err := b.svc.BindByCommand(groupID, qq)
 	return err
+}
+
+func (b bindAdapter) EnsureMember(groupID, qq int64, nickname string) error {
+	return b.svc.EnsureMember(groupID, qq, nickname)
 }
 
 var errNotConfigured = &notConfiguredError{}

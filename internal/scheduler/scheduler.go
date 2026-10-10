@@ -12,6 +12,9 @@ import (
 	"qqbot/internal/service"
 )
 
+// patrolDisabledCheck is how often a switched-off patrol re-reads its setting.
+const patrolDisabledCheck = 30 * time.Second
+
 // Scheduler drives the sweeps on independent timers.
 type Scheduler struct {
 	svc *service.Service
@@ -64,10 +67,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 	<-ctx.Done()
 }
 
+// memberInterval returns 0 when the roster patrol is switched off.
 func (s *Scheduler) memberInterval() time.Duration {
 	cfg, err := s.svc.Settings()
 	if err != nil {
 		return 2 * time.Hour
+	}
+	if !cfg.MemberPatrolEnabled {
+		return 0
 	}
 	return time.Duration(cfg.MemberSyncMinutes) * time.Minute
 }
@@ -97,10 +104,14 @@ func (s *Scheduler) ruleInterval() time.Duration {
 	return time.Duration(best) * time.Minute
 }
 
+// checkinInterval returns 0 when the check-in patrol is switched off.
 func (s *Scheduler) checkinInterval() time.Duration {
 	cfg, err := s.svc.Settings()
 	if err != nil {
 		return 30 * time.Minute
+	}
+	if !cfg.CheckinPatrolEnabled {
+		return 0
 	}
 	return time.Duration(cfg.CheckinSyncMinutes) * time.Minute
 }
@@ -118,6 +129,13 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			// A zero interval means the patrol is switched off: idle and keep
+			// re-checking, so re-enabling it takes effect without a restart.
+			if d := every(); d <= 0 {
+				s.record(name, nil)
+				timer.Reset(patrolDisabledCheck)
+				continue
+			}
 			if err := fn(); err != nil {
 				s.record(name, err)
 				log.Printf("[%s] sweep failed: %v", name, err)
@@ -126,7 +144,7 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 			}
 			d := every()
 			if d <= 0 {
-				d = time.Hour
+				d = patrolDisabledCheck
 			}
 			timer.Reset(d)
 		}

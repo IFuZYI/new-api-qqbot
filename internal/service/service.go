@@ -17,10 +17,19 @@ import (
 // Settings is the operator-configurable state. It is stored as one JSON blob
 // under the "settings" key, so adding a field needs no migration.
 type Settings struct {
-	// Sync cadence, in minutes. Each is independent: the sign-in board is
+	// Patrol cadence, in minutes. Each is independent: the sign-in board is
 	// today-only and needs a short cycle, the roster does not.
-	MemberSyncMinutes  int `json:"member_sync_minutes"`
-	CheckinSyncMinutes int `json:"checkin_sync_minutes"`
+	//
+	// Both patrols can be switched off. They are the backstop, not the only
+	// path: the group-increase event records a new member immediately, the bind
+	// command records the member who used it, and a bind settles the group. The
+	// check-in board, however, has no event at all (NapCat exposes no check-in
+	// notice), so turning the check-in patrol off stops check-ins being
+	// recorded and therefore stops rewards - the UI says so.
+	MemberPatrolEnabled  bool `json:"member_patrol_enabled"`
+	MemberSyncMinutes    int  `json:"member_sync_minutes"`
+	CheckinPatrolEnabled bool `json:"checkin_patrol_enabled"`
+	CheckinSyncMinutes   int  `json:"checkin_sync_minutes"`
 
 	// Daily reward, drawn uniformly from [RewardMin, RewardMax] per member per
 	// day. Equal values mean a fixed award.
@@ -34,11 +43,13 @@ type Settings struct {
 // DefaultSettings returns the shipped defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		MemberSyncMinutes:  120,
-		CheckinSyncMinutes: 30,
-		RewardMin:          100,
-		RewardMax:          200,
-		Timezone:           "Asia/Shanghai",
+		MemberPatrolEnabled:  true,
+		MemberSyncMinutes:    120,
+		CheckinPatrolEnabled: true,
+		CheckinSyncMinutes:   30,
+		RewardMin:            100,
+		RewardMax:            200,
+		Timezone:             "Asia/Shanghai",
 	}
 }
 
@@ -266,9 +277,25 @@ func (s *Service) AutoBind() (BindResult, error) {
 	return res, nil
 }
 
+// EnsureMember records a member row (and group membership) from a QQ-side
+// observation, so a member is known without waiting for a roster patrol. Used
+// by the group-increase event and by the bind command, which both know the
+// member's identity directly.
+func (s *Service) EnsureMember(groupID, qq int64, nickname string) error {
+	return s.st.UpsertMembers(groupID, []store.Member{{QQ: qq, Nickname: nickname}})
+}
+
 // BindByCommand binds a QQ to the new-api account matching qq@qq.com, which is
 // what a member triggers with ">>绑定<<". The member cannot name another email.
-func (s *Service) BindByCommand(qq int64) (*store.Binding, error) {
+//
+// The member is recorded first, so the command works with the roster patrol
+// switched off: the message itself is proof the member is in that group.
+func (s *Service) BindByCommand(groupID, qq int64) (*store.Binding, error) {
+	if groupID != 0 {
+		if err := s.EnsureMember(groupID, qq, ""); err != nil {
+			return nil, err
+		}
+	}
 	u, err := s.gw.FindUserByEmail(qqEmail(qq))
 	if err != nil {
 		return nil, err

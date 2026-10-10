@@ -21,7 +21,9 @@ export interface Config {
 }
 
 export interface Settings {
+  member_patrol_enabled: boolean
   member_sync_minutes: number
+  checkin_patrol_enabled: boolean
   checkin_sync_minutes: number
   reward_min: number
   reward_max: number

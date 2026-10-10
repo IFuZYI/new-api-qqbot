@@ -561,11 +561,47 @@ function SettingsView({
         }
       >
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="成员列表巡检周期（分钟）">
-            <Input type="number" value={s.member_sync_minutes} onChange={num('member_sync_minutes')} />
+          <Field
+            label="成员列表巡检"
+            hint="兜底功能。新成员进群会立即记录，绑定成功也会立即记录；关闭后只在成员变动时同步昵称等资料。"
+          >
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={s.member_patrol_enabled}
+                  onChange={(e) => setS({ ...s, member_patrol_enabled: e.target.checked })}
+                />
+                启用
+              </label>
+              <Input
+                type="number"
+                value={s.member_sync_minutes}
+                onChange={num('member_sync_minutes')}
+              />
+              <span className="text-xs text-muted-foreground">分钟</span>
+            </div>
           </Field>
-          <Field label="打卡榜巡检周期（分钟）" hint="榜单只含当日且分页，周期短一些更不容易漏">
-            <Input type="number" value={s.checkin_sync_minutes} onChange={num('checkin_sync_minutes')} />
+          <Field
+            label="打卡榜巡检"
+            hint="打卡没有事件通知（NapCat 不提供），只能轮询榜单。关闭后签到不会被记录，也就不会发放奖励。"
+          >
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={s.checkin_patrol_enabled}
+                  onChange={(e) => setS({ ...s, checkin_patrol_enabled: e.target.checked })}
+                />
+                启用
+              </label>
+              <Input
+                type="number"
+                value={s.checkin_sync_minutes}
+                onChange={num('checkin_sync_minutes')}
+              />
+              <span className="text-xs text-muted-foreground">分钟</span>
+            </div>
           </Field>
           <Field label="签到奖励下限（quota）">
             <Input type="number" value={s.reward_min} onChange={num('reward_min')} />

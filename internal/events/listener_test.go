@@ -9,14 +9,25 @@ import (
 type fakeSvc struct {
 	monitored map[int64]bool
 	bound     []int64
+	ensured   []ensureCall
 	bindErr   error
+}
+
+type ensureCall struct {
+	groupID int64
+	qq      int64
+}
+
+func (f *fakeSvc) EnsureMember(groupID, qq int64, _ string) error {
+	f.ensured = append(f.ensured, ensureCall{groupID: groupID, qq: qq})
+	return nil
 }
 
 func (f *fakeSvc) IsMonitoredGroup(groupID int64) (bool, error) {
 	return f.monitored[groupID], nil
 }
 
-func (f *fakeSvc) BindByCommand(qq int64) error {
+func (f *fakeSvc) BindByCommand(groupID, qq int64) error {
 	if f.bindErr != nil {
 		return f.bindErr
 	}
@@ -107,5 +118,62 @@ func TestBindFailureIsTolerated(t *testing.T) {
 
 	if len(svc.bound) != 0 {
 		t.Errorf("a failed bind must not be recorded: %v", svc.bound)
+	}
+}
+
+// A new member must become known from the join event, without waiting for a
+// roster patrol: that is what makes the member patrol optional.
+func TestGroupIncreaseRecordsMember(t *testing.T) {
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	l := New(func() (string, string) { return "", "" }, svc)
+
+	l.Handle([]byte(`{"time":1791634898,"self_id":3688665216,"post_type":"notice","notice_type":"group_increase","sub_type":"approve","group_id":1129535731,"user_id":54321,"operator_id":1}`))
+
+	if len(svc.ensured) != 1 {
+		t.Fatalf("new member not recorded: %+v", svc.ensured)
+	}
+	if svc.ensured[0].groupID != 1129535731 || svc.ensured[0].qq != 54321 {
+		t.Errorf("wrong member recorded: %+v", svc.ensured[0])
+	}
+}
+
+func TestGroupIncreaseIgnoredOutsideMonitoredGroups(t *testing.T) {
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	l := New(func() (string, string) { return "", "" }, svc)
+
+	l.Handle([]byte(`{"post_type":"notice","notice_type":"group_increase","group_id":999999,"user_id":54321}`))
+
+	if len(svc.ensured) != 0 {
+		t.Errorf("must not record from an unmonitored group: %+v", svc.ensured)
+	}
+}
+
+// Other notice types must stay untouched.
+func TestOtherNoticesIgnored(t *testing.T) {
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}}
+	l := New(func() (string, string) { return "", "" }, svc)
+
+	for _, raw := range []string{
+		`{"post_type":"notice","notice_type":"group_decrease","group_id":1,"user_id":54321}`,
+		`{"post_type":"notice","notice_type":"group_card","group_id":1,"user_id":54321}`,
+		`{"post_type":"notice","notice_type":"notify","sub_type":"gray_tip","group_id":1,"user_id":54321}`,
+		`{"post_type":"meta_event","meta_event_type":"heartbeat"}`,
+	} {
+		l.Handle([]byte(raw))
+	}
+	if len(svc.ensured) != 0 || len(svc.bound) != 0 {
+		t.Errorf("unexpected side effects: ensured=%+v bound=%+v", svc.ensured, svc.bound)
+	}
+}
+
+// A join event with no user id (malformed) must be ignored, not recorded as QQ 0.
+func TestGroupIncreaseWithZeroUserIgnored(t *testing.T) {
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}}
+	l := New(func() (string, string) { return "", "" }, svc)
+
+	l.Handle([]byte(`{"post_type":"notice","notice_type":"group_increase","group_id":1,"user_id":0}`))
+
+	if len(svc.ensured) != 0 {
+		t.Errorf("a zero user id must be ignored: %+v", svc.ensured)
 	}
 }

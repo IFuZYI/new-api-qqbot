@@ -459,3 +459,76 @@ func TestAwardFixedRangePaysExactly(t *testing.T) {
 		t.Errorf("min==max must pay exactly: %+v", na.quotaAdds)
 	}
 }
+
+// The bind command must record the member, not only the binding: with the
+// roster patrol switched off, this is the only thing that makes the member
+// known to the UI and to the rules engine.
+func TestBindByCommandRecordsMember(t *testing.T) {
+	svc, st, na, _ := newTestService(t)
+	na.byEmail["54321@qq.com"] = &newapi.User{ID: 7, Username: "seven", Group: "default", Role: 1}
+
+	if _, err := svc.BindByCommand(1129535731, 54321); err != nil {
+		t.Fatalf("BindByCommand: %v", err)
+	}
+	if _, err := st.GetMember(54321); err != nil {
+		t.Errorf("the member who bound must be recorded: %v", err)
+	}
+	b, err := st.GetBinding(54321)
+	if err != nil || b.NewAPIUserID != 7 {
+		t.Errorf("binding not stored: %+v err=%v", b, err)
+	}
+}
+
+func TestEnsureMemberIsIdempotent(t *testing.T) {
+	svc, st, _, _ := newTestService(t)
+	enableTestGroup(t, st, 1129535731)
+
+	if err := svc.EnsureMember(1129535731, 54321, ""); err != nil {
+		t.Fatal(err)
+	}
+	// A second join event for the same member must not create a duplicate.
+	if err := svc.EnsureMember(1129535731, 54321, ""); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.MembersInGroup(1129535731)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 {
+		t.Errorf("want 1 member, got %d", len(ms))
+	}
+}
+
+// A later patrol must fill in the nickname the join event could not provide.
+func TestEnsureMemberNicknameFilledByLaterSync(t *testing.T) {
+	svc, st, _, _ := newTestService(t)
+	enableTestGroup(t, st, 1129535731)
+
+	if err := svc.EnsureMember(1129535731, 54321, ""); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := st.GetMember(54321)
+	if m.Nickname != "" {
+		t.Fatalf("precondition: nickname should be empty, got %q", m.Nickname)
+	}
+
+	// The roster patrol then sees the member with a real name.
+	if err := st.UpsertMembers(1129535731, []store.Member{{QQ: 54321, Nickname: "爱丽丝"}}); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = st.GetMember(54321)
+	if m.Nickname != "爱丽丝" {
+		t.Errorf("nickname not filled in: %q", m.Nickname)
+	}
+}
+
+func TestSettingsDefaultPatrolsEnabled(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	s, err := svc.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.MemberPatrolEnabled || !s.CheckinPatrolEnabled {
+		t.Errorf("both patrols must default to on: %+v", s)
+	}
+}
