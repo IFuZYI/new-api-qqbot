@@ -21,19 +21,36 @@ cd web && npm install && npm run build
 首次打开 `http://<host>:4096/` 会要求设置管理账号（本项目自己的账号，与 new-api 无关）。
 之后同一表单用于登录。
 
+## 数据与配置
+
+**全部状态都在 `-data` 指定的目录里**（默认 `data/`），备份或迁移只需搬这一个目录：
+
+| 文件 | 内容 |
+|---|---|
+| `data/qqbot.db` | 监测群、成员、绑定、签到、分组转换规则、监测设置、管理账号、会话签名密钥 |
+| `data/config.yaml` | new-api 与 NapCat 的连接配置（权限 0600） |
+
+`config.yaml` 与 WebUI 的「连接配置」是**同一份配置**，两种改法都有效且不会互相覆盖：
+
+- 手改 `config.yaml` 并保存 → 服务在**下一次读取时**采用，**不需要重启**；语法错误只报错并
+  继续用数据库里的旧值，不会把可用配置写坏。
+- 在 WebUI 保存 → 同时写入数据库与该文件。
+- 文件不存在时自动创建（内容取自数据库），两种方式都能作为起点。
+- 文件中密码/token 是**明文**（否则无法回写），故权限设为 `0600`。
+
 ## 结构
 
 | 包 | 职责 |
 |---|---|
 | `cmd/qqbot` | 入口、参数、按需重建的网关/NapCat 客户端 |
 | `internal/store` | SQLite 表结构、迁移、查询 |
-| `internal/service` | 业务逻辑（同步/绑定/提升/发奖），只依赖 `Gateway`、`QQ` 两个接口 |
+| `internal/service` | 业务逻辑（同步/绑定/分组转换/发奖），只依赖 `Gateway`、`QQ` 两个接口 |
 | `internal/newapi` | new-api 管理接口客户端 |
 | `internal/napcat` | OneBot HTTP 客户端 + NapCat WebUI 桥 |
 | `internal/events` | OneBot WebSocket 监听（绑定指令） |
 | `internal/api` | HTTP 接口、鉴权、静态文件 |
-| `internal/config` | 连接配置（存数据库） |
-| `internal/scheduler` | 两条独立周期的巡检 |
+| `internal/config` | 连接配置（文件 + 数据库双份） |
+| `internal/scheduler` | 三条独立周期的巡检 |
 
 ## 已实现的行为
 
@@ -51,30 +68,29 @@ cd web && npm install && npm run build
 - **绑定指令**：成员在监测群发 `>>绑定<<` 即绑定到 `他的QQ@qq.com` 对应账号；不接受指定别的邮箱。
   经 OneBot WebSocket 事件触发；事件通道不可用不影响其它功能。
 - **手动换绑**：WebUI 用户管理里可把任意 QQ 改指到任意 new-api 账号，也可解绑。
-- **分组提升**：只把处于**源分组**的账号提升到**目标分组**；未绑定、已在其它分组的都跳过；
-  单个失败不中断整轮；重复执行是空操作。写入前按 id 重读账号，避免 new-api 的
-  `PUT /api/user/` 覆盖式更新把 `display_name` 清空。
 - **签到**：轮询 `get_group_signed_list`，按 `(qq, 日期)` 幂等入库（榜单只含当日且分页，
   多轮结果是**并集**）；累计天数即 `checkins` 的行数。
 - **发奖**：每天每人一次，额度在 `[下限, 上限]` 内随机；发放前先把金额落库，用
   `rewarded_at` 占位，网关失败才释放重试，成功则永不重发。
-- **巡检**：成员列表与打卡榜各自独立周期（默认 120 / 30 分钟，可配），每次循环重新读取配置，
-  改设置无需重启。启动后延迟 20 秒再跑首轮。
+- **巡检**：成员列表、打卡榜、分组转换规则各自独立周期（默认 120 / 30 分钟，规则按最短
+  配置周期），每次循环重新读取配置，改设置无需重启。启动后延迟 20 秒再跑首轮。
 - **鉴权**：除 `/api/auth/{state,setup,login,logout}` 外全部接口需要登录会话。
 
 ## 验证方式
 
 - `go test ./internal/...` —— 全离线，两个外部系统都用假实现。
 - 真实联调（手动，不放进 `go test`）：
-  - `POST /api/groups/refresh` 读到真实群 `1129535731`；
-  - `POST /api/actions/sync` → 3 名成员；
-  - `POST /api/actions/bind` → 全部 pending（群里三人未在 FuZY 注册对应邮箱）；
-  - `POST /api/actions/promote` 把测试账号从 `default` 提到 `authorized`，`display_name` 保留，
-    已还原；
-  - `POST /api/actions/award` 真发额度 108（在 100–200 区间内），重复执行不重发，已回滚；
-  - 浏览器实测首次设置、登录、五个页面渲染、`>>绑定<<` 经真实 WebSocket 触发。
+  - `POST /api/groups/refresh` 读到真实群 `1129535731`；`POST /api/actions/sync` → 3 名成员；
+  - 分组转换把测试账号从 `default` 提到 `authorized`，`display_name` 保留，已还原；
+  - `POST /api/actions/award` 真发额度（在区间内），重复执行不重发，已回滚；
+  - 浏览器实测首次设置、登录、各页面渲染、`>>绑定<<` 经真实 WebSocket 触发；
+  - 配置持久化：首次启动生成 `config.yaml`；手改文件后**不重启**即生效（NapCat 侧随即可用）；
+    WebUI 保存会重写文件且密钥不丢；重启后成员/绑定/规则/设置/会话全部保留。
 - 已知边界：**管理员账号不能管理同级或更高级账号**。用 `napcat`（role 10）去改组/发额度到
   它自己（也是 role 10）会被拒 —— 这是 new-api 的规则，不是缺陷。验证时请用普通账号（role 1）。
+- **new-api 有活跃会话上限（默认 50，有效期 30 天）**。本项目已缓存登录会话、只在配置变化或
+  请求被拒时重登；但反复手动登录仍会占满额度，此时登录返回 `AUTH_SESSION_LIMIT`，需要在
+  new-api 后台清会话（或调大上限）。
 
 ## 尚未实现 / 需注意
 
@@ -83,3 +99,5 @@ cd web && npm install && npm run build
   最长等一个成员巡检周期）。
 - NapCat WebUI 凭证在 NapCat 重启后失效（除非设了 `NAPCAT_WEBUI_JWT_SECRET_KEY`），
   本服务会重登，注意登录频率限制。
+- 规则引擎的实盘端到端验证（绑定 → 自动转换）因 new-api 会话额度耗尽而**未完成**，目前只有
+  单元测试覆盖；恢复凭据后应补一次。
