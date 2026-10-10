@@ -143,7 +143,9 @@ func (l *Listener) session(ctx context.Context, url, token string) error {
 		if err != nil {
 			return err
 		}
-		l.Handle(raw)
+		// A panic while handling one event must not kill the process: recover,
+		// log, and keep the stream alive.
+		l.handleSafely(raw)
 	}
 }
 
@@ -154,6 +156,16 @@ type handshakeError struct {
 
 func (e *handshakeError) Error() string {
 	return "websocket handshake failed: " + e.status + ": " + e.err.Error()
+}
+
+// handleSafely runs Handle with panic recovery.
+func (l *Listener) handleSafely(raw []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[events] recovered from a panic while handling an event: %v", r)
+		}
+	}()
+	l.Handle(raw)
 }
 
 // Handle processes one raw event. It is exported so it can be driven directly

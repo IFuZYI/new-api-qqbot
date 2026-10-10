@@ -23,11 +23,17 @@ export default function App() {
   const [err, setErr] = useState('')
   const [ok, setOk] = useState('')
 
+  const [authError, setAuthError] = useState('')
+
   const checkAuth = useCallback(async () => {
     try {
       setAuth(await api.authState())
+      setAuthError('')
     } catch (e) {
-      setErr(String(e))
+      // Do NOT leave auth null with only the banner set: the banner lives
+      // inside the authenticated branch, so the app would sit on the loading
+      // screen forever with the error unreachable.
+      setAuthError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
@@ -36,7 +42,14 @@ export default function App() {
       setBoot(await api.bootstrap())
       setErr('')
     } catch (e) {
-      setErr(String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // A 401 means the session expired or was revoked: drop back to the login
+      // screen rather than leaving a dead panel showing zeros.
+      if (msg.includes('未登录') || msg.includes('401')) {
+        setAuth({ needs_setup: false, authenticated: false, username: '' })
+        return
+      }
+      setErr(msg)
     }
   }, [])
 
@@ -60,8 +73,19 @@ export default function App() {
 
   if (!auth) {
     return (
-      <div className="flex min-h-full items-center justify-center p-4 text-xs text-muted-foreground">
-        载入中…
+      <div className="flex min-h-full items-center justify-center p-4">
+        <div className="w-full max-w-sm text-center">
+          {authError ? (
+            <>
+              <ErrorNote>{authError}</ErrorNote>
+              <Button kind="primary" onClick={() => void checkAuth()}>
+                重试
+              </Button>
+            </>
+          ) : (
+            <span className="text-xs text-muted-foreground">载入中…</span>
+          )}
+        </div>
       </div>
     )
   }
@@ -661,22 +685,38 @@ function Connection({
   onRefresh: () => Promise<void>
 }) {
   const [c, setC] = useState<Config | null>(null)
+  const [revision, setRevision] = useState('')
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => {
-    api.getConfig().then(setC).catch(onFail)
+  const load = useCallback(() => {
+    api
+      .getConfig()
+      .then((r) => {
+        setC(r.config)
+        setRevision(r.revision)
+      })
+      .catch(onFail)
   }, [onFail])
+
+  useEffect(() => {
+    load()
+  }, [load])
 
   if (!c) return <Card title="连接配置">载入中…</Card>
 
   const save = async () => {
     setBusy(true)
     try {
-      setC(await api.saveConfig(c))
+      const r = await api.saveConfig(c, revision)
+      setC(r.config)
+      setRevision(r.revision)
       onDone('连接配置已保存')
       await onRefresh()
     } catch (e) {
       onFail(e)
+      // The config changed underneath us: reload so the operator sees the
+      // current values before deciding what to do.
+      load()
     } finally {
       setBusy(false)
     }

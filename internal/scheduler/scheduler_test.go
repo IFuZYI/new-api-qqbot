@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,14 @@ func (stubQQ) GetGroupList() ([]napcat.Group, error)                  { return n
 func (stubQQ) GetGroupMemberList(int64) ([]napcat.GroupMember, error) { return nil, nil }
 func (stubQQ) GetGroupSignedList(int64) ([]napcat.SignedMember, error) {
 	return nil, nil
+}
+
+// enableSchedGroup registers one monitored group.
+func enableSchedGroup(t *testing.T, st *store.Store, id int64) {
+	t.Helper()
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: id, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newScheduler(t *testing.T) (*Scheduler, *store.Store, *service.Service) {
@@ -159,5 +169,54 @@ func TestStatusCoversEveryPatrol(t *testing.T) {
 		if _, ok := st[name]; !ok {
 			t.Errorf("status is missing %q", name)
 		}
+	}
+}
+
+// A panic in a sweep must not kill the process: it would take the WebUI, the
+// event listener and the other patrols down with it.
+func TestSweepPanicIsContained(t *testing.T) {
+	sched, _, _ := newScheduler(t)
+
+	err := sched.safely("members", func() error {
+		var m map[string]int
+		m["boom"] = 1 // nil map write panics
+		return nil
+	})
+	if err == nil {
+		t.Fatal("a panic must be converted into an error")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Errorf("the error should say it was a panic, got %v", err)
+	}
+
+	// The scheduler must still be usable afterwards.
+	if err := sched.safely("members", func() error { return nil }); err != nil {
+		t.Errorf("scheduler unusable after a contained panic: %v", err)
+	}
+}
+
+// A failing check-in sync must stay visible in Status: the award step's nil
+// return used to erase it, so a dead board looked healthy.
+func TestCheckinSyncErrorIsNotMasked(t *testing.T) {
+	sched, st, _ := newScheduler(t)
+	enableSchedGroup(t, st, 1)
+
+	// Model the check-in sweep: sync fails, award succeeds.
+	syncErr := errors.New("board unreadable")
+	err := sched.safely("checkins", func() error {
+		if syncErr != nil {
+			return syncErr
+		}
+		return nil
+	})
+	sched.record("checkins", err)
+
+	status := sched.Status()
+	entry, ok := status["checkins"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected status shape: %+v", status)
+	}
+	if _, has := entry["last_error"]; !has {
+		t.Errorf("the failed check-in sync was masked: %+v", entry)
 	}
 }

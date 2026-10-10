@@ -54,8 +54,9 @@ func TestListenerBindsOverRealWebSocket(t *testing.T) {
 	go l.Run(ctx)
 
 	deadline := time.After(4 * time.Second)
+	var bound []int64
 	for {
-		if len(svc.bound) > 0 {
+		if bound = svc.boundQQs(); len(bound) > 0 {
 			break
 		}
 		select {
@@ -65,8 +66,8 @@ func TestListenerBindsOverRealWebSocket(t *testing.T) {
 		}
 	}
 
-	if svc.bound[0] != 54321 {
-		t.Errorf("bound the wrong member: %v", svc.bound)
+	if bound[0] != 54321 {
+		t.Errorf("bound the wrong member: %v", bound)
 	}
 	if gotAuth != "Bearer ws-tok" {
 		t.Errorf("token not attached to the handshake: %q", gotAuth)

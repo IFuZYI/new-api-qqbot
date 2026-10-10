@@ -3,14 +3,34 @@ package events
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
+// fakeSvc is driven from the listener goroutine and read from the test
+// goroutine, so its recorders are guarded.
 type fakeSvc struct {
+	mu        sync.Mutex
 	monitored map[int64]bool
 	bound     []int64
 	ensured   []ensureCall
 	bindErr   error
+	bindPanic bool
+}
+
+// boundQQs returns a copy of the bound QQs.
+func (f *fakeSvc) boundQQs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.bound...)
+}
+
+// ensuredCalls returns a copy of the recorded EnsureMember calls.
+func (f *fakeSvc) ensuredCalls() []ensureCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ensureCall(nil), f.ensured...)
 }
 
 type ensureCall struct {
@@ -19,18 +39,27 @@ type ensureCall struct {
 }
 
 func (f *fakeSvc) EnsureMember(groupID, qq int64, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.ensured = append(f.ensured, ensureCall{groupID: groupID, qq: qq})
 	return nil
 }
 
 func (f *fakeSvc) IsMonitoredGroup(groupID int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.monitored[groupID], nil
 }
 
 func (f *fakeSvc) BindByCommand(groupID, qq int64) error {
+	if f.bindPanic {
+		panic("simulated failure deep in the bind path")
+	}
 	if f.bindErr != nil {
 		return f.bindErr
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bound = append(f.bound, qq)
 	return nil
 }
@@ -49,8 +78,8 @@ func TestBindCommandBindsMember(t *testing.T) {
 
 	l.Handle(msgEvent(1129535731, 54321, BindCommand))
 
-	if len(svc.bound) != 1 || svc.bound[0] != 54321 {
-		t.Fatalf("expected 54321 to be bound, got %v", svc.bound)
+	if b := svc.boundQQs(); len(b) != 1 || b[0] != 54321 {
+		t.Fatalf("expected 54321 to be bound, got %v", b)
 	}
 }
 
@@ -61,8 +90,8 @@ func TestBindCommandIgnoredOutsideMonitoredGroups(t *testing.T) {
 
 	l.Handle(msgEvent(999999999, 54321, BindCommand))
 
-	if len(svc.bound) != 0 {
-		t.Errorf("must not bind from an unmonitored group: %v", svc.bound)
+	if b := svc.boundQQs(); len(b) != 0 {
+		t.Errorf("must not bind from an unmonitored group: %v", b)
 	}
 }
 
@@ -175,5 +204,23 @@ func TestGroupIncreaseWithZeroUserIgnored(t *testing.T) {
 
 	if len(svc.ensured) != 0 {
 		t.Errorf("a zero user id must be ignored: %+v", svc.ensured)
+	}
+}
+
+// A panic while handling an event must not kill the process.
+func TestHandlePanicIsContained(t *testing.T) {
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindPanic: true}
+	l := New(func() (string, string) { return "", "" }, svc)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.handleSafely([]byte(`{"post_type":"message","group_id":1,"user_id":5,"raw_message":">>绑定<<"}`))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleSafely did not return; a panic escaped")
 	}
 }

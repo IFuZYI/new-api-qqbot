@@ -5,7 +5,9 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,12 +58,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if err != nil {
 			return err
 		}
-		if err := s.svc.SyncAllCheckins(date); err != nil {
-			// A group with no sign-in board is normal, so record and carry on.
-			s.record("checkins", err)
+		// Remember a sync failure: the award step usually succeeds, and its nil
+		// return would otherwise erase the error before the UI could read it,
+		// making a dead board look like a healthy patrol.
+		syncErr := s.svc.SyncAllCheckins(date)
+		if _, err := s.svc.Award(date); err != nil {
+			return err
 		}
-		_, err = s.svc.Award(date)
-		return err
+		return syncErr
 	})
 
 	<-ctx.Done()
@@ -136,7 +140,7 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 				timer.Reset(patrolDisabledCheck)
 				continue
 			}
-			if err := fn(); err != nil {
+			if err := s.safely(name, fn); err != nil {
 				s.record(name, err)
 				log.Printf("[%s] sweep failed: %v", name, err)
 			} else {
@@ -149,6 +153,18 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 			timer.Reset(d)
 		}
 	}
+}
+
+// safely runs one sweep, converting a panic into an error. A panic on this
+// goroutine would otherwise terminate the process, taking the WebUI, the event
+// listener and the other patrols with it.
+func (s *Scheduler) safely(name string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return fn()
 }
 
 func (s *Scheduler) record(name string, err error) {

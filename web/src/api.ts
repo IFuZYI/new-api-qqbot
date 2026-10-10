@@ -143,8 +143,12 @@ export const api = {
     }),
 
   bootstrap: () => req<Bootstrap>('/api/bootstrap'),
-  getConfig: () => req<Config>('/api/config'),
-  saveConfig: (c: Config) => req<Config>('/api/config', { method: 'POST', body: JSON.stringify(c) }),
+  getConfig: () => req<{ config: Config; revision: string }>('/api/config'),
+  saveConfig: (c: Config, revision: string) =>
+    req<{ config: Config; revision: string }>('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ config: c, revision }),
+    }),
 
   groups: () => req<{ items: Group[] }>('/api/groups'),
   refreshGroups: () => req<Group[]>('/api/groups/refresh', { method: 'POST', body: '{}' }),
