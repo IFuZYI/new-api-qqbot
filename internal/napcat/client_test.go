@@ -295,15 +295,52 @@ func TestNormalizeWebUIURLStripsPath(t *testing.T) {
 
 func TestWebUIHostExtractsHostname(t *testing.T) {
 	cases := map[string]string{
-		"http://localhost:6099/webui/": "localhost",
+		"http://localhost:6099/webui/": "127.0.0.1",
 		"http://127.0.0.1:6099":        "127.0.0.1",
 		"napcat.internal:6099":         "napcat.internal",
+		"http://[::1]:6099":            "::1",
 		"":                             "127.0.0.1",
 	}
 	for in, want := range cases {
 		if got := WebUIHost(in); got != want {
 			t.Errorf("WebUIHost(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The OneBot adapters bind on IPv4 loopback, but localhost commonly resolves to
+// ::1 first, which cannot reach a 127.0.0.1 listener. Building the OneBot URLs
+// from "localhost" therefore produces a URL that fails with connection refused
+// even though the adapter is running, so the name is mapped to 127.0.0.1.
+func TestEnsureAdaptersMapsLocalhostToIPv4(t *testing.T) {
+	var sent struct {
+		Network map[string][]map[string]any `json:"network"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{"httpServers":[],"websocketServers":[]}}}`))
+		case "/api/OB11Config/SetConfig":
+			var body map[string]string
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			_ = json.Unmarshal([]byte(body["config"]), &sent)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+	res, err := c.EnsureAdapters(AdapterOptions{ConnectHost: WebUIHost("http://localhost:6099/webui/")})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	if res.OneBotURL != "http://127.0.0.1:3002" {
+		t.Errorf("onebot url = %q, want the IPv4 form", res.OneBotURL)
+	}
+	if res.EventWSURL != "ws://127.0.0.1:3001" {
+		t.Errorf("event ws url = %q, want the IPv4 form", res.EventWSURL)
 	}
 }
 

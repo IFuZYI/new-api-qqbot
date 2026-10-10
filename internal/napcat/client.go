@@ -260,15 +260,24 @@ func NormalizeWebUIURL(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// WebUIHost returns the host part of a NapCat WebUI address, for building the
-// OneBot URLs the adapters will be reached at. It falls back to 127.0.0.1 when
-// the address cannot be parsed.
+// WebUIHost returns the host to use when reaching NapCat's OneBot adapters,
+// derived from the WebUI address the operator gave.
+//
+// "localhost" is deliberately mapped to 127.0.0.1. The adapters bind on IPv4
+// loopback, but localhost commonly resolves to ::1 first (this host does), and
+// a listener on 127.0.0.1 is not reachable through ::1 - so a URL built from
+// localhost fails with "connection refused" even though everything is running.
+// 127.0.0.1 is unambiguous.
 func WebUIHost(raw string) string {
 	u, err := url.Parse(NormalizeWebUIURL(raw))
 	if err != nil || u.Hostname() == "" {
 		return "127.0.0.1"
 	}
-	return u.Hostname()
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return "127.0.0.1"
+	}
+	return host
 }
 
 // SetCredential installs a previously obtained credential.

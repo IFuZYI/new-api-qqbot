@@ -134,6 +134,12 @@ below) and never as part of `go test`.
   NapCat's API lives at the root (`/api/...`); a carried path makes every call
   hit the SPA's HTML instead of JSON. `napcat.NormalizeWebUIURL` strips it, and
   the connection page's auto-configure is what wires the OneBot adapters up.
+- **`localhost` is never used for the OneBot URLs; it becomes 127.0.0.1.** The
+  adapters bind IPv4 loopback, but `localhost` usually resolves to `::1` first,
+  and a 127.0.0.1 listener is unreachable through `::1` — so a stored
+  `http://localhost:3002` fails with "connection refused" while everything is
+  actually running. `napcat.WebUIHost` maps the name; the URLs it returns are
+  what gets stored.
 - **`get_group_signed_list` errors when a group has no sign-in board**, and
   returns only today's page. Treat it as a union across polls; a group without a
   board is normal, not a failure — the client reports it as
