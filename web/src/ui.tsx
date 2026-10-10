@@ -105,6 +105,55 @@ export function Select({
   )
 }
 
+/**
+ * Switch is the sliding on/off control used for the patrol toggles.
+ *
+ * It is a real <button role="switch">, not a styled checkbox: the state is then
+ * announced to assistive tech and reachable by keyboard, and the visible track
+ * and knob are drawn from the theme tokens so both light and dark follow
+ * automatically. The knob is positioned by transform (not left/right) so the
+ * transition animates instead of jumping.
+ */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  /** Accessible name; also rendered beside the control. */
+  label?: string
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="group inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      <span
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors ${
+          checked ? 'border-transparent bg-primary' : 'border-border bg-muted'
+        }`}
+      >
+        <span
+          className={`pointer-events-none block h-3.5 w-3.5 rounded-full bg-background shadow-sm transition-transform ${
+            checked ? 'translate-x-[18px]' : 'translate-x-[3px]'
+          }`}
+        />
+      </span>
+      {label && (
+        <span className={`text-sm ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>{label}</span>
+      )}
+    </button>
+  )
+}
+
 export function Badge({
   children,
   tone = 'muted',
