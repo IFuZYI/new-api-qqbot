@@ -90,24 +90,26 @@ func AdminCredsFromEnv(env map[string]string) AdminCreds {
 }
 
 // ResolveEnvFilePath returns the env file to read: QQBOT_ENV_FILE when set,
-// otherwise .env inside the data directory. Putting it in the data directory
-// keeps the whole instance (database, config.yaml, .env) in one place.
+// otherwise .env beside the code (the working directory). Keeping it at the
+// repo root means the whole checkout is one place to look, and a deployment
+// that keeps its state elsewhere still finds it.
 func ResolveEnvFilePath(dataDir string) string {
 	if p := strings.TrimSpace(os.Getenv(EnvFilePath)); p != "" {
 		return p
 	}
-	return filepath.Join(dataDir, EnvFileName)
+	return EnvFileName
 }
 
 // EnvFileCandidates lists the env files to try, in precedence order. The
-// data directory comes first because that is the documented location; the
-// working directory is accepted as a fallback so a checkout that keeps its .env
-// beside the code still works.
+// working directory comes first because that is the documented location (the
+// file sits beside the code, next to .env.example); the data directory is
+// accepted as a fallback so an instance that keeps its .env with the rest of
+// its state also works.
 func EnvFileCandidates(dataDir string) []string {
 	if p := strings.TrimSpace(os.Getenv(EnvFilePath)); p != "" {
 		return []string{p}
 	}
-	return []string{filepath.Join(dataDir, EnvFileName), EnvFileName}
+	return []string{EnvFileName, filepath.Join(dataDir, EnvFileName)}
 }
 
 // LoadEnv merges the process environment with the env file.

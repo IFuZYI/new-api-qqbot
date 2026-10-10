@@ -119,11 +119,11 @@ func TestAdminCredsFromEnv(t *testing.T) {
 }
 
 // The .env file is the documented way to set the admin, so the default path is
-// the data directory, and QQBOT_ENV_FILE overrides it.
+// beside the code (the working directory), and QQBOT_ENV_FILE overrides it.
 func TestResolveEnvFilePath(t *testing.T) {
 	t.Setenv(EnvFilePath, "")
-	if got := ResolveEnvFilePath("/data"); got != filepath.Join("/data", ".env") {
-		t.Errorf("default path = %q", got)
+	if got := ResolveEnvFilePath("/data"); got != ".env" {
+		t.Errorf("default path = %q, want .env (beside the code)", got)
 	}
 	t.Setenv(EnvFilePath, "/etc/qqbot.env")
 	if got := ResolveEnvFilePath("/data"); got != "/etc/qqbot.env" {
@@ -131,9 +131,8 @@ func TestResolveEnvFilePath(t *testing.T) {
 	}
 }
 
-// The data directory's .env is the documented location; a checkout that keeps
-// its .env beside the code still works as a fallback.
-func TestLoadEnvFallsBackToTheWorkingDirectory(t *testing.T) {
+// The .env beside the code is the documented location.
+func TestLoadEnvReadsTheWorkingDirectoryFile(t *testing.T) {
 	dir := t.TempDir() // empty data dir, no .env in it
 	work := t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, ".env"), []byte("QQBOT_ADMIN_PASSWORD=from-cwd\n"), 0o600); err != nil {
@@ -150,8 +149,27 @@ func TestLoadEnvFallsBackToTheWorkingDirectory(t *testing.T) {
 	}
 }
 
-// The data directory wins when both exist.
-func TestLoadEnvPrefersTheDataDirectory(t *testing.T) {
+// The data directory's .env still works as a fallback, for an instance that
+// keeps its .env with the rest of its state.
+func TestLoadEnvFallsBackToTheDataDirectory(t *testing.T) {
+	dir := t.TempDir()
+	work := t.TempDir() // empty working dir, no .env in it
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("QQBOT_ADMIN_PASSWORD=from-data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+
+	got, err := LoadEnv(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["QQBOT_ADMIN_PASSWORD"] != "from-data" {
+		t.Errorf("want the data-directory value, got %v", got)
+	}
+}
+
+// The file beside the code wins when both exist.
+func TestLoadEnvPrefersTheWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	work := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("QQBOT_ADMIN_PASSWORD=from-data\n"), 0o600); err != nil {
@@ -166,8 +184,8 @@ func TestLoadEnvPrefersTheDataDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["QQBOT_ADMIN_PASSWORD"] != "from-data" {
-		t.Errorf("want the data-directory value, got %v", got)
+	if got["QQBOT_ADMIN_PASSWORD"] != "from-cwd" {
+		t.Errorf("want the working-directory value, got %v", got)
 	}
 }
 
@@ -176,10 +194,10 @@ func TestLoadEnvPrefersTheDataDirectory(t *testing.T) {
 func TestLoadEnvStopsAtAnExistingEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	work := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("# intentionally empty\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(work, ".env"), []byte("# intentionally empty\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(work, ".env"), []byte("QQBOT_ADMIN_PASSWORD=from-cwd\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("QQBOT_ADMIN_PASSWORD=from-data\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(work)
