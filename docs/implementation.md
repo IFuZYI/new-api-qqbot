@@ -21,6 +21,18 @@ cd web && npm install && npm run build
 首次打开 `http://<host>:4096/` 会要求设置管理账号（本项目自己的账号，与 new-api 无关）。
 之后同一表单用于登录。
 
+管理账号也可以**从环境变量预置**，适合部署时无人值守：在数据目录放 `.env`（或用
+`QQBOT_ENV_FILE` 指定别的路径），写入 `QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD`，
+启动时在服务器开始接受请求**之前**读取，因此新实例不会有一瞬间对先到者敞开。进程环境变量
+优先于文件，容器/systemd 可覆盖文件而不改它。密码留空视为「不改动已有账号」，所以模板里的
+空行不会把面板唯一的门清掉；改密码并重启即重置（密码丢失时的恢复路径）。
+
+```bash
+# data/.env
+QQBOT_ADMIN_USERNAME=admin
+QQBOT_ADMIN_PASSWORD=至少8位
+```
+
 ## 数据与配置
 
 **全部状态都在 `-data` 指定的目录里**（默认 `data/`），备份或迁移只需搬这一个目录：
@@ -29,6 +41,7 @@ cd web && npm install && npm run build
 |---|---|
 | `data/qqbot.db` | 监测群、成员、绑定、签到、分组转换规则、监测设置、管理账号、会话签名密钥 |
 | `data/config.yaml` | new-api 与 NapCat 的连接配置（权限 0600） |
+| `data/.env` | 可选：管理账号的环境变量预置（权限 0600，见上）。不进版本库 |
 
 `config.yaml` 与 WebUI 的「连接配置」是**同一份配置**，两种改法都有效且不会互相覆盖：
 
@@ -74,7 +87,9 @@ cd web && npm install && npm run build
   `rewarded_at` 占位，网关失败才释放重试，成功则永不重发。
 - **巡检**：成员列表、打卡榜、分组转换规则各自独立周期（默认 120 / 30 分钟，规则按最短
   配置周期），每次循环重新读取配置，改设置无需重启。启动后延迟 20 秒再跑首轮。
-- **鉴权**：除 `/api/auth/{state,setup,login,logout}` 外全部接口需要登录会话。
+- **鉴权**：除 `/api/auth/{state,setup,login,logout}` 外全部接口需要登录会话。管理账号可在
+  首次运行表单创建，或由环境变量（`data/.env` / 进程环境）在启动时预置；改环境变量并重启即
+  重置密码（丢失时的恢复路径）。
 
 ## 验证方式
 

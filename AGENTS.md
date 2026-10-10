@@ -21,7 +21,7 @@ internal/newapi/    new-api admin API client
 internal/napcat/    OneBot HTTP client + NapCat WebUI bridge
 internal/events/    OneBot WebSocket listener (binding command)
 internal/api/       HTTP API + static file serving
-internal/config/    connection settings stored in the database
+internal/config/    connection settings stored in the database, plus the env file
 web/                React + Vite + Tailwind WebUI
 docs/adr/           decision records; docs/design-notes.md has the verified facts
 ```
@@ -44,8 +44,12 @@ works — build the frontend only when you need the UI.
 
 The panel requires a login: on first run the UI asks for an admin username and
 password (minimum 8 characters) and that same form becomes the login afterwards.
-Auth state lives in the `admins` table; the session cookie is HMAC-signed with a
-key generated on first use and stored in settings. Only `/api/auth/state`,
+The admin can also be provisioned from the environment — `.env` in the data
+directory (or `QQBOT_ENV_FILE`), or the process environment, via
+`QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD` — read at startup before the
+server accepts requests, so a fresh instance is never briefly open. Auth state
+lives in the `admins` table; the session cookie is HMAC-signed with a key
+generated on first use and stored in settings. Only `/api/auth/state`,
 `/api/auth/setup`, `/api/auth/login` and `/api/auth/logout` are reachable
 without a session — add new endpoints through `r.requireAuth(...)`.
 
@@ -127,6 +131,16 @@ below) and never as part of `go test`.
   (`/api/OB11Config/SetConfig` → save + reload), so enabling an adapter needs no
   restart — do not claim otherwise.
 - Never write to `reference/`; it is upstream material that may be refreshed.
+- **The admin credential in the environment is authoritative, but blank means
+  "leave it alone".** `QQBOT_ADMIN_PASSWORD` set to a value creates the admin or
+  resets its password at startup (the recovery path when it is lost); unset or
+  whitespace-only leaves the stored admin untouched, so an empty line in a
+  provisioning template cannot wipe the panel's only gate. Re-applying the same
+  value is a no-op (it must not rewrite the hash, or every restart would revoke
+  every session); a *changed* password bumps the session generation like any
+  other password change. A configured username that differs from an existing one
+  *adds* an account rather than replacing it, so a typo cannot lock the operator
+  out.
 
 ## Verifying against the real systems
 

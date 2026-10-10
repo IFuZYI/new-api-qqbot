@@ -74,3 +74,5 @@
 - `docs/adr/0002-binding-owned-locally.md` — 绑定存本库，new-api 只读
 - `docs/adr/0003-polling-authoritative-events-optional.md` — 巡检是唯一真相来源
 - `docs/adr/0004-reward-random-range.md` — 奖励区间随机
+- `docs/adr/0005-rules-driven-conversion.md` — 分组转换由规则驱动
+- `docs/adr/0006-admin-credential-from-env.md` — 管理账号可由环境变量预置
