@@ -562,6 +562,28 @@ export function WarnNote({ children }: { children: ReactNode }) {
   )
 }
 
+/**
+ * FieldAction places a control-less action (a button) inside a form grid so it
+ * lines up with the inputs beside it.
+ *
+ * Aligning the *fields* does not align the *controls*: a Field whose hint is
+ * set is taller, so bottom-aligning the row (items-end) pushes its input up by
+ * exactly the hint's height (measured: 22px) and top-aligning it leaves the
+ * bare button above the inputs. Reproducing Field's label line makes the action
+ * share the inputs' baseline regardless of which siblings carry a hint.
+ */
+export function FieldAction({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      {/* Matches Field's label line box so the action sits level with the controls. */}
+      <span aria-hidden="true" className="invisible text-xs font-medium">
+        .
+      </span>
+      {children}
+    </div>
+  )
+}
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 

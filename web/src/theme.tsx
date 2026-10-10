@@ -62,7 +62,7 @@ export function ThemeToggle() {
       onClick={() => setTheme(next)}
       title={label}
       aria-label={label}
-      className="inline-flex size-8 shrink-0 items-center justify-center rounded-control border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]"
+      className="inline-flex size-8 shrink-0 items-center justify-center rounded-control border border-border text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]"
     >
       {theme === 'dark' ? (
         // Sun: shown while dark, offering the light mode.

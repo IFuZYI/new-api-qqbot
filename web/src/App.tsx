@@ -3,7 +3,7 @@ import { api, type AuthState, type Bootstrap, type CheckResult, type Config, typ
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Empty, ErrorNote, Field, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -1008,14 +1008,14 @@ function SettingsView({
       </Card>
 
       <Card title="修改密码" description={`当前管理账号：${username}`}>
-        <div className="grid items-end gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-3">
           <Field label="当前密码">
             <Input type="password" value={cur} onChange={setCur} autoComplete="current-password" />
           </Field>
           <Field label="新密码" hint="至少 8 位">
             <Input type="password" value={next} onChange={setNext} autoComplete="new-password" />
           </Field>
-          <div>
+          <FieldAction>
             <Button
               disabled={busy}
               onClick={async () => {
@@ -1034,7 +1034,7 @@ function SettingsView({
             >
               修改密码
             </Button>
-          </div>
+          </FieldAction>
         </div>
       </Card>
     </>
