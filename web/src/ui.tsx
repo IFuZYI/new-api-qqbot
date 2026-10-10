@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 /**
  * Shared UI kit. Colours come from the token layer in index.css (new-api's
@@ -102,6 +102,110 @@ export function Select({
     >
       {children}
     </select>
+  )
+}
+
+/**
+ * MultiSelect is a checkbox dropdown for "pick any number of these" fields.
+ *
+ * A native <select multiple> is unusable here: it needs ctrl-click to add a
+ * second option and shows every choice as a permanently highlighted row. This
+ * keeps the closed state to one compact line (with the selection summarised)
+ * and opens a list of checkboxes, which is what the choice actually is.
+ */
+export function MultiSelect({
+  options,
+  selected,
+  onChange,
+  emptyText = '无可选项',
+  allText = '任意',
+  disabled,
+}: {
+  options: string[]
+  selected: string[]
+  onChange: (next: string[]) => void
+  /** Shown inside the closed control when nothing is selected. */
+  allText?: string
+  /** Shown when there are no options at all. */
+  emptyText?: string
+  disabled?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+
+  // Close on an outside click or Escape, so the dropdown cannot get stuck open.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const toggle = (opt: string) =>
+    onChange(selected.includes(opt) ? selected.filter((x) => x !== opt) : [...selected, opt])
+
+  const summary = selected.length === 0 ? allText : selected.join('、')
+
+  return (
+    <div ref={box} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1.5 text-left text-sm text-foreground outline-none transition hover:bg-accent focus:border-ring disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span className={`min-w-0 truncate ${selected.length === 0 ? 'text-muted-foreground' : ''}`}>
+          {summary}
+        </span>
+        <span className="flex shrink-0 items-center gap-1">
+          {selected.length > 0 && <Badge tone="accent">{selected.length}</Badge>}
+          <span className="text-muted-foreground">{open ? '▴' : '▾'}</span>
+        </span>
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-card p-1 shadow-md"
+        >
+          {options.length === 0 ? (
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">{emptyText}</p>
+          ) : (
+            <>
+              {selected.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onChange([])}
+                  className="mb-1 w-full rounded px-2 py-1 text-left text-xs text-muted-foreground transition hover:bg-accent"
+                >
+                  清除选择（= {allText}）
+                </button>
+              )}
+              {options.map((opt) => (
+                <label
+                  key={opt}
+                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition hover:bg-accent"
+                >
+                  <input type="checkbox" checked={selected.includes(opt)} onChange={() => toggle(opt)} />
+                  <span className="min-w-0 truncate">{opt}</span>
+                </label>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
