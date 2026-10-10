@@ -27,10 +27,14 @@ func setupMember(t *testing.T, svc *Service, st *store.Store, qq int64, userID i
 	_ = svc
 }
 
-// enableTestGroup registers one enabled monitored group.
+// enableTestGroup registers one enabled monitored group. A group is stored
+// disabled by default, so monitoring is turned on explicitly.
 func enableTestGroup(t *testing.T, st *store.Store, id int64) {
 	t.Helper()
 	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: id, GroupName: "g", MemberCount: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(id, true); err != nil {
 		t.Fatal(err)
 	}
 }

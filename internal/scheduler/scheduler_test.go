@@ -32,10 +32,14 @@ func (stubQQ) GetGroupSignedList(int64) ([]napcat.SignedMember, error) {
 	return nil, nil
 }
 
-// enableSchedGroup registers one monitored group.
+// enableSchedGroup registers one monitored group and turns monitoring on (a
+// newly discovered group is disabled until the operator selects it).
 func enableSchedGroup(t *testing.T, st *store.Store, id int64) {
 	t.Helper()
 	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: id, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(id, true); err != nil {
 		t.Fatal(err)
 	}
 }

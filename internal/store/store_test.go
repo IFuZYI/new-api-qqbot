@@ -254,3 +254,56 @@ func TestConcurrentWritersDoNotFailWithBusy(t *testing.T) {
 		t.Errorf("member count = %d, want 96 (writes were lost)", len(ms))
 	}
 }
+
+// A newly discovered group must be stored disabled: the bot can be invited into
+// unrelated groups, and monitoring one means recording its members and paying
+// them, so it takes an explicit choice. UpsertGroups must also preserve a
+// choice already made, or every refresh would silently re-enable a group the
+// operator turned off.
+func TestNewGroupIsDisabledAndSelectionIsPreserved(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.UpsertGroups([]MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	gs, err := s.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) != 1 {
+		t.Fatalf("want 1 group, got %d", len(gs))
+	}
+	if gs[0].Enabled {
+		t.Error("a newly discovered group must default to disabled")
+	}
+
+	// Opt in, then refresh the list: the choice must survive.
+	if err := s.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertGroups([]MonitoredGroup{{GroupID: 1, GroupName: "g-renamed", MemberCount: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	gs, err = s.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gs[0].Enabled {
+		t.Error("a refresh reverted the operator's enabled choice")
+	}
+	if gs[0].GroupName != "g-renamed" || gs[0].MemberCount != 5 {
+		t.Errorf("refresh did not update the metadata: %+v", gs[0])
+	}
+
+	// And a group turned off must stay off across a refresh.
+	if err := s.SetGroupEnabled(1, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertGroups([]MonitoredGroup{{GroupID: 1, GroupName: "g-renamed", MemberCount: 6}}); err != nil {
+		t.Fatal(err)
+	}
+	gs, _ = s.ListGroups()
+	if gs[0].Enabled {
+		t.Error("a refresh re-enabled a group the operator turned off")
+	}
+}

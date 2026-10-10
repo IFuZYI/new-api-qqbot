@@ -259,9 +259,11 @@ func TestGroupsRefreshStoresSelection(t *testing.T) {
 	if len(groups) != 1 || groups[0].GroupID != 1129535731 {
 		t.Fatalf("unexpected groups: %+v", groups)
 	}
-	// New groups default to monitored so the first sweep does something.
-	if !groups[0].Enabled {
-		t.Error("a freshly discovered group should be enabled by default")
+	// A newly discovered group is stored disabled: the bot can be invited into
+	// unrelated groups, and monitoring one means recording its members and
+	// paying them, so the operator opts in explicitly.
+	if groups[0].Enabled {
+		t.Error("a freshly discovered group must not be monitored by default")
 	}
 }
 
@@ -359,6 +361,11 @@ func TestSettingsEndpointValidates(t *testing.T) {
 func TestActionsRunTheSweeps(t *testing.T) {
 	srv, _, cl := newTestServer(t)
 	postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
+	// A freshly discovered group is disabled, so opt it in: this test is about
+	// the sweeps, not about the default.
+	postJSONWith(t, cl, srv.URL+"/api/groups", map[string]any{
+		"group_ids": []int64{1129535731},
+	}, nil)
 
 	var res struct {
 		Members int `json:"members"`

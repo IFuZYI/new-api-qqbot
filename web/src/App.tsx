@@ -340,6 +340,9 @@ function Groups({
         </>
       }
     >
+      <p className="mb-3 text-xs text-muted-foreground">
+        用开关选择要监测的群。新发现的群默认<b>不监测</b>，需要手动打开。
+      </p>
       {groups.length === 0 ? (
         <Empty>还没有群。点「从 QQ 刷新」读取机器人账号所在的群。</Empty>
       ) : (
@@ -347,10 +350,10 @@ function Groups({
           {groups.map((g) => (
             <tr key={g.group_id} className="border-b border-border/60">
               <td className="px-3 py-2">
-                <input
-                  type="checkbox"
+                <Switch
                   checked={selected.has(g.group_id)}
                   onChange={() => toggle(g.group_id)}
+                  label={selected.has(g.group_id) ? '已监测' : '未监测'}
                 />
               </td>
               <td className="px-3 py-2 font-mono text-xs">{g.group_id}</td>

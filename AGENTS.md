@@ -74,6 +74,12 @@ below) and never as part of `go test`.
 - **A member is keyed by QQ and never deleted.** Group membership lives in
   `member_groups`, so a member who leaves one group keeps their binding and
   check-in history. `UpsertMembers` reconciles memberships, not member rows.
+- **A newly discovered group is stored disabled.** Monitoring a group means
+  recording its members and paying them a reward, and the bot can be invited
+  into unrelated groups, so it takes an explicit choice. `MonitoredGroup.Enabled`
+  therefore carries no `gorm:"default:true"` (a zero-value-with-default would
+  re-enable it on every create), and `UpsertGroups` preserves the operator's
+  choice across a refresh — only the metadata is updated.
 - **Bindings are owned by this service.** new-api has no admin endpoint that
   writes a user's email (see `docs/adr/0002-binding-owned-locally.md`), so the
   mapping lives here and new-api is read-only for email.

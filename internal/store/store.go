@@ -16,12 +16,18 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// MonitoredGroup is a QQ group selected for monitoring.
+// MonitoredGroup is a QQ group the bot account is in.
+//
+// Enabled deliberately has no gorm default. A default of true would make every
+// newly discovered group monitored the moment the list is refreshed, so a bot
+// invited into an unrelated group would start recording its members and paying
+// them without the operator ever choosing it. New groups are stored disabled
+// and the operator opts in; UpsertGroups keeps whatever was chosen before.
 type MonitoredGroup struct {
 	GroupID     int64  `gorm:"primaryKey;autoIncrement:false" json:"group_id"`
 	GroupName   string `json:"group_name"`
 	MemberCount int    `json:"member_count"`
-	Enabled     bool   `gorm:"default:true" json:"enabled"`
+	Enabled     bool   `json:"enabled"`
 	UpdatedAt   int64  `json:"updated_at"`
 }
 
