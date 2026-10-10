@@ -1,78 +1,116 @@
-# AGENTS.md — /home/QQbot reference workspace
+# AGENTS.md — qqbot
 
-This directory is **not an application**. It is a workspace holding two upstream
-reference repositories that are read to design, compare, and implement features
-elsewhere:
+A QQ group monitor that links QQ group members to new-api accounts. It mirrors
+group rosters and the daily sign-in board, binds each member to the new-api
+account registered under their QQ email (`qq@qq.com`), promotes accounts out of
+a source group into a target group, and pays a daily check-in reward. It reads
+QQ and does not speak in groups, except to act on the `>>绑定<<` command.
 
-- `reference/NapCatQQ` — modern QQ bot protocol framework on NTQQ (TypeScript, pnpm monorepo).
-- `reference/new-api` — AI API gateway/proxy aggregating 40+ providers (Go backend + React frontend).
-
-Each repo is its own git clone with its own instruction file (`reference/new-api/AGENTS.md`,
-`reference/new-api/web/AGENTS.md`). **Read the nested `AGENTS.md` before editing files inside
-that repo** — the rules there (billing read-gate, DB compatibility, component reuse) are
-binding and are not repeated here. Treat both clones as reference material: prefer reading
-and citing them over modifying them, and never `git pull`/commit in them without being asked.
+`reference/` holds two upstream checkouts (`NapCatQQ`, `new-api`) used as
+documentation for the protocols this service drives. They are **not** part of
+the build and must not be edited; read them and cite them. `reference/new-api/`
+has its own binding `AGENTS.md`.
 
 ## Layout
 
 ```
-reference/NapCatQQ/   packages/* (pnpm workspace), eslint.config.js, tsconfig.base.json
-reference/new-api/    main.go, model/ controller/ service/ relay/ relaykit/ tokenkit/ web/
+cmd/qqbot/          entry point, flags, lazy clients
+internal/store/     SQLite schema, migrations, queries
+internal/service/   business logic (sync, bind, promote, award) against interfaces
+internal/newapi/    new-api admin API client
+internal/napcat/    OneBot HTTP client + NapCat WebUI bridge
+internal/events/    OneBot WebSocket listener (binding command)
+internal/api/       HTTP API + static file serving
+internal/config/    connection settings stored in the database
+web/                React + Vite + Tailwind WebUI
+docs/adr/           decision records; docs/design-notes.md has the verified facts
 ```
 
-## NapCatQQ (pnpm monorepo, Node >= 18, CI uses Node 20 + pnpm 9)
-
-Run from `reference/NapCatQQ/`:
+## Build, test, run
 
 ```bash
-pnpm i                          # install workspace deps
-pnpm run typecheck              # pnpm -r --if-present run typecheck
-pnpm test                       # vitest in packages/napcat-test
-pnpm run test:ui                # vitest --ui
-pnpm run lint                   # eslint .   (lint:fix to autofix)
-pnpm run build:shell            # other builds: build:framework, build:webui, build:plugin-builtin, build:openapi
+go build ./...                      # Go 1.27 (binary at /usr/local/go/bin/go)
+go test ./internal/...              # all tests; no network or live services needed
+go vet ./... && gofmt -l internal/ cmd/
+
+cd web && npm install && npm run build   # typechecks (tsc) then builds to web/dist
+
+go run ./cmd/qqbot -addr :4096 -data data -web web/dist
 ```
 
-Tests are `packages/napcat-test/*.test.ts` (vitest, `vitest.config.ts` in that package).
+The WebUI is served by the Go binary from `-web` (default `web/dist`). If that
+directory is missing, the binary serves an explanatory page and the API still
+works — build the frontend only when you need the UI.
 
-## new-api (Go 1.26 root; Bun frontend)
+The panel requires a login: on first run the UI asks for an admin username and
+password (minimum 8 characters) and that same form becomes the login afterwards.
+Auth state lives in the `admins` table; the session cookie is HMAC-signed with a
+key generated on first use and stored in settings. Only `/api/auth/state`,
+`/api/auth/setup`, `/api/auth/login` and `/api/auth/logout` are reachable
+without a session — add new endpoints through `r.requireAuth(...)`.
 
-Run from `reference/new-api/`:
+Tests are pure Go and use fakes for both external systems, so they run offline.
+Anything that talks to the real gateway or NapCat must be verified by hand (see
+below) and never as part of `go test`.
 
-```bash
-make test                       # tests root module + relaykit + tokenkit (GOWORK=off)
-make build-web                  # cd web && bun install --frozen-lockfile && bun run build
-make dev-api                    # docker compose -f docker-compose.dev.yml up -d  (postgres+redis+api on :3000)
-make dev-web                    # bun dev server on :5173, proxies API to :3000
-make dev                        # dev-api + dev-web
-make reset-setup                # reset local setup-wizard state (dev only)
-```
+## Conventions
 
-Backend directly: `go vet ./...`, `go build ./...`, and for module-independence checks
-`cd relaykit && GOWORK=off go build ./...` (same for `tokenkit/`).
-Frontend (from `web/`): `bun install`, `bun run typecheck` (`tsgo -b`), `bun run test` (`vitest run`),
-`bun run lint` (`oxlint -c .oxlintrc.json .`), `bun run build`, `bun run i18n:sync`.
+- Conventional Commits with a scope, lowercase: `feat(service): …`, `fix(store): …`.
+- Business logic lives in `internal/service` and depends on the small interfaces
+  `Gateway` and `QQ`, never on the concrete clients. New external behaviour goes
+  behind one of those interfaces so it stays testable.
+- Each package's doc comment states what it owns. Comments explain *why* a rule
+  exists (especially idempotency and ordering), not what the line does.
+- UI text is Simplified Chinese, matching the operator-facing docs.
 
-## Conventions (observed in both repos)
+## Invariants — do not break these
 
-- **Conventional Commits with a scope**, lowercase: `fix(xai): …`, `feat(web): …`, `chore(ci): …`,
-  `refactor(jsplugin): …`, `test(macos): …`.
-- Go code must stay cross-database (SQLite/MySQL/PostgreSQL) and `relaykit/`/`tokenkit/` must not
-  import the root module — see `reference/new-api/AGENTS.md` for the mandatory rules.
-- NapCat uses `neostandard` + semicolons, 2-space indent, trailing commas `always-multiline`;
-  unused vars are errors unless prefixed `_`.
-- Frontend text is always i18n'd (`useTranslation()` + `t('English key')`), locale files are flat
-  JSON keyed by English source strings.
+- **A member is keyed by QQ and never deleted.** Group membership lives in
+  `member_groups`, so a member who leaves one group keeps their binding and
+  check-in history. `UpsertMembers` reconciles memberships, not member rows.
+- **Bindings are owned by this service.** new-api has no admin endpoint that
+  writes a user's email (see `docs/adr/0002-binding-owned-locally.md`), so the
+  mapping lives here and new-api is read-only for email.
+- **Auto-binding requires an exact, unique match.** `FindUserByEmail` narrows the
+  gateway's LIKE search to a case-insensitive exact match; ambiguous matches are
+  reported and left unbound rather than guessed at.
+- **A check-in is idempotent per `(qq, date)`.** The sign-in board is today-only
+  and polled repeatedly, so re-recording must never re-randomise the reward or
+  re-award it. The reward amount is persisted *before* the gateway call, and the
+  claim is released only when that call fails.
+- **Promotion only moves accounts sitting in the source group** and must be a
+  no-op on a second run. Re-read the account by id before writing: new-api's
+  `PUT /api/user/` replaces the fields it accepts, so a sparse object blanks
+  `display_name`.
+- **Polling is the source of truth.** The event listener only shortens reaction
+  time; nothing may depend on it (see `docs/adr/0003-polling-authoritative-events-optional.md`).
 
 ## Pitfalls
 
-- **`GOWORK=off` is mandatory** for new-api builds/tests; the modules are wired as a workspace and
-  the root build will not catch a broken `relaykit`/`tokenkit`.
-- **new-api embeds `web/dist`.** Before `go build ./...` on a clean checkout, create the placeholder
-  (`mkdir -p web/dist && touch web/dist/index.html`), as CI does, or the build fails.
-- `make test` also needs the same embed placeholder to exist.
-- **NapCat `dev` is Windows-only**: `pnpm run dev:shell` → `pnpm --filter napcat-develop run dev`,
-  which runs `powershell ./nodeTest.ps1`. There is no cross-platform dev runner.
-- `pnpm-lock.yaml` is gitignored in NapCatQQ; do not treat it as a committed artifact.
-- Both repos are upstream clones — changes made here are not the project of record and can be
-  overwritten by a future refresh.
+- **The gateway sits behind Cloudflare and rejects Go's default User-Agent.**
+  Both clients send an identifying `User-Agent`; dropping it yields HTTP 403.
+- **An admin cannot manage an account at the same or a higher role.** Promoting
+  or paying the account this service itself logs in as fails with
+  "No permission to access users of same or higher level". Verify against a
+  common user (role 1), not the admin account.
+- **A group name must exist on the instance** (in both the usable-groups and
+  group-ratio settings) before it can be assigned. Check `/api/user/groups`.
+- **NapCat's WebUI credential is signed with a per-process secret** unless
+  `NAPCAT_WEBUI_JWT_SECRET_KEY` is set, so it dies with the NapCat process and
+  must be re-obtained (tolerating the login rate limit) after a restart.
+- **`get_group_signed_list` errors when a group has no sign-in board**, and
+  returns only today's page. Treat it as a union across polls; a group without a
+  board is normal, not a failure.
+- **NapCat's OneBot config can be rewritten live** over the WebUI
+  (`/api/OB11Config/SetConfig` → save + reload), so enabling an adapter needs no
+  restart — do not claim otherwise.
+- Never write to `reference/`; it is upstream material that may be refreshed.
+
+## Verifying against the real systems
+
+Config is stored in the database and edited in the WebUI (连接配置). For a local
+check, the pieces to confirm by hand are: `POST /api/groups/refresh` (reads real
+groups), `POST /api/actions/sync`, `.../bind`, `.../promote`, `.../award`.
+Promotion and awarding spend real state on the gateway — exercise them on a
+throwaway account and revert (group back to the source group, quota subtracted)
+when done.
