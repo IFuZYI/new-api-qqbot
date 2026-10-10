@@ -76,3 +76,4 @@
 - `docs/adr/0004-reward-random-range.md` — 奖励区间随机
 - `docs/adr/0005-rules-driven-conversion.md` — 分组转换由规则驱动
 - `docs/adr/0006-admin-credential-from-env.md` — 管理账号可由环境变量预置
+- `docs/adr/0007-user-directory-both-keys.md` — 用户目录以 QQ 与 new-api 账号双键取并集

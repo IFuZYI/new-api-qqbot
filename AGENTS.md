@@ -94,6 +94,19 @@ below) and never as part of `go test`.
   blanks `display_name`.
 - **Polling is the source of truth.** The event listener only shortens reaction
   time; nothing may depend on it (see `docs/adr/0003-polling-authoritative-events-optional.md`).
+- **The user directory is a union of both sides, keyed on QQ *and* new-api
+  account.** The table exists to answer "谁没进群": a new-api account no member
+  has joined with, and a QQ member with no account, both appear. A bound account
+  must never be dropped just because no `members` row carries it (the manual
+  bind path accepts any QQ), so the account loop skips an account only when a
+  member row already showed it. `newapi_users` is a *cache* refreshed by
+  `POST /api/users/sync`; a full replace is deliberate, so it must only be
+  written after a complete read — a partial fetch would delete real accounts.
+- **A group change re-reads the account by id first.** Same reason as conversion:
+  new-api's `PUT /api/user/` replaces the fields it accepts, so a sparse object
+  blanks `display_name`. Writing the group an account already has is a no-op
+  (no gateway call). A batch reports each account's outcome separately, because
+  one role-protected account must not block the rest of the selection.
 
 ## Pitfalls
 
