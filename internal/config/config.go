@@ -1,13 +1,26 @@
 // Package config holds the operator-supplied connection settings for the two
-// external systems. Both are editable from the WebUI, so they live in the
-// database rather than in flags or environment variables.
+// external systems.
+//
+// The settings live in two places on purpose. The YAML file under the data
+// directory is what an operator reads, hand-edits and provisions from a
+// deployment; the database is the running copy the WebUI edits. A change to the
+// file wins on the next read, and a WebUI save writes both, so the two stay in
+// step and either one is a complete answer to "how is this instance
+// configured".
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+
+	"gopkg.in/yaml.v3"
 
 	"qqbot/internal/store"
 )
@@ -17,11 +30,14 @@ const (
 	napCatKey = "config.napcat"
 )
 
+// FileName is the config file's name inside the data directory.
+const FileName = "config.yaml"
+
 // NewAPI is the gateway admin account this service drives.
 type NewAPI struct {
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	URL      string `yaml:"url" json:"url"`
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password" json:"password"`
 }
 
 // NapCat describes how to reach the local NapCat instance. Two transports are
@@ -29,43 +45,184 @@ type NewAPI struct {
 // as a fallback action bridge) and the OneBot HTTP endpoint (used for routine
 // action calls).
 type NapCat struct {
-	WebUIURL   string `json:"webui_url"`
-	WebUIToken string `json:"webui_token"`
+	WebUIURL   string `yaml:"webui_url" json:"webui_url"`
+	WebUIToken string `yaml:"webui_token" json:"webui_token"`
 
-	OneBotURL   string `json:"onebot_url"`
-	OneBotToken string `json:"onebot_token"`
+	OneBotURL   string `yaml:"onebot_url" json:"onebot_url"`
+	OneBotToken string `yaml:"onebot_token" json:"onebot_token"`
 
 	// EventWSURL receives push events (used for the binding command). Optional:
 	// without it the service still works, only with slower reaction.
-	EventWSURL   string `json:"event_ws_url"`
-	EventWSToken string `json:"event_ws_token"`
+	EventWSURL   string `yaml:"event_ws_url" json:"event_ws_url"`
+	EventWSToken string `yaml:"event_ws_token" json:"event_ws_token"`
 }
 
 // Config is the full external-systems configuration.
 type Config struct {
-	NewAPI NewAPI `json:"newapi"`
-	NapCat NapCat `json:"napcat"`
+	NewAPI NewAPI `yaml:"newapi" json:"newapi"`
+	NapCat NapCat `yaml:"napcat" json:"napcat"`
 }
 
-// Load reads the configuration. Missing values are not an error: a fresh
-// install simply has nothing configured yet.
-func Load(st *store.Store) (Config, error) {
-	var c Config
-	if err := st.GetSetting(newAPIKey, &c.NewAPI); err != nil {
-		return c, err
-	}
-	if err := st.GetSetting(napCatKey, &c.NapCat); err != nil {
-		return c, err
-	}
-	return c, nil
+const fileHeader = `# QQBot 群监测 — 连接配置
+#
+# 这个文件与 WebUI 的「连接配置」是同一份配置：
+#   - 在这里手改并保存，服务会在下一次读取时采用（文件优先）；
+#   - 在 WebUI 里保存，会同时写入数据库和本文件。
+# 两种方式不会互相覆盖。密码与 token 以明文保存在此，请限制文件权限。
+
+`
+
+// Manager owns the config file and the database mirror.
+type Manager struct {
+	path string
+	st   *store.Store
+
+	mu       sync.Mutex
+	lastHash string // content hash of the file as last read or written
 }
 
-// Save stores the configuration.
-func Save(st *store.Store, c Config) error {
-	if err := st.PutSetting(newAPIKey, c.NewAPI); err != nil {
+// NewManager builds a Manager for the config file at path, mirroring into st.
+func NewManager(path string, st *store.Store) *Manager {
+	return &Manager{path: path, st: st}
+}
+
+// Path returns the config file's location.
+func (m *Manager) Path() string { return m.path }
+
+// Load returns the current configuration.
+//
+// When the file changed since it was last read, its contents are adopted into
+// the database first, so a hand edit takes effect without a restart. A missing
+// file is not an error. A malformed one is reported and the database copy is
+// returned unchanged, so a typo cannot wipe a working configuration.
+func (m *Manager) Load() (Config, error) {
+	if err := m.syncFromFile(); err != nil {
+		return m.fromStore(), err
+	}
+	return m.fromStore(), nil
+}
+
+// MustLoad returns the configuration, ignoring a file error. It is for call
+// sites where a broken config file should not break the service.
+func (m *Manager) MustLoad() Config {
+	c, _ := m.Load()
+	return c
+}
+
+// syncFromFile adopts the file into the database when it changed on disk.
+func (m *Manager) syncFromFile() error {
+	raw, err := os.ReadFile(m.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	return st.PutSetting(napCatKey, c.NapCat)
+
+	sum := hashBytes(raw)
+	m.mu.Lock()
+	unchanged := sum == m.lastHash
+	m.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+
+	var c Config
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		return fmt.Errorf("parse %s: %w", m.path, err)
+	}
+
+	// Record the hash before writing, so Save's own file write is not later
+	// mistaken for an external edit.
+	m.mu.Lock()
+	m.lastHash = sum
+	m.mu.Unlock()
+
+	return m.saveToStore(c)
+}
+
+// fromStore reads the database copy.
+func (m *Manager) fromStore() Config {
+	var c Config
+	_ = m.st.GetSetting(newAPIKey, &c.NewAPI)
+	_ = m.st.GetSetting(napCatKey, &c.NapCat)
+	return c
+}
+
+// Save stores the configuration in both the database and the file.
+func (m *Manager) Save(c Config) error {
+	if err := m.saveToStore(c); err != nil {
+		return err
+	}
+	return m.writeFile(c)
+}
+
+func (m *Manager) saveToStore(c Config) error {
+	if err := m.st.PutSetting(newAPIKey, c.NewAPI); err != nil {
+		return err
+	}
+	return m.st.PutSetting(napCatKey, c.NapCat)
+}
+
+// EnsureFile creates the config file when it is missing, so an operator has
+// something to edit. Existing content is never touched.
+func (m *Manager) EnsureFile() error {
+	if _, err := os.Stat(m.path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// Seed from the database, so an instance configured through the WebUI
+	// before the file existed does not come back empty.
+	return m.writeFile(m.fromStore())
+}
+
+// writeFile writes the config atomically: a crash mid-write cannot leave a
+// truncated file that would then fail to parse.
+func (m *Manager) writeFile(c Config) error {
+	dir := filepath.Dir(m.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	body, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	content := append([]byte(fileHeader), body...)
+
+	m.mu.Lock()
+	m.lastHash = hashBytes(content)
+	m.mu.Unlock()
+
+	tmp, err := os.CreateTemp(dir, ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	// The file holds credentials, so keep it owner-only.
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, m.path)
+}
+
+func hashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // ValidateNewAPI checks the gateway settings.
@@ -128,27 +285,27 @@ func validateURL(raw string, schemes ...string) error {
 	return fmt.Errorf("scheme must be one of %s", strings.Join(schemes, ", "))
 }
 
+// RedactedPassword is the placeholder the WebUI sends back unchanged when the
+// operator did not edit the field.
+const RedactedPassword = "********"
+
 // Redacted returns a copy with secrets replaced, for display in the WebUI.
 func (c Config) Redacted() Config {
 	out := c
 	if out.NewAPI.Password != "" {
-		out.NewAPI.Password = "********"
+		out.NewAPI.Password = RedactedPassword
 	}
 	if out.NapCat.WebUIToken != "" {
-		out.NapCat.WebUIToken = "********"
+		out.NapCat.WebUIToken = RedactedPassword
 	}
 	if out.NapCat.OneBotToken != "" {
-		out.NapCat.OneBotToken = "********"
+		out.NapCat.OneBotToken = RedactedPassword
 	}
 	if out.NapCat.EventWSToken != "" {
-		out.NapCat.EventWSToken = "********"
+		out.NapCat.EventWSToken = RedactedPassword
 	}
 	return out
 }
-
-// RedactedPassword is the placeholder the WebUI sends back unchanged when the
-// operator did not edit the field.
-const RedactedPassword = "********"
 
 // Merge keeps stored secrets when the incoming value is the redaction
 // placeholder, so saving the form without retyping a password does not wipe it.

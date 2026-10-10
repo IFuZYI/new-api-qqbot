@@ -29,7 +29,7 @@ import (
 func main() {
 	var (
 		addr    = flag.String("addr", ":4096", "HTTP listen address for the WebUI")
-		dataDir = flag.String("data", "data", "directory holding the SQLite database")
+		dataDir = flag.String("data", "data", "data directory (SQLite database and config.yaml)")
 		webDist = flag.String("web", "web/dist", "directory holding the built WebUI")
 	)
 	flag.Parse()
@@ -43,11 +43,19 @@ func main() {
 	}
 	defer st.Close()
 
+	// Connection settings live in the data directory as well, so the whole
+	// instance is one directory to back up or move.
+	cfgMgr := config.NewManager(filepath.Join(*dataDir, config.FileName), st)
+	if err := cfgMgr.EnsureFile(); err != nil {
+		log.Printf("warning: could not create %s: %v", cfgMgr.Path(), err)
+	}
+	log.Printf("data directory: %s (database: qqbot.db, config: %s)", *dataDir, config.FileName)
+
 	// The gateway and NapCat clients are rebuilt per call from the stored
 	// configuration, so editing either in the WebUI takes effect immediately
 	// without restarting the service.
-	gw := &lazyGateway{st: st}
-	qq := &lazyQQ{st: st}
+	gw := &lazyGateway{cfg: cfgMgr}
+	qq := &lazyQQ{cfg: cfgMgr}
 
 	svc := service.New(st, gw, qq)
 	sched := scheduler.New(svc)
@@ -61,14 +69,11 @@ func main() {
 	// sweeps above remain the source of truth, so a missing event stream is
 	// harmless. It blocks until shutdown, so it must run in its own goroutine.
 	go events.New(func() (string, string) {
-		cfg, err := config.Load(st)
-		if err != nil {
-			return "", ""
-		}
-		return cfg.NapCat.EventWSURL, cfg.NapCat.EventWSToken
+		c := cfgMgr.MustLoad()
+		return c.NapCat.EventWSURL, c.NapCat.EventWSToken
 	}, bindAdapter{svc}).Run(ctx)
 
-	router := api.NewRouter(st, svc, *webDist)
+	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           router.Handler(),
@@ -96,7 +101,7 @@ func main() {
 // sessions (it answers 409 AUTH_SESSION_LIMIT), so logging in on every call
 // breaks as soon as a sweep makes more than a handful of calls.
 type lazyGateway struct {
-	st *store.Store
+	cfg *config.Manager
 
 	mu     sync.Mutex
 	cached *newapi.Client
@@ -105,10 +110,7 @@ type lazyGateway struct {
 
 // client returns a logged-in client, re-authenticating only when needed.
 func (l *lazyGateway) client() (*newapi.Client, error) {
-	cfg, err := config.Load(l.st)
-	if err != nil {
-		return nil, err
-	}
+	cfg := l.cfg.MustLoad()
 	if cfg.NewAPI.URL == "" {
 		return nil, errNotConfigured
 	}
@@ -204,13 +206,10 @@ func (l *lazyGateway) AddQuota(userID, value int) error {
 
 // lazyQQ prefers the OneBot HTTP endpoint and falls back to the WebUI bridge,
 // which needs no network adapter to be enabled.
-type lazyQQ struct{ st *store.Store }
+type lazyQQ struct{ cfg *config.Manager }
 
 func (l *lazyQQ) onebot() (*napcat.Client, error) {
-	cfg, err := config.Load(l.st)
-	if err != nil {
-		return nil, err
-	}
+	cfg := l.cfg.MustLoad()
 	if cfg.NapCat.OneBotURL == "" {
 		return nil, errNotConfigured
 	}
@@ -218,10 +217,7 @@ func (l *lazyQQ) onebot() (*napcat.Client, error) {
 }
 
 func (l *lazyQQ) webui() (*napcat.WebUI, error) {
-	cfg, err := config.Load(l.st)
-	if err != nil {
-		return nil, err
-	}
+	cfg := l.cfg.MustLoad()
 	if cfg.NapCat.WebUIURL == "" {
 		return nil, errNotConfigured
 	}

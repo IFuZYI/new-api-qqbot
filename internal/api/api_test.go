@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,12 +48,21 @@ type testEnv struct {
 	srv    *httptest.Server
 	st     *store.Store
 	client *http.Client
+	cfg    *config.Manager
 }
 
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *http.Client) {
 	t.Helper()
 	env := newTestEnv(t)
 	return env.srv, env.st, env.client
+}
+
+// newTestServerWithConfig also returns the config manager, for tests that check
+// what landed on disk.
+func newTestServerWithConfig(t *testing.T) (*httptest.Server, *store.Store, *http.Client, *config.Manager) {
+	t.Helper()
+	env := newTestEnv(t)
+	return env.srv, env.st, env.client, env.cfg
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -64,7 +74,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { _ = st.Close() })
 
 	svc := service.New(st, fakeGateway{}, fakeQQ{})
-	srv := httptest.NewServer(NewRouter(st, svc, t.TempDir()).Handler())
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+	srv := httptest.NewServer(NewRouter(st, svc, cfgMgr, t.TempDir()).Handler())
 	t.Cleanup(srv.Close)
 
 	jar, err := cookiejar.New(nil)
@@ -84,7 +95,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("setup failed with %d", resp.StatusCode)
 	}
 
-	return &testEnv{srv: srv, st: st, client: client}
+	return &testEnv{srv: srv, st: st, client: client, cfg: cfgMgr}
 }
 
 func getJSON(t *testing.T, url string, out any) int {
@@ -172,7 +183,7 @@ func TestBootstrapReportsUnconfigured(t *testing.T) {
 }
 
 func TestConfigRoundTripHidesSecrets(t *testing.T) {
-	srv, st, cl := newTestServer(t)
+	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
 
 	in := config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "secret-pw"},
@@ -193,10 +204,7 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 	}
 
 	// The real secret must still be on disk, unchanged.
-	stored, err := config.Load(st)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stored := cfgMgr.MustLoad()
 	if stored.NewAPI.Password != "secret-pw" {
 		t.Errorf("stored password was clobbered: %q", stored.NewAPI.Password)
 	}
@@ -204,7 +212,7 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 
 // Saving the form without retyping the password must not erase it.
 func TestConfigSaveKeepsPasswordWhenRedactedPlaceholderSent(t *testing.T) {
-	srv, st, cl := newTestServer(t)
+	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
 
 	postJSONWith(t, cl, srv.URL+"/api/config", config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "real-pw"},
@@ -216,7 +224,7 @@ func TestConfigSaveKeepsPasswordWhenRedactedPlaceholderSent(t *testing.T) {
 	got.NewAPI.URL = "https://other.example.com" // operator edits only the URL
 	postJSONWith(t, cl, srv.URL+"/api/config", got, nil)
 
-	stored, _ := config.Load(st)
+	stored := cfgMgr.MustLoad()
 	if stored.NewAPI.Password != "real-pw" {
 		t.Errorf("password was wiped by a redacted round trip: %q", stored.NewAPI.Password)
 	}
@@ -389,5 +397,30 @@ func TestCheckinsEndpoint(t *testing.T) {
 	}
 	if len(got.Items) != 1 || got.Items[0].RewardQuota != 150 {
 		t.Errorf("unexpected: %+v", got.Items)
+	}
+}
+
+// Saving through the WebUI must also write the config file, so the two copies
+// never drift and the file is usable as a provisioning source.
+func TestConfigSaveWritesTheFile(t *testing.T) {
+	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
+
+	postJSONWith(t, cl, srv.URL+"/api/config", config.Config{
+		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "pw-123"},
+		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "wt"},
+	}, nil)
+
+	raw, err := os.ReadFile(cfgMgr.Path())
+	if err != nil {
+		t.Fatalf("config file was not written by the WebUI save: %v", err)
+	}
+	if !strings.Contains(string(raw), "api.fuzy.site") {
+		t.Errorf("file does not hold the saved config:\n%s", raw)
+	}
+
+	// And the file must load back to the same values.
+	got := cfgMgr.MustLoad()
+	if got.NewAPI.Username != "napcat" || got.NewAPI.Password != "pw-123" {
+		t.Errorf("round trip through the file failed: %+v", got.NewAPI)
 	}
 }

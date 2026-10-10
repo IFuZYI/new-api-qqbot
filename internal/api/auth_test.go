@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"qqbot/internal/config"
 	"qqbot/internal/service"
 	"qqbot/internal/store"
 )
@@ -24,7 +25,8 @@ func newBareServer(t *testing.T) (*httptest.Server, *store.Store, *http.Client) 
 	t.Cleanup(func() { _ = st.Close() })
 
 	svc := service.New(st, fakeGateway{}, fakeQQ{})
-	srv := httptest.NewServer(NewRouter(st, svc, t.TempDir()).Handler())
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+	srv := httptest.NewServer(NewRouter(st, svc, cfgMgr, t.TempDir()).Handler())
 	t.Cleanup(srv.Close)
 
 	jar, _ := cookiejar.New(nil)

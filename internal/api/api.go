@@ -18,12 +18,14 @@ import (
 type Router struct {
 	st  *store.Store
 	svc *service.Service
+	cfg *config.Manager
 	mux *http.ServeMux
 }
 
-// NewRouter builds the API router. The WebUI is served from webDist.
-func NewRouter(st *store.Store, svc *service.Service, webDist string) *Router {
-	r := &Router{st: st, svc: svc, mux: http.NewServeMux()}
+// NewRouter builds the API router. The WebUI is served from webDist and
+// connection settings are read and written through cfg.
+func NewRouter(st *store.Store, svc *service.Service, cfg *config.Manager, webDist string) *Router {
+	r := &Router{st: st, svc: svc, cfg: cfg, mux: http.NewServeMux()}
 	r.routes()
 	r.mux.Handle("/", staticHandler(webDist))
 	return r
@@ -94,11 +96,7 @@ func decode(r *http.Request, out any) error {
 // ---------- handlers ----------
 
 func (r *Router) bootstrap(w http.ResponseWriter, _ *http.Request) {
-	cfg, err := config.Load(r.st)
-	if err != nil {
-		writeErr(w, 500, err)
-		return
-	}
+	cfg := r.cfg.MustLoad()
 	settings, err := r.svc.Settings()
 	if err != nil {
 		writeErr(w, 500, err)
@@ -117,12 +115,7 @@ func (r *Router) bootstrap(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (r *Router) getConfig(w http.ResponseWriter, _ *http.Request) {
-	cfg, err := config.Load(r.st)
-	if err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	writeJSON(w, 200, cfg.Redacted())
+	writeJSON(w, 200, r.cfg.MustLoad().Redacted())
 }
 
 func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
@@ -131,12 +124,7 @@ func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
-	stored, err := config.Load(r.st)
-	if err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	in = in.Merge(stored)
+	in = in.Merge(r.cfg.MustLoad())
 
 	if err := in.NewAPI.Validate(); err != nil {
 		writeErr(w, 400, err)
@@ -146,7 +134,7 @@ func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
-	if err := config.Save(r.st, in); err != nil {
+	if err := r.cfg.Save(in); err != nil {
 		writeErr(w, 500, err)
 		return
 	}
