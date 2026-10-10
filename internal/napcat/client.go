@@ -52,11 +52,14 @@ func (m GroupMember) DisplayName() string {
 
 // SignedMember is one entry of a group's sign-in board. The board is today-only
 // and paginated, so callers must treat repeated reads as a union.
+//
+// Rank is fractional by construction (see flexFloat); it is display-only and
+// must not be treated as a stable identifier.
 type SignedMember struct {
-	QQ   int64  `json:"user_id"`
-	Nick string `json:"nick"`
-	Time int64  `json:"time"`
-	Rank int    `json:"rank"`
+	QQ   int64     `json:"user_id"`
+	Nick string    `json:"nick"`
+	Time int64     `json:"time"`
+	Rank flexFloat `json:"rank"`
 }
 
 // Client calls OneBot actions over an HTTP endpoint.
