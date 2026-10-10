@@ -121,9 +121,15 @@ func ruleFromStore(row store.PromotionRule) Rule {
 		r.SourceGroups = []string{}
 	}
 	if row.Conditions != "" {
-		_ = json.Unmarshal([]byte(row.Conditions), &r.Conditions)
+		if err := json.Unmarshal([]byte(row.Conditions), &r.Conditions); err != nil {
+			// An empty condition list means "match everyone bound", so a
+			// corrupt blob must not be allowed to decode into one. Mark the
+			// rule unusable rather than widening it.
+			r.Conditions = nil
+			r.DecodeError = fmt.Sprintf("conditions unreadable: %v", err)
+		}
 	}
-	if r.Conditions == nil {
+	if r.Conditions == nil && r.DecodeError == "" {
 		r.Conditions = []Condition{}
 	}
 	return r
@@ -204,6 +210,11 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 				res.Failed++
 				continue
 			}
+			// The gateway client does not mutate u, so record the new group
+			// locally: otherwise the next rule in this sweep still sees the old
+			// group, passes its own source-group gate, and moves the account
+			// again.
+			u.Group = rule.TargetGroup
 			res.Promoted++
 		}
 
@@ -265,6 +276,7 @@ func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
 			res.Failed++
 			res.Error = err.Error()
 		} else {
+			u.Group = rule.TargetGroup
 			res.Promoted++
 		}
 
@@ -287,6 +299,9 @@ func (s *Service) memberContext(qq int64, u *newapi.User) (*MemberContext, error
 	if err != nil {
 		return nil, err
 	}
+	// Use the same resolution as the sweep (the highest level seen across the
+	// monitored groups), so a rule cannot evaluate differently depending on
+	// whether the bind trigger or the patrol fired it.
 	now := time.Now().Unix()
 	for _, g := range groups {
 		ms, err := s.qq.GetGroupMemberList(g.GroupID)
@@ -298,10 +313,16 @@ func (s *Service) memberContext(qq int64, u *newapi.User) (*MemberContext, error
 				continue
 			}
 			c := ContextFromMember(m, now)
-			ctx.Level = c.Level
-			ctx.QQLevel = c.QQLevel
-			ctx.JoinDays = c.JoinDays
-			return &ctx, nil
+			if !ctx.HasQQData || c.Level > ctx.Level {
+				ctx.Level = c.Level
+			}
+			if !ctx.HasQQData || c.QQLevel > ctx.QQLevel {
+				ctx.QQLevel = c.QQLevel
+			}
+			if !ctx.HasQQData || c.JoinDays > ctx.JoinDays {
+				ctx.JoinDays = c.JoinDays
+			}
+			ctx.HasQQData = true
 		}
 	}
 	return &ctx, nil

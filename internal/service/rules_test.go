@@ -58,11 +58,11 @@ func TestRuleConditionsAreANDed(t *testing.T) {
 		),
 	}
 
-	both := MemberContext{QQ: 1, Level: 10, QQLevel: 20}
+	both := MemberContext{QQ: 1, HasQQData: true, Level: 10, QQLevel: 20}
 	if !r.Matches(both) {
 		t.Error("both conditions satisfied should match")
 	}
-	oneShort := MemberContext{QQ: 1, Level: 10, QQLevel: 19}
+	oneShort := MemberContext{QQ: 1, HasQQData: true, Level: 10, QQLevel: 19}
 	if r.Matches(oneShort) {
 		t.Error("one failing condition must fail the rule")
 	}
@@ -77,12 +77,12 @@ func TestRuleConditionOperators(t *testing.T) {
 		ctx  MemberContext
 		want bool
 	}{
-		{"group level >=", Condition{ConditionType: CondGroupLevel, Op: OpGTE, Value: 5}, MemberContext{Level: 5}, true},
-		{"group level > fails", Condition{ConditionType: CondGroupLevel, Op: OpGTE, Value: 6}, MemberContext{Level: 5}, false},
-		{"group level ==", Condition{ConditionType: CondGroupLevel, Op: OpEq, Value: 5}, MemberContext{Level: 5}, true},
-		{"group level <", Condition{ConditionType: CondGroupLevel, Op: OpLT, Value: 9}, MemberContext{Level: 5}, true},
-		{"qq level >", Condition{ConditionType: CondQQLevel, Op: OpGT, Value: 9}, MemberContext{QQLevel: 10}, true},
-		{"join days >=", Condition{ConditionType: CondJoinDays, Op: OpGTE, Value: 7}, MemberContext{JoinDays: 7}, true},
+		{"group level >=", Condition{ConditionType: CondGroupLevel, Op: OpGTE, Value: 5}, MemberContext{HasQQData: true, Level: 5}, true},
+		{"group level > fails", Condition{ConditionType: CondGroupLevel, Op: OpGTE, Value: 6}, MemberContext{HasQQData: true, Level: 5}, false},
+		{"group level ==", Condition{ConditionType: CondGroupLevel, Op: OpEq, Value: 5}, MemberContext{HasQQData: true, Level: 5}, true},
+		{"group level <", Condition{ConditionType: CondGroupLevel, Op: OpLT, Value: 9}, MemberContext{HasQQData: true, Level: 5}, true},
+		{"qq level >", Condition{ConditionType: CondQQLevel, Op: OpGT, Value: 9}, MemberContext{HasQQData: true, QQLevel: 10}, true},
+		{"join days >=", Condition{ConditionType: CondJoinDays, Op: OpGTE, Value: 7}, MemberContext{HasQQData: true, JoinDays: 7}, true},
 		{"checkin days >=", Condition{ConditionType: CondCheckinDays, Op: OpGTE, Value: 3}, MemberContext{CheckinDays: 3}, true},
 		{"newapi quota >=", Condition{ConditionType: CondQuota, Op: OpGTE, Value: 1000}, MemberContext{User: user}, true},
 		{"newapi quota > fails", Condition{ConditionType: CondQuota, Op: OpGT, Value: 1000}, MemberContext{User: user}, false},
@@ -193,5 +193,45 @@ func TestJoinDaysZeroWhenUnknown(t *testing.T) {
 	ctx := ContextFromMember(m, 1791632992)
 	if ctx.JoinDays != 0 {
 		t.Errorf("join days = %d, want 0 when the join time is unknown", ctx.JoinDays)
+	}
+}
+
+// A QQ-side condition must fail closed when the roster could not be read: the
+// zero values are "unknown", not "zero", and a <= rule would otherwise match
+// everyone and mass-move accounts.
+func TestQQConditionsFailClosedWithoutQQData(t *testing.T) {
+	r := Rule{ID: 1, Enabled: true, TargetGroup: "authorized",
+		Conditions: conds(Condition{ConditionType: CondJoinDays, Op: OpLTE, Value: 1})}
+
+	noData := MemberContext{QQ: 1, Bound: true, User: &newapi.User{ID: 1}, HasQQData: false}
+	if r.Matches(noData) {
+		t.Error("a QQ-side condition must not match when the roster was unreadable")
+	}
+
+	withData := MemberContext{QQ: 1, Bound: true, User: &newapi.User{ID: 1}, HasQQData: true, JoinDays: 0}
+	if !r.Matches(withData) {
+		t.Error("a genuine zero join-days should still match a <= 1 rule")
+	}
+}
+
+// Check-in days come from this service's own store, so they are known even when
+// the QQ roster is not: that condition must keep working.
+func TestCheckinConditionUnaffectedByMissingQQData(t *testing.T) {
+	r := Rule{ID: 1, Enabled: true, TargetGroup: "authorized",
+		Conditions: conds(Condition{ConditionType: CondCheckinDays, Op: OpGTE, Value: 3})}
+
+	if !r.Matches(MemberContext{QQ: 1, Bound: true, User: &newapi.User{ID: 1}, CheckinDays: 3}) {
+		t.Error("a check-in-days condition should not depend on QQ data")
+	}
+}
+
+// A rule whose stored conditions could not be decoded must never match: an
+// empty condition list means "everyone bound", so a corrupt row would otherwise
+// silently widen into a mass conversion.
+func TestRuleWithDecodeErrorNeverMatches(t *testing.T) {
+	r := Rule{ID: 1, Enabled: true, TargetGroup: "authorized", OnBind: true,
+		DecodeError: "conditions unreadable: boom"}
+	if r.Matches(MemberContext{QQ: 1, Bound: true, User: &newapi.User{ID: 1}}) {
+		t.Error("a rule with a decode error must not match")
 	}
 }

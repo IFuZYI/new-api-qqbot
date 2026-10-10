@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -87,7 +89,7 @@ type Admin struct {
 type PromotionRule struct {
 	ID              int64  `gorm:"primaryKey;autoIncrement" json:"id"`
 	Name            string `json:"name"`
-	Enabled         bool   `gorm:"default:true" json:"enabled"`
+	Enabled         bool   `json:"enabled"`
 	OnBind          bool   `json:"on_bind"`
 	IntervalMinutes int    `json:"interval_minutes"`
 	SourceGroups    string `gorm:"type:text" json:"-"` // JSON array
@@ -237,6 +239,44 @@ func (s *Store) UpsertMembers(groupID int64, ms []Member) error {
 	})
 }
 
+// EnsureMember records one member and their membership without touching any
+// other row. Unlike UpsertMembers it does NOT treat the argument as the group's
+// authoritative roster, so it is safe to call for a single observation (a join
+// event, a bind command).
+//
+// A blank nickname leaves an existing one alone, so a caller that has no name
+// (the join event carries none) cannot wipe the name a roster sync stored.
+func (s *Store) EnsureMember(groupID, qq int64, nickname string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var existing Member
+		err := tx.First(&existing, "qq = ?", qq).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			rec := Member{QQ: qq, Nickname: nickname, FirstSeen: now(), UpdatedAt: now()}
+			if err := tx.Create(&rec).Error; err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		default:
+			if strings.TrimSpace(nickname) != "" {
+				existing.Nickname = nickname
+			}
+			existing.UpdatedAt = now()
+			if err := tx.Save(&existing).Error; err != nil {
+				return err
+			}
+		}
+
+		var mg MemberGroup
+		err = tx.First(&mg, "qq = ? AND group_id = ?", qq, groupID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tx.Create(&MemberGroup{QQ: qq, GroupID: groupID, Joined: now()}).Error
+		}
+		return err
+	})
+}
+
 // GetMember loads one member by QQ.
 func (s *Store) GetMember(qq int64) (*Member, error) {
 	var m Member
@@ -356,18 +396,13 @@ func (s *Store) UnboundMembers() ([]Member, error) {
 // (qq, date) updates the observed rank/time but never touches RewardQuota or
 // RewardedAt, so a repeated poll cannot re-randomise or re-award.
 func (s *Store) RecordCheckin(c Checkin) error {
-	var existing Checkin
-	err := s.db.First(&existing, "qq = ? AND date = ?", c.QQ, c.Date).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return s.db.Create(&c).Error
-	}
-	if err != nil {
-		return err
-	}
-	existing.SignedAt = c.SignedAt
-	existing.Rank = c.Rank
-	existing.GroupID = c.GroupID
-	return s.db.Save(&existing).Error
+	// Upsert on the (qq, date) primary key: two concurrent polls of the same
+	// board must not race between a read and an insert and trip the unique
+	// index, which would abort the rest of that group's sync.
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "qq"}, {Name: "date"}},
+		DoUpdates: clause.AssignmentColumns([]string{"signed_at", "rank", "group_id"}),
+	}).Create(&c).Error
 }
 
 // GetCheckin loads one member's sign-in for a date.
@@ -386,8 +421,22 @@ func (s *Store) CountCheckins(qq int64) (int, error) {
 	return int(n), err
 }
 
+// ClaimReward claims the one-time reward for a (qq, date) and records the amount
+// in the same statement, returning false if it was already claimed. Combining
+// them keeps the recorded amount equal to the amount actually paid even when two
+// sweeps run concurrently; the conditional WHERE is what makes the claim atomic.
+func (s *Store) ClaimReward(qq int64, date string, amount int, at time.Time) (bool, error) {
+	res := s.db.Model(&Checkin{}).
+		Where("qq = ? AND date = ? AND rewarded_at = 0", qq, date).
+		Updates(map[string]any{"rewarded_at": at.Unix(), "reward_quota": amount})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
 // MarkRewarded claims the one-time reward for a (qq, date), returning false if
-// it was already claimed. This is the guard that makes awarding idempotent.
+// it was already claimed.
 func (s *Store) MarkRewarded(qq int64, date string, at time.Time) (bool, error) {
 	res := s.db.Model(&Checkin{}).
 		Where("qq = ? AND date = ? AND rewarded_at = 0", qq, date).

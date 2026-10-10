@@ -6,7 +6,9 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"qqbot/internal/napcat"
@@ -73,10 +75,14 @@ type QQ interface {
 
 // Service coordinates the store, the gateway and QQ.
 type Service struct {
-	st  *store.Store
-	gw  Gateway
-	qq  QQ
-	rnd *rand.Rand
+	st *store.Store
+	gw Gateway
+	qq QQ
+
+	// rndMu guards rnd: Award runs from both the scheduler goroutine and HTTP
+	// handler goroutines, and *rand.Rand is not safe for concurrent use.
+	rndMu sync.Mutex
+	rnd   *rand.Rand
 }
 
 // New builds a Service.
@@ -112,7 +118,9 @@ func withDefaults(in Settings) Settings {
 	if in.Timezone == "" {
 		in.Timezone = d.Timezone
 	}
-	if in.RewardMin == 0 && in.RewardMax == 0 {
+	// A stored range of 0..0 is a deliberate "no reward" and must be honoured;
+	// only a missing (negative) range falls back to the default.
+	if in.RewardMin < 0 || in.RewardMax < 0 {
 		in.RewardMin, in.RewardMax = d.RewardMin, d.RewardMax
 	}
 	return in
@@ -206,7 +214,10 @@ func (s *Service) SyncCheckins(groupID int64, date string) (int, error) {
 	n := 0
 	for _, m := range ss {
 		if err := s.st.RecordCheckin(store.Checkin{
-			QQ: m.QQ, Date: date, GroupID: groupID, SignedAt: m.Time, Rank: m.Rank,
+			QQ: m.QQ, Date: date, GroupID: groupID, SignedAt: m.Time,
+			// NapCat's rank is fractional (see flexFloat); it is display-only,
+			// so round it for storage rather than rejecting the row.
+			Rank: int(math.Round(float64(m.Rank))),
 		}); err != nil {
 			return n, err
 		}
@@ -282,7 +293,7 @@ func (s *Service) AutoBind() (BindResult, error) {
 // by the group-increase event and by the bind command, which both know the
 // member's identity directly.
 func (s *Service) EnsureMember(groupID, qq int64, nickname string) error {
-	return s.st.UpsertMembers(groupID, []store.Member{{QQ: qq, Nickname: nickname}})
+	return s.st.EnsureMember(groupID, qq, nickname)
 }
 
 // BindByCommand binds a QQ to the new-api account matching qq@qq.com, which is
@@ -371,13 +382,10 @@ func (s *Service) Award(date string) (AwardResult, error) {
 		}
 
 		amount := s.draw(cfg)
-		// Persist the amount before calling out, so the value is stable even
-		// if the process dies between here and the gateway response.
-		if err := s.st.SetRewardAmount(c.QQ, date, amount); err != nil {
-			return res, err
-		}
-
-		claimed, err := s.st.MarkRewarded(c.QQ, date, time.Now())
+		// Claim the slot and record the amount in one statement. Doing these
+		// separately lets a losing concurrent sweep overwrite reward_quota with
+		// an amount it never paid (the claim still prevents double payment).
+		claimed, err := s.st.ClaimReward(c.QQ, date, amount, time.Now())
 		if err != nil {
 			return res, err
 		}
@@ -403,5 +411,7 @@ func (s *Service) draw(cfg Settings) int {
 	if cfg.RewardMax <= cfg.RewardMin {
 		return cfg.RewardMin
 	}
+	s.rndMu.Lock()
+	defer s.rndMu.Unlock()
 	return cfg.RewardMin + s.rnd.Intn(cfg.RewardMax-cfg.RewardMin+1)
 }

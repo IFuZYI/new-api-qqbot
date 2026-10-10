@@ -116,6 +116,11 @@ type Rule struct {
 
 	LastRunAt int64  `json:"last_run_at"`
 	LastError string `json:"last_error,omitempty"`
+
+	// DecodeError is set when the stored rule could not be read back. A rule
+	// with a decode error never matches, so a corrupt row cannot widen into a
+	// match-everyone rule.
+	DecodeError string `json:"decode_error,omitempty"`
 }
 
 // Validate checks a rule is usable.
@@ -153,11 +158,19 @@ func (r Rule) RunsOnSchedule() bool { return r.IntervalMinutes > 0 }
 
 // MemberContext is everything a rule can look at for one member.
 type MemberContext struct {
-	QQ          int64
-	Bound       bool
-	User        *newapi.User // nil when unbound
-	Level       int          // 群等级
-	QQLevel     int          // QQ 账号等级
+	QQ    int64
+	Bound bool
+	User  *newapi.User // nil when unbound
+
+	// HasQQData reports whether the QQ-side fields below were actually read.
+	// Without it a member whose roster could not be read (or who is in no
+	// monitored group) would present all-zero levels and join days, and a
+	// "<"/"<=" condition would match them - a mass-mis-promotion path. A
+	// QQ-side condition therefore does not match when this is false.
+	HasQQData bool
+
+	Level       int // 群等级
+	QQLevel     int // QQ 账号等级
 	JoinDays    int
 	CheckinDays int
 }
@@ -166,9 +179,10 @@ type MemberContext struct {
 // passed in so the caller controls the clock.
 func ContextFromMember(m napcat.GroupMember, now int64) MemberContext {
 	ctx := MemberContext{
-		QQ:      m.QQ,
-		Level:   int(m.Level),
-		QQLevel: int(m.QQLevel),
+		QQ:        m.QQ,
+		HasQQData: true,
+		Level:     int(m.Level),
+		QQLevel:   int(m.QQLevel),
 	}
 	// 0 means NapCat did not report a join time; do not report decades of
 	// membership for it.
@@ -181,6 +195,12 @@ func ContextFromMember(m napcat.GroupMember, now int64) MemberContext {
 // Matches reports whether this rule applies to the member.
 func (r Rule) Matches(ctx MemberContext) bool {
 	if !r.Enabled {
+		return false
+	}
+	// A rule whose stored form could not be read is unusable: failing closed is
+	// the only safe reading, because the alternative (an empty condition list)
+	// means "everyone".
+	if r.DecodeError != "" {
 		return false
 	}
 	if r.OnBind && !ctx.Bound {
@@ -219,6 +239,14 @@ func (r Rule) Matches(ctx MemberContext) bool {
 
 func (c Condition) satisfiedBy(ctx MemberContext) bool {
 	var actual int
+	switch c.ConditionType {
+	case CondGroupLevel, CondQQLevel, CondJoinDays:
+		// These come from QQ. If the roster could not be read, the zero values
+		// are unknown, not zero, so the condition must not be treated as met.
+		if !ctx.HasQQData {
+			return false
+		}
+	}
 	switch c.ConditionType {
 	case CondGroupLevel:
 		actual = ctx.Level

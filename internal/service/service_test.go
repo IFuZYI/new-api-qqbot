@@ -19,6 +19,11 @@ type fakeNewAPI struct {
 	quotaAdds []quotaAdd
 	failSet   error
 	failQuota error
+
+	// mutateUser models whether SetGroup writes the new group back onto the
+	// caller's struct. The real client does not; default true keeps the older
+	// tests reading naturally.
+	mutateUser *bool
 }
 
 type groupSet struct {
@@ -68,8 +73,16 @@ func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
 		return f.failSet
 	}
 	f.groupSets = append(f.groupSets, groupSet{userID: u.ID, group: group})
-	u.Group = group
-	f.users()[u.ID] = u
+	if f.mutateUser == nil || *f.mutateUser {
+		u.Group = group
+	}
+	// The gateway's own copy always changes, whatever the caller's struct does.
+	server := f.users()[u.ID]
+	if server == nil {
+		server = &newapi.User{ID: u.ID}
+	}
+	server.Group = group
+	f.users()[u.ID] = server
 	return nil
 }
 

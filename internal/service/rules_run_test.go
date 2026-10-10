@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"qqbot/internal/napcat"
@@ -332,5 +333,156 @@ func TestDisabledRuleDoesNothing(t *testing.T) {
 	}
 	if res[0].Promoted != 0 || na.dir[11].Group != "default" {
 		t.Errorf("disabled rule fired: %+v", res)
+	}
+}
+
+// A join event or a bind command records one member; it must not be treated as
+// the group's whole roster (which would delete everyone else's membership).
+func TestEnsureMemberKeepsOtherMemberships(t *testing.T) {
+	svc, st, _, _ := newTestService(t)
+	enableTestGroup(t, st, 1129535731)
+
+	if err := st.UpsertMembers(1129535731, []store.Member{
+		{QQ: 1, Nickname: "a"}, {QQ: 2, Nickname: "b"}, {QQ: 3, Nickname: "c"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One member joins / binds.
+	if err := svc.EnsureMember(1129535731, 4, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	ms, err := st.MembersInGroup(1129535731)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 4 {
+		t.Errorf("EnsureMember dropped other memberships: got %d, want 4", len(ms))
+	}
+}
+
+// A bind command carries no nickname and must not blank the one a roster sync
+// already stored.
+func TestEnsureMemberDoesNotBlankNickname(t *testing.T) {
+	svc, st, _, _ := newTestService(t)
+	enableTestGroup(t, st, 1129535731)
+	if err := st.UpsertMembers(1129535731, []store.Member{{QQ: 54321, Nickname: "爱丽丝"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.EnsureMember(1129535731, 54321, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := st.GetMember(54321)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Nickname != "爱丽丝" {
+		t.Errorf("nickname was blanked: %q", m.Nickname)
+	}
+}
+
+// Two rules must not move the same account in one sweep: the first move makes
+// the account leave its old group, so the second rule's source gate must fail.
+func TestTwoRulesDoNotMoveTheSameAccountTwice(t *testing.T) {
+	svc, st, na, nc := newTestService(t)
+	nc.members[1] = []napcat.GroupMember{{QQ: 111, Nickname: "a"}}
+	setupMember(t, svc, st, 111, 11, "default")
+	na.dir = map[int]*newapi.User{11: {ID: 11, Group: "default", Role: 1}}
+	// The fake records the move but, like the real client, must not be relied
+	// upon to mutate the caller's struct; reset it to model that.
+	noMutate := false
+	na.mutateUser = &noMutate
+
+	rules := []Rule{
+		{ID: 1, Name: "first", Enabled: true, OnBind: true, SourceGroups: []string{"default"}, TargetGroup: "authorized"},
+		{ID: 2, Name: "second", Enabled: true, OnBind: true, SourceGroups: []string{"default"}, TargetGroup: "vip"},
+	}
+	res, err := svc.ApplyRules(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, r := range res {
+		total += r.Promoted
+	}
+	if total != 1 {
+		t.Errorf("want exactly 1 move across both rules, got %d (%+v)", total, res)
+	}
+	if got := na.dir[11].Group; got != "authorized" {
+		t.Errorf("final group = %q, want authorized (the first rule's target)", got)
+	}
+}
+
+// A rule created disabled must stay disabled: a gorm default:true tag used to
+// flip an explicit false back to true, so the rule ran despite the operator
+// choosing 停用.
+func TestCreateRuleKeepsDisabledState(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+
+	created, err := svc.CreateRule(Rule{
+		Name: "停用的规则", Enabled: false, OnBind: true, TargetGroup: "authorized",
+	})
+	if err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+	if created.Enabled {
+		t.Error("a rule created with enabled=false was stored enabled")
+	}
+	rules, _ := svc.Rules()
+	if len(rules) != 1 || rules[0].Enabled {
+		t.Errorf("stored rule is enabled: %+v", rules)
+	}
+}
+
+// A zero reward range is a deliberate "no reward" and must survive a save.
+func TestZeroRewardRangeIsHonoured(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	s, _ := svc.Settings()
+	s.RewardMin, s.RewardMax = 0, 0
+	if err := svc.SaveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RewardMin != 0 || got.RewardMax != 0 {
+		t.Errorf("0..0 read back as %d..%d", got.RewardMin, got.RewardMax)
+	}
+}
+
+// A concurrent award must record exactly the amount it paid.
+func TestConcurrentAwardRecordsThePaidAmount(t *testing.T) {
+	svc, st, na, nc := newTestService(t)
+	nc.members[1] = []napcat.GroupMember{{QQ: 111, Nickname: "a"}}
+	setupMember(t, svc, st, 111, 11, "default")
+	na.dir = map[int]*newapi.User{11: {ID: 11, Group: "default", Role: 1}}
+	if err := st.RecordCheckin(store.Checkin{QQ: 111, Date: "2026-10-10", GroupID: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = svc.Award("2026-10-10")
+		}()
+	}
+	wg.Wait()
+
+	if len(na.quotaAdds) != 1 {
+		t.Fatalf("want exactly 1 payment, got %d", len(na.quotaAdds))
+	}
+	paid := na.quotaAdds[0].value
+	c, err := st.GetCheckin(111, "2026-10-10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RewardQuota != paid {
+		t.Errorf("recorded %d but paid %d", c.RewardQuota, paid)
 	}
 }
