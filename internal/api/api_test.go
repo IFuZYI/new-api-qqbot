@@ -796,3 +796,56 @@ func TestManualBindFromAccountSideWithPickedQQ(t *testing.T) {
 		t.Errorf("a missing QQ must be a 400, got %d", code)
 	}
 }
+
+// The cache fill must only supply what the caller left out. An operator who
+// types a username (or an API client that knows better) must not have it
+// silently replaced by whatever the account cache happens to hold - the form's
+// value is the more recent statement of intent.
+func TestManualBindKeepsExplicitlySuppliedDetails(t *testing.T) {
+	srv, st, cl := newTestServer(t)
+	if err := st.ReplaceNewAPIUsers([]store.NewAPIUser{
+		{ID: 4, Username: "cached-name", Email: "cached@qq.com"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var resp struct {
+		Binding store.Binding `json:"binding"`
+	}
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
+		"qq": 2470777872, "newapi_user_id": 4,
+		"newapi_username": "typed-by-operator",
+		"newapi_email":    "typed@example.com",
+	}, &resp); code != 200 {
+		t.Fatalf("bind status %d", code)
+	}
+	if resp.Binding.NewAPIUsername != "typed-by-operator" {
+		t.Errorf("the caller's username was overwritten by the cache: %q", resp.Binding.NewAPIUsername)
+	}
+	if resp.Binding.NewAPIEmail != "typed@example.com" {
+		t.Errorf("the caller's email was overwritten by the cache: %q", resp.Binding.NewAPIEmail)
+	}
+}
+
+// An account the cache has never seen must still bind: the cache is a
+// convenience, not a prerequisite. The row simply carries what the caller sent.
+func TestManualBindWorksWithoutACachedAccount(t *testing.T) {
+	srv, _, cl := newTestServer(t)
+	// Deliberately no ReplaceNewAPIUsers: the cache is empty.
+
+	var resp struct {
+		Binding store.Binding `json:"binding"`
+	}
+	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
+		"qq": 2470777872, "newapi_user_id": 99,
+		"newapi_username": "uncached",
+	}, &resp); code != 200 {
+		t.Fatalf("a bind must not require the account cache, got %d", code)
+	}
+	if resp.Binding.NewAPIUserID != 99 || resp.Binding.NewAPIUsername != "uncached" {
+		t.Errorf("unexpected binding: %+v", resp.Binding)
+	}
+	if resp.Binding.NewAPIEmail != "" {
+		t.Errorf("no cached email to fill, want empty: %q", resp.Binding.NewAPIEmail)
+	}
+}
