@@ -310,3 +310,86 @@ func TestFindUserByEmailStopsAtShortPage(t *testing.T) {
 		t.Errorf("want 1 request for a short page, got %d", calls)
 	}
 }
+
+// ListUsers pages through /api/user/ and returns every account, so the
+// directory can show accounts nobody has joined with.
+func TestListUsersPagesThroughEveryAccount(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/user/" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		page := r.URL.Query().Get("p")
+		pages = append(pages, page)
+
+		if page == "1" {
+			items := make([]map[string]any, 0, searchPageSize)
+			for i := 0; i < searchPageSize; i++ {
+				items = append(items, map[string]any{
+					"id": i + 1, "username": "u", "group": "default",
+				})
+			}
+			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "total": searchPageSize + 1})))
+			return
+		}
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"items": []map[string]any{{"id": 999, "username": "last", "group": "vip"}},
+			"total": searchPageSize + 1,
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	users, err := c.ListUsers()
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(users) != searchPageSize+1 {
+		t.Fatalf("want %d accounts, got %d", searchPageSize+1, len(users))
+	}
+	if users[len(users)-1].ID != 999 || users[len(users)-1].Group != "vip" {
+		t.Errorf("the second page was not included: %+v", users[len(users)-1])
+	}
+	if len(pages) != 2 {
+		t.Errorf("want 2 pages requested, got %v", pages)
+	}
+}
+
+// A single short page means the whole set fits; do not ask for more.
+func TestListUsersStopsAtShortPage(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"items": []map[string]any{{"id": 1, "username": "a", "group": "default"}},
+			"total": 1,
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	users, err := c.ListUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || calls != 1 {
+		t.Errorf("want 1 account in 1 request, got %d accounts in %d requests", len(users), calls)
+	}
+}
+
+// The list endpoint must fail loudly: the caller replaces its cache with the
+// result, so a silently partial list would delete real accounts.
+func TestListUsersPropagatesAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false,"message":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	if _, err := c.ListUsers(); err == nil {
+		t.Fatal("a failed list must return an error, not an empty slice")
+	}
+}

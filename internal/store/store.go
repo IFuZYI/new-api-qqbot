@@ -139,6 +139,7 @@ func Open(path string) (*Store, error) {
 	if err := db.AutoMigrate(
 		&MonitoredGroup{}, &Member{}, &MemberGroup{},
 		&Binding{}, &Checkin{}, &Setting{}, &Admin{}, &PromotionRule{},
+		&NewAPIUser{},
 	); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}

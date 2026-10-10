@@ -215,6 +215,38 @@ func (c *Client) FindUserByEmail(addr string) (*User, error) {
 	}
 }
 
+// ListUsers pages through every account on the instance.
+//
+// It reads /api/user/ (the admin list), not /search: the search endpoint is a
+// keyword LIKE, so an empty keyword does not reliably mean "everything". The
+// list is paginated, so the whole set is scanned and the caller is expected to
+// treat the result as complete - a partial read must never be cached as if it
+// were the full roster (see store.ReplaceNewAPIUsers).
+func (c *Client) ListUsers() ([]User, error) {
+	var out []User
+	for page := 1; page <= maxSearchPages; page++ {
+		var resp struct {
+			Items []User `json:"items"`
+			Total int    `json:"total"`
+		}
+		path := fmt.Sprintf("/api/user/?p=%d&page_size=%d", page, searchPageSize)
+		if err := c.do(http.MethodGet, path, nil, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Items...)
+
+		// Stop once the pages are exhausted. A short page also means the end,
+		// which covers servers that ignore page_size.
+		if len(resp.Items) == 0 || len(resp.Items) < searchPageSize {
+			break
+		}
+		if resp.Total > 0 && page*searchPageSize >= resp.Total {
+			break
+		}
+	}
+	return out, nil
+}
+
 // SetGroup moves an account into group. new-api's PUT /api/user/ takes the full
 // user object and silently discards fields it does not accept, so everything it
 // does persist is resent verbatim.

@@ -22,6 +22,7 @@ func (stubGateway) GetUser(int) (*newapi.User, error)            { return &newap
 func (stubGateway) SetGroup(*newapi.User, string) error          { return nil }
 func (stubGateway) AddQuota(int, int) error                      { return nil }
 func (stubGateway) Groups() (map[string]struct{}, error)         { return map[string]struct{}{}, nil }
+func (stubGateway) ListUsers() ([]newapi.User, error)            { return nil, nil }
 
 type stubQQ struct{}
 

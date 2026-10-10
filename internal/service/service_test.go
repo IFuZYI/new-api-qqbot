@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"qqbot/internal/napcat"
@@ -21,11 +22,20 @@ type fakeNewAPI struct {
 	failSet   error
 	failQuota error
 
+	// failSetFor fails SetGroup for specific account ids, so a batch can be
+	// exercised with one protected account among successful ones.
+	failSetFor map[int]error
+
 	// mutateUser models whether SetGroup writes the new group back onto the
 	// caller's struct. The real client does not; default true keeps the older
 	// tests reading naturally.
 	mutateUser *bool
 }
+
+// errString is a tiny error type so tests can name an error inline.
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 type groupSet struct {
 	userID int
@@ -70,6 +80,9 @@ func (f *fakeNewAPI) GetUser(id int) (*newapi.User, error) {
 }
 
 func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
+	if err := f.failSetFor[u.ID]; err != nil {
+		return err
+	}
 	if f.failSet != nil {
 		return f.failSet
 	}
@@ -89,6 +102,17 @@ func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
 
 func (f *fakeNewAPI) Groups() (map[string]struct{}, error) {
 	return map[string]struct{}{"default": {}, "authorized": {}, "vip": {}}, nil
+}
+
+// ListUsers returns the fake's account directory, so a sync sees the same
+// accounts a GetUser would.
+func (f *fakeNewAPI) ListUsers() ([]newapi.User, error) {
+	out := make([]newapi.User, 0, len(f.users()))
+	for _, u := range f.users() {
+		out = append(out, *u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
 func (f *fakeNewAPI) AddQuota(userID, value int) error {

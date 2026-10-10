@@ -209,6 +209,15 @@ func (l *lazyGateway) Groups() (map[string]struct{}, error) {
 	return c.Groups()
 }
 
+// ListUsers returns every account on the instance, for the user directory.
+func (l *lazyGateway) ListUsers() ([]newapi.User, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListUsers()
+}
+
 func (l *lazyGateway) AddQuota(userID, value int) error {
 	c, err := l.client()
 	if err != nil {

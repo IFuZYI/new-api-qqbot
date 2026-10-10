@@ -64,6 +64,9 @@ type Gateway interface {
 	SetGroup(u *newapi.User, group string) error
 	AddQuota(userID, value int) error
 	Groups() (map[string]struct{}, error)
+	// ListUsers returns every account on the instance, so the WebUI can show
+	// accounts no member has joined with.
+	ListUsers() ([]newapi.User, error)
 }
 
 // QQ is the subset of the NapCat client the service needs.
