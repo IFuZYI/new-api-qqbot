@@ -246,3 +246,70 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// An empty (or comment-only) file parses to the zero Config, which must not be
+// adopted: an editor that truncates before writing would otherwise destroy the
+// live connection settings with no warning.
+func TestEmptyFileDoesNotWipeStoredConfig(t *testing.T) {
+	for _, content := range []string{"", "\n\n", "# just a comment\n", fileHeader} {
+		m, _ := newTestManager(t)
+		if err := m.Save(sample()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(m.Path(), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := m.Load()
+		if err != nil {
+			t.Fatalf("content %q: Load: %v", content, err)
+		}
+		if got.NewAPI.URL != "https://api.fuzy.site" {
+			t.Errorf("content %q wiped the stored config: %+v", content, got.NewAPI)
+		}
+	}
+}
+
+// A file that carries at least one value is still adopted.
+func TestPartialFileIsAdopted(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.Save(sample()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.Path(), []byte("newapi:\n  url: https://changed.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := m.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NewAPI.URL != "https://changed.example.com" {
+		t.Errorf("a partial file should be adopted, got %q", got.NewAPI.URL)
+	}
+}
+
+// The revision must change when the config changes, so a stale save is
+// detectable.
+func TestRevisionTracksContent(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.Save(sample()); err != nil {
+		t.Fatal(err)
+	}
+	first := m.Revision()
+	if first == "" {
+		t.Fatal("empty revision")
+	}
+	if m.Revision() != first {
+		t.Error("revision is not stable for unchanged content")
+	}
+
+	other := sample()
+	other.NewAPI.URL = "https://elsewhere.example.com"
+	if err := m.Save(other); err != nil {
+		t.Fatal(err)
+	}
+	if m.Revision() == first {
+		t.Error("revision did not change after the config changed")
+	}
+}

@@ -189,18 +189,21 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "secret-pw"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "webui-tok"},
 	}
-	var saved config.Config
-	if code := postJSONWith(t, cl, srv.URL+"/api/config", in, &saved); code != 200 {
+	var saved cfgResponse
+	if code := postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: in}, &saved); code != 200 {
 		t.Fatalf("save status %d", code)
 	}
-	if saved.NewAPI.Password != config.RedactedPassword {
-		t.Errorf("password must not be echoed back: %q", saved.NewAPI.Password)
+	if saved.Config.NewAPI.Password != config.RedactedPassword {
+		t.Errorf("password must not be echoed back: %q", saved.Config.NewAPI.Password)
 	}
 
-	var got config.Config
+	var got cfgResponse
 	getJSONWith(t, cl, srv.URL+"/api/config", &got)
-	if got.NewAPI.Password != config.RedactedPassword {
-		t.Errorf("GET must redact the password: %q", got.NewAPI.Password)
+	if got.Config.NewAPI.Password != config.RedactedPassword {
+		t.Errorf("GET must redact the password: %q", got.Config.NewAPI.Password)
+	}
+	if got.Revision == "" {
+		t.Error("GET must return a revision so a stale save can be refused")
 	}
 
 	// The real secret must still be on disk, unchanged.
@@ -214,15 +217,16 @@ func TestConfigRoundTripHidesSecrets(t *testing.T) {
 func TestConfigSaveKeepsPasswordWhenRedactedPlaceholderSent(t *testing.T) {
 	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
 
-	postJSONWith(t, cl, srv.URL+"/api/config", config.Config{
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "real-pw"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "tok"},
-	}, nil)
+	}}, nil)
 
-	var got config.Config
+	var got cfgResponse
 	getJSONWith(t, cl, srv.URL+"/api/config", &got)
-	got.NewAPI.URL = "https://other.example.com" // operator edits only the URL
-	postJSONWith(t, cl, srv.URL+"/api/config", got, nil)
+	edited := got.Config
+	edited.NewAPI.URL = "https://other.example.com" // operator edits only the URL
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: edited, Revision: got.Revision}, nil)
 
 	stored := cfgMgr.MustLoad()
 	if stored.NewAPI.Password != "real-pw" {
@@ -239,7 +243,7 @@ func TestConfigRejectsInvalidInput(t *testing.T) {
 		NewAPI: config.NewAPI{URL: "not-a-url", Username: "u", Password: "p"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "t"},
 	}
-	if code := postJSONWith(t, cl, srv.URL+"/api/config", bad, nil); code == 200 {
+	if code := postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: bad}, nil); code == 200 {
 		t.Error("an invalid URL must be rejected")
 	}
 }
@@ -405,10 +409,10 @@ func TestCheckinsEndpoint(t *testing.T) {
 func TestConfigSaveWritesTheFile(t *testing.T) {
 	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
 
-	postJSONWith(t, cl, srv.URL+"/api/config", config.Config{
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: config.Config{
 		NewAPI: config.NewAPI{URL: "https://api.fuzy.site", Username: "napcat", Password: "pw-123"},
 		NapCat: config.NapCat{WebUIURL: "http://127.0.0.1:6099", WebUIToken: "wt"},
-	}, nil)
+	}}, nil)
 
 	raw, err := os.ReadFile(cfgMgr.Path())
 	if err != nil {
@@ -422,5 +426,63 @@ func TestConfigSaveWritesTheFile(t *testing.T) {
 	got := cfgMgr.MustLoad()
 	if got.NewAPI.Username != "napcat" || got.NewAPI.Password != "pw-123" {
 		t.Errorf("round trip through the file failed: %+v", got.NewAPI)
+	}
+}
+
+// cfgRequest/cfgResponse mirror the connection-config envelope, which carries a
+// revision so a stale form cannot clobber a concurrent change.
+type cfgRequest struct {
+	Config   config.Config `json:"config"`
+	Revision string        `json:"revision"`
+}
+
+type cfgResponse struct {
+	Config   config.Config `json:"config"`
+	Revision string        `json:"revision"`
+}
+
+// A save based on a stale view must be refused, so a long-lived tab cannot
+// overwrite a hand edit (or another tab's save) with values it never touched.
+func TestStaleConfigSaveIsRefused(t *testing.T) {
+	srv, _, cl, cfgMgr := newTestServerWithConfig(t)
+
+	postJSONWith(t, cl, srv.URL+"/api/config", cfgRequest{Config: config.Config{
+		NewAPI: config.NewAPI{URL: "https://one.example.com", Username: "u", Password: "p"},
+		NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3002"},
+	}}, nil)
+
+	var first cfgResponse
+	getJSONWith(t, cl, srv.URL+"/api/config", &first)
+	if first.Revision == "" {
+		t.Fatal("no revision returned")
+	}
+
+	// Somebody else changes the config (a hand edit to the file).
+	if err := cfgMgr.Save(config.Config{
+		NewAPI: config.NewAPI{URL: "https://two.example.com", Username: "u", Password: "p"},
+		NapCat: config.NapCat{OneBotURL: "http://127.0.0.1:3002"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale tab now saves, having edited nothing relevant.
+	stale := first.Config
+	code := postJSONWith(t, cl, srv.URL+"/api/config",
+		cfgRequest{Config: stale, Revision: first.Revision}, nil)
+	if code != http.StatusConflict {
+		t.Errorf("a stale save must be refused with 409, got %d", code)
+	}
+	if got := cfgMgr.MustLoad().NewAPI.URL; got != "https://two.example.com" {
+		t.Errorf("the concurrent change was overwritten: %q", got)
+	}
+
+	// Reloading and saving again must work.
+	var fresh cfgResponse
+	getJSONWith(t, cl, srv.URL+"/api/config", &fresh)
+	edited := fresh.Config
+	edited.NewAPI.Username = "edited"
+	if code := postJSONWith(t, cl, srv.URL+"/api/config",
+		cfgRequest{Config: edited, Revision: fresh.Revision}, nil); code != 200 {
+		t.Errorf("a save with the current revision must succeed, got %d", code)
 	}
 }

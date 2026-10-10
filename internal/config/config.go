@@ -132,6 +132,18 @@ func (m *Manager) syncFromFile() error {
 		return fmt.Errorf("parse %s: %w", m.path, err)
 	}
 
+	// An empty or comment-only file parses cleanly into the zero Config, which
+	// is indistinguishable from "the operator cleared everything". Adopting it
+	// would destroy the stored connection settings (an editor that truncates
+	// before writing is enough to trigger it), so a file that carries no values
+	// at all is ignored. Clearing the configuration is done from the WebUI.
+	if c.isZero() {
+		m.mu.Lock()
+		m.lastHash = sum
+		m.mu.Unlock()
+		return nil
+	}
+
 	// Record the hash before writing, so Save's own file write is not later
 	// mistaken for an external edit.
 	m.mu.Lock()
@@ -139,6 +151,29 @@ func (m *Manager) syncFromFile() error {
 	m.mu.Unlock()
 
 	return m.saveToStore(c)
+}
+
+// isZero reports whether every field is empty, i.e. the file carried no values.
+func (c Config) isZero() bool {
+	return c.NewAPI.URL == "" && c.NewAPI.Username == "" && c.NewAPI.Password == "" &&
+		c.NapCat.WebUIURL == "" && c.NapCat.WebUIToken == "" &&
+		c.NapCat.OneBotURL == "" && c.NapCat.OneBotToken == "" &&
+		c.NapCat.EventWSURL == "" && c.NapCat.EventWSToken == ""
+}
+
+// Revision identifies the current configuration so a writer can detect that it
+// changed underneath them. It is a hash of the file's content when the file is
+// present, and of the stored copy otherwise.
+func (m *Manager) Revision() string {
+	if raw, err := os.ReadFile(m.path); err == nil {
+		return hashBytes(raw)
+	}
+	c := m.fromStore()
+	raw, err := yaml.Marshal(c)
+	if err != nil {
+		return ""
+	}
+	return hashBytes(raw)
 }
 
 // fromStore reads the database copy.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"qqbot/internal/config"
 	"qqbot/internal/service"
@@ -20,6 +21,9 @@ type Router struct {
 	svc *service.Service
 	cfg *config.Manager
 	mux *http.ServeMux
+
+	// setupMu serialises first-run setup (see auth.go).
+	setupMu sync.Mutex
 }
 
 // NewRouter builds the API router. The WebUI is served from webDist and
@@ -115,30 +119,52 @@ func (r *Router) bootstrap(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (r *Router) getConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, r.cfg.MustLoad().Redacted())
+	// The revision lets the form detect that the configuration changed (a hand
+	// edit to the file, or another tab) before it overwrites it.
+	writeJSON(w, 200, map[string]any{
+		"config":   r.cfg.MustLoad().Redacted(),
+		"revision": r.cfg.Revision(),
+	})
 }
 
 func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
-	var in config.Config
+	var in struct {
+		Config   config.Config `json:"config"`
+		Revision string        `json:"revision"`
+	}
 	if err := decode(req, &in); err != nil {
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
-	in = in.Merge(r.cfg.MustLoad())
 
-	if err := in.NewAPI.Validate(); err != nil {
+	// Refuse a save based on a stale view: without this, a long-lived tab that
+	// only edits one field writes every other field back from its own copy and
+	// silently discards a hand edit made to the file in the meantime.
+	if in.Revision != "" && in.Revision != r.cfg.Revision() {
+		writeErr(w, http.StatusConflict, errors.New(
+			"配置已被修改（可能是你手改了 config.yaml，或另一个页面保存过）。请重新载入后再保存。"))
+		return
+	}
+
+	cfgIn := in.Config
+	cfgIn = cfgIn.Merge(r.cfg.MustLoad())
+
+	if err := cfgIn.NewAPI.Validate(); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	if err := in.NapCat.Validate(); err != nil {
+	if err := cfgIn.NapCat.Validate(); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	if err := r.cfg.Save(in); err != nil {
+	if err := r.cfg.Save(cfgIn); err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, in.Redacted())
+	writeJSON(w, 200, map[string]any{
+		"config":   cfgIn.Redacted(),
+		"revision": r.cfg.Revision(),
+	})
 }
 
 func (r *Router) listGroups(w http.ResponseWriter, _ *http.Request) {
