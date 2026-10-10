@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type AuthState, type Bootstrap, type Config, type Group, type Member, type MembersResponse, type Settings } from './api'
 import Login from './Login'
+import Rules from './Rules'
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, OkNote, Table } from './ui'
 
-type Tab = 'overview' | 'groups' | 'users' | 'settings' | 'connection'
+type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: '概览' },
   { id: 'groups', label: '群管理' },
   { id: 'users', label: '用户管理' },
+  { id: 'rules', label: '分组转换' },
   { id: 'settings', label: '监测设置' },
   { id: 'connection', label: '连接配置' },
 ]
@@ -120,6 +122,7 @@ export default function App() {
         {tab === 'overview' && <Overview boot={boot} onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'groups' && <Groups onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
+        {tab === 'rules' && <Rules onDone={flash} onFail={fail} />}
         {tab === 'settings' && (
           <SettingsView
             onDone={flash}
@@ -559,12 +562,6 @@ function SettingsView({
         }
       >
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="源分组" hint="只把处于这个分组的账号提升出去">
-            <Input value={s.source_group} onChange={str('source_group')} />
-          </Field>
-          <Field label="目标分组" hint="提升到这个分组；必须已在 new-api 里配置好">
-            <Input value={s.target_group} onChange={str('target_group')} />
-          </Field>
           <Field label="成员列表巡检周期（分钟）">
             <Input type="number" value={s.member_sync_minutes} onChange={num('member_sync_minutes')} />
           </Field>

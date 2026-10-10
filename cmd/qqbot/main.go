@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,9 +89,21 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 }
 
-// lazyGateway builds a new-api client from stored configuration on every call.
-type lazyGateway struct{ st *store.Store }
+// lazyGateway builds a new-api client from stored configuration and reuses it
+// until the configuration changes.
+//
+// Caching matters for more than speed: the gateway caps concurrent login
+// sessions (it answers 409 AUTH_SESSION_LIMIT), so logging in on every call
+// breaks as soon as a sweep makes more than a handful of calls.
+type lazyGateway struct {
+	st *store.Store
 
+	mu     sync.Mutex
+	cached *newapi.Client
+	key    string // config fingerprint the cached client was built from
+}
+
+// client returns a logged-in client, re-authenticating only when needed.
 func (l *lazyGateway) client() (*newapi.Client, error) {
 	cfg, err := config.Load(l.st)
 	if err != nil {
@@ -99,11 +112,42 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 	if cfg.NewAPI.URL == "" {
 		return nil, errNotConfigured
 	}
+	key := cfg.NewAPI.URL + "\x00" + cfg.NewAPI.Username + "\x00" + cfg.NewAPI.Password
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.cached != nil && l.key == key && l.cached.Token() != "" {
+		return l.cached, nil
+	}
+
 	c := newapi.New(cfg.NewAPI.URL)
-	if err := c.Login(cfg.NewAPI.Username, cfg.NewAPI.Password); err != nil {
+	if err := loginWithRetry(c, cfg.NewAPI.Username, cfg.NewAPI.Password); err != nil {
 		return nil, err
 	}
+	l.cached, l.key = c, key
 	return c, nil
+}
+
+// invalidate drops the cached client, e.g. after a rejected request.
+func (l *lazyGateway) invalidate() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cached = nil
+	l.key = ""
+}
+
+// loginWithRetry retries a rejected login. The gateway rate-limits logins and
+// caps sessions, so a transient 409/429 is expected under load.
+func loginWithRetry(c *newapi.Client, username, password string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = c.Login(username, password); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Second)
+	}
+	return err
 }
 
 func (l *lazyGateway) FindUserByEmail(addr string) (*newapi.User, error) {
@@ -119,7 +163,11 @@ func (l *lazyGateway) GetUser(id int) (*newapi.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.GetUser(id)
+	u, err := c.GetUser(id)
+	if err != nil {
+		l.invalidate()
+	}
+	return u, err
 }
 
 func (l *lazyGateway) SetGroup(u *newapi.User, group string) error {
@@ -127,7 +175,19 @@ func (l *lazyGateway) SetGroup(u *newapi.User, group string) error {
 	if err != nil {
 		return err
 	}
-	return c.SetGroup(u, group)
+	if err := c.SetGroup(u, group); err != nil {
+		l.invalidate()
+		return err
+	}
+	return nil
+}
+
+func (l *lazyGateway) Groups() (map[string]struct{}, error) {
+	c, err := l.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.Groups()
 }
 
 func (l *lazyGateway) AddQuota(userID, value int) error {
@@ -135,7 +195,11 @@ func (l *lazyGateway) AddQuota(userID, value int) error {
 	if err != nil {
 		return err
 	}
-	return c.AddQuota(userID, value)
+	if err := c.AddQuota(userID, value); err != nil {
+		l.invalidate()
+		return err
+	}
+	return nil
 }
 
 // lazyQQ prefers the OneBot HTTP endpoint and falls back to the WebUI bridge,

@@ -24,14 +24,17 @@ const userAgent = "qqbot-group-monitor/0.1 (+self-hosted)"
 
 // User is the subset of a new-api account this service cares about.
 type User struct {
-	ID          int    `json:"id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Email       string `json:"email"`
-	Group       string `json:"group"`
-	Role        int    `json:"role"`
-	Status      int    `json:"status"`
-	Remark      string `json:"remark"`
+	ID           int    `json:"id"`
+	Username     string `json:"username"`
+	DisplayName  string `json:"display_name"`
+	Email        string `json:"email"`
+	Group        string `json:"group"`
+	Role         int    `json:"role"`
+	Status       int    `json:"status"`
+	Remark       string `json:"remark"`
+	Quota        int    `json:"quota"`
+	UsedQuota    int    `json:"used_quota"`
+	RequestCount int    `json:"request_count"`
 }
 
 // Client talks to one new-api instance.
@@ -65,10 +68,13 @@ func (c *Client) Token() string {
 	return c.token
 }
 
-// envelope is the standard new-api response wrapper.
+// envelope is the standard new-api response wrapper. Code carries the machine
+// readable error (e.g. AUTH_SESSION_LIMIT) which is far more useful than the
+// bare HTTP status.
 type envelope struct {
 	Success bool            `json:"success"`
 	Message string          `json:"message"`
+	Code    string          `json:"code"`
 	Data    json.RawMessage `json:"data"`
 }
 
@@ -110,6 +116,16 @@ func (c *Client) do(method, path string, body any, out any) error {
 	}
 	if !env.Success {
 		msg := env.Message
+		if env.Code != "" {
+			// The machine-readable code is what makes a failure diagnosable:
+			// AUTH_SESSION_LIMIT means the account's active-session cap is
+			// full, which no amount of retrying will fix.
+			if msg != "" {
+				msg = env.Code + ": " + msg
+			} else {
+				msg = env.Code
+			}
+		}
 		if msg == "" {
 			msg = strings.TrimSpace(string(raw))
 		}

@@ -30,10 +30,16 @@ type Group struct {
 }
 
 // GroupMember is one member of a group.
+//
+// Level and QQLevel arrive as different JSON types from NapCat (`level` is a
+// string, `qq_level` a number), hence flexInt.
 type GroupMember struct {
-	QQ       int64  `json:"user_id"`
-	Nickname string `json:"nickname"`
-	Card     string `json:"card"`
+	QQ       int64   `json:"user_id"`
+	Nickname string  `json:"nickname"`
+	Card     string  `json:"card"`
+	Level    flexInt `json:"level"`    // 群等级
+	QQLevel  flexInt `json:"qq_level"` // QQ 账号等级
+	JoinTime int64   `json:"join_time"`
 }
 
 // DisplayName is what the operator sees for a member in this group.

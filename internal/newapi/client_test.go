@@ -206,3 +206,22 @@ func TestAddQuotaRejectsNonPositive(t *testing.T) {
 		t.Error("a zero award must be rejected locally rather than sent")
 	}
 }
+
+// The machine-readable code must survive into the error, because it is what
+// tells the operator what is actually wrong: AUTH_SESSION_LIMIT (the account's
+// active-session cap is full) needs a different response than a bad password.
+func TestLoginSurfacesErrorCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"AUTH_SESSION_LIMIT","message":"Conflict","success":false}`))
+	}))
+	defer srv.Close()
+
+	err := New(srv.URL).Login("napcat", "pw")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_SESSION_LIMIT") {
+		t.Errorf("error must name the code, got %v", err)
+	}
+}

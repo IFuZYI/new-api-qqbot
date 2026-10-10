@@ -82,6 +82,24 @@ type Admin struct {
 	CreatedAt    int64  `json:"created_at"`
 }
 
+// PromotionRule is one group-conversion rule. SourceGroups and Conditions are
+// JSON, so adding a condition kind needs no migration.
+type PromotionRule struct {
+	ID              int64  `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name            string `json:"name"`
+	Enabled         bool   `gorm:"default:true" json:"enabled"`
+	OnBind          bool   `json:"on_bind"`
+	IntervalMinutes int    `json:"interval_minutes"`
+	SourceGroups    string `gorm:"type:text" json:"-"` // JSON array
+	TargetGroup     string `json:"target_group"`
+	Conditions      string `gorm:"type:text" json:"-"` // JSON array
+
+	LastRunAt int64  `json:"last_run_at"`
+	LastError string `json:"last_error"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = gorm.ErrRecordNotFound
 
@@ -98,7 +116,7 @@ func Open(path string) (*Store, error) {
 	}
 	if err := db.AutoMigrate(
 		&MonitoredGroup{}, &Member{}, &MemberGroup{},
-		&Binding{}, &Checkin{}, &Setting{}, &Admin{},
+		&Binding{}, &Checkin{}, &Setting{}, &Admin{}, &PromotionRule{},
 	); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -467,4 +485,76 @@ func (s *Store) CountAdmins() (int64, error) {
 	var n int64
 	err := s.db.Model(&Admin{}).Count(&n).Error
 	return n, err
+}
+
+// ---------- promotion rules ----------
+
+// ListRules returns every rule ordered by id.
+func (s *Store) ListRules() ([]PromotionRule, error) {
+	var out []PromotionRule
+	err := s.db.Order("id").Find(&out).Error
+	return out, err
+}
+
+// GetRule loads one rule.
+func (s *Store) GetRule(id int64) (*PromotionRule, error) {
+	var r PromotionRule
+	if err := s.db.First(&r, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// CreateRule stores a new rule.
+func (s *Store) CreateRule(r PromotionRule) (*PromotionRule, error) {
+	r.CreatedAt = now()
+	r.UpdatedAt = r.CreatedAt
+	if err := s.db.Create(&r).Error; err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// UpdateRule replaces a rule's configuration.
+func (s *Store) UpdateRule(r PromotionRule) error {
+	r.UpdatedAt = now()
+	return s.db.Model(&PromotionRule{}).Where("id = ?", r.ID).Updates(map[string]any{
+		"name":             r.Name,
+		"enabled":          r.Enabled,
+		"on_bind":          r.OnBind,
+		"interval_minutes": r.IntervalMinutes,
+		"source_groups":    r.SourceGroups,
+		"target_group":     r.TargetGroup,
+		"conditions":       r.Conditions,
+		"updated_at":       r.UpdatedAt,
+	}).Error
+}
+
+// DeleteRule removes a rule.
+func (s *Store) DeleteRule(id int64) error {
+	return s.db.Delete(&PromotionRule{}, "id = ?", id).Error
+}
+
+// MarkRuleRun records a rule's outcome.
+func (s *Store) MarkRuleRun(id int64, at int64, errMsg string) error {
+	return s.db.Model(&PromotionRule{}).Where("id = ?", id).Updates(map[string]any{
+		"last_run_at": at,
+		"last_error":  errMsg,
+	}).Error
+}
+
+// ScheduledRules returns the enabled rules that take part in the periodic sweep.
+func (s *Store) ScheduledRules() ([]PromotionRule, error) {
+	var out []PromotionRule
+	err := s.db.Where("enabled = ? AND interval_minutes > 0", true).
+		Order("id").Find(&out).Error
+	return out, err
+}
+
+// OnBindRules returns the enabled rules that fire when a member is bound.
+func (s *Store) OnBindRules() ([]PromotionRule, error) {
+	var out []PromotionRule
+	err := s.db.Where("enabled = ? AND on_bind = ?", true, true).
+		Order("id").Find(&out).Error
+	return out, err
 }

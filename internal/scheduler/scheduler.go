@@ -36,12 +36,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if err := s.svc.SyncAllMembers(); err != nil {
 			return err
 		}
-		// New members appear here, so follow up immediately: bind them and
-		// promote what is already bound.
-		if _, err := s.svc.AutoBind(); err != nil {
-			return err
-		}
-		_, err := s.svc.Promote()
+		// New members appear here, so follow up immediately: bind them. Group
+		// conversion is the rules' job (each rule opts in via its own interval
+		// or the bind trigger), not a blanket sweep.
+		_, err := s.svc.AutoBind()
+		return err
+	})
+
+	go s.loop(ctx, "rules", s.ruleInterval, func() error {
+		_, err := s.svc.RunScheduledRules()
 		return err
 	})
 
@@ -67,6 +70,31 @@ func (s *Scheduler) memberInterval() time.Duration {
 		return 2 * time.Hour
 	}
 	return time.Duration(cfg.MemberSyncMinutes) * time.Minute
+}
+
+// ruleInterval is the shortest configured rule interval, so every rule is
+// checked at least as often as it asks for. Rules are also cheap no-ops when
+// nothing matches.
+func (s *Scheduler) ruleInterval() time.Duration {
+	rules, err := s.svc.Rules()
+	if err != nil {
+		return time.Hour
+	}
+	best := 0
+	for _, r := range rules {
+		if !r.Enabled || r.IntervalMinutes <= 0 {
+			continue
+		}
+		if best == 0 || r.IntervalMinutes < best {
+			best = r.IntervalMinutes
+		}
+	}
+	if best == 0 {
+		// No scheduled rules configured; re-check occasionally so a newly added
+		// rule starts running without a restart.
+		return 30 * time.Minute
+	}
+	return time.Duration(best) * time.Minute
 }
 
 func (s *Scheduler) checkinInterval() time.Duration {
@@ -122,7 +150,7 @@ func (s *Scheduler) Status() map[string]any {
 	defer s.mu.Unlock()
 
 	out := map[string]any{}
-	for _, name := range []string{"members", "checkins"} {
+	for _, name := range []string{"members", "checkins", "rules"} {
 		entry := map[string]any{}
 		if t, ok := s.lastRun[name]; ok {
 			entry["last_run"] = t.Unix()

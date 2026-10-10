@@ -73,6 +73,10 @@ func (f *fakeNewAPI) SetGroup(u *newapi.User, group string) error {
 	return nil
 }
 
+func (f *fakeNewAPI) Groups() (map[string]struct{}, error) {
+	return map[string]struct{}{"default": {}, "authorized": {}, "vip": {}}, nil
+}
+
 func (f *fakeNewAPI) AddQuota(userID, value int) error {
 	if f.failQuota != nil {
 		return f.failQuota
@@ -131,9 +135,6 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
-	if s.SourceGroup != "default" || s.TargetGroup != "authorized" {
-		t.Errorf("unexpected default groups: %+v", s)
-	}
 	if s.RewardMin != 100 || s.RewardMax != 200 {
 		t.Errorf("unexpected default reward range: %d-%d", s.RewardMin, s.RewardMax)
 	}
@@ -141,8 +142,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 		t.Errorf("sync intervals must default to positive values: %+v", s)
 	}
 
-	s.TargetGroup = "vip"
 	s.RewardMax = 500
+	s.MemberSyncMinutes = 45
 	if err := svc.SaveSettings(s); err != nil {
 		t.Fatalf("SaveSettings: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.TargetGroup != "vip" || got.RewardMax != 500 {
+	if got.RewardMax != 500 || got.MemberSyncMinutes != 45 {
 		t.Errorf("settings did not persist: %+v", got)
 	}
 }
@@ -254,101 +255,6 @@ func TestAutoBindRefusesAmbiguousMatch(t *testing.T) {
 	if _, err := st.GetBinding(54321); !errors.Is(err, store.ErrNotFound) {
 		t.Error("ambiguous match must not create a binding")
 	}
-}
-
-func TestPromoteOnlyMovesSourceGroup(t *testing.T) {
-	svc, _, na, nc := newTestService(t)
-	nc.members[1] = []napcat.GroupMember{
-		{QQ: 111, Nickname: "in-default"},
-		{QQ: 222, Nickname: "already-authorized"},
-		{QQ: 333, Nickname: "vip"},
-	}
-	if err := svc.SyncMembers(1); err != nil {
-		t.Fatal(err)
-	}
-	na.byEmail["111@qq.com"] = &newapi.User{ID: 11, Username: "u11", Group: "default", Role: 1}
-	na.byEmail["222@qq.com"] = &newapi.User{ID: 22, Username: "u22", Group: "authorized", Role: 1}
-	na.byEmail["333@qq.com"] = &newapi.User{ID: 33, Username: "u33", Group: "vip", Role: 1}
-	if _, err := svc.AutoBind(); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := svc.Promote()
-	if err != nil {
-		t.Fatalf("Promote: %v", err)
-	}
-	if res.Promoted != 1 {
-		t.Errorf("want exactly 1 promotion, got %+v", res)
-	}
-	if len(na.groupSets) != 1 || na.groupSets[0].userID != 11 || na.groupSets[0].group != "authorized" {
-		t.Errorf("wrong promotion: %+v", na.groupSets)
-	}
-}
-
-// Re-running promotion must not issue redundant writes, or a 2-hour sweep would
-// hammer the gateway.
-func TestPromoteIsIdempotent(t *testing.T) {
-	svc, st, na, nc := newTestService(t)
-	nc.members[1] = []napcat.GroupMember{{QQ: 111, Nickname: "a"}}
-	if err := svc.SyncMembers(1); err != nil {
-		t.Fatal(err)
-	}
-	na.byEmail["111@qq.com"] = &newapi.User{ID: 11, Username: "u11", Group: "default", Role: 1}
-	if _, err := svc.AutoBind(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.Promote(); err != nil {
-		t.Fatal(err)
-	}
-	na.groupSets = nil
-
-	// The fake updates the user in place, mirroring the gateway.
-	res, err := svc.Promote()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Promoted != 0 || len(na.groupSets) != 0 {
-		t.Errorf("second pass should be a no-op, got %+v sets=%+v", res, na.groupSets)
-	}
-	_ = st
-}
-
-func TestPromoteSkipsUnboundMembers(t *testing.T) {
-	svc, _, na, nc := newTestService(t)
-	nc.members[1] = []napcat.GroupMember{{QQ: 54321, Nickname: "nobody"}}
-	if err := svc.SyncMembers(1); err != nil {
-		t.Fatal(err)
-	}
-	res, err := svc.Promote()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Promoted != 0 || len(na.groupSets) != 0 {
-		t.Errorf("unbound members must not be promoted: %+v", res)
-	}
-}
-
-func TestPromoteReportsFailureWithoutAborting(t *testing.T) {
-	svc, st, na, nc := newTestService(t)
-	nc.members[1] = []napcat.GroupMember{{QQ: 111, Nickname: "a"}, {QQ: 222, Nickname: "b"}}
-	if err := svc.SyncMembers(1); err != nil {
-		t.Fatal(err)
-	}
-	na.byEmail["111@qq.com"] = &newapi.User{ID: 11, Username: "u11", Group: "default", Role: 1}
-	na.byEmail["222@qq.com"] = &newapi.User{ID: 22, Username: "u22", Group: "default", Role: 1}
-	if _, err := svc.AutoBind(); err != nil {
-		t.Fatal(err)
-	}
-	na.failSet = errors.New("boom")
-
-	res, err := svc.Promote()
-	if err != nil {
-		t.Fatalf("Promote should not abort on one failure: %v", err)
-	}
-	if res.Failed != 2 {
-		t.Errorf("want 2 failures recorded, got %+v", res)
-	}
-	_ = st
 }
 
 func TestSyncCheckinsRecordsBoard(t *testing.T) {

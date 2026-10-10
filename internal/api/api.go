@@ -61,6 +61,14 @@ func (r *Router) routes() {
 
 	r.mux.HandleFunc("GET /api/checkins", r.requireAuth(r.listCheckins))
 
+	// Group-conversion rules
+	r.mux.HandleFunc("GET /api/rules", r.requireAuth(r.listRules))
+	r.mux.HandleFunc("POST /api/rules", r.requireAuth(r.createRule))
+	r.mux.HandleFunc("PUT /api/rules/{id}", r.requireAuth(r.updateRule))
+	r.mux.HandleFunc("POST /api/rules/{id}/delete", r.requireAuth(r.deleteRule))
+	r.mux.HandleFunc("GET /api/rules/meta", r.requireAuth(r.ruleMeta))
+	r.mux.HandleFunc("GET /api/newapi/groups", r.requireAuth(r.newAPIGroups))
+
 	r.mux.HandleFunc("POST /api/auth/password", r.requireAuth(r.changePassword))
 	r.mux.HandleFunc("POST /api/actions/{name}", r.requireAuth(r.action))
 }
@@ -285,7 +293,16 @@ func (r *Router) createBinding(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, b)
+	// Binding and group conversion go together, whether the binding came from
+	// the automatic match, the in-group command or the operator: "on bind"
+	// means on bind. A rule failure must not fail the binding itself, so the
+	// result is reported alongside it.
+	rules, ruleErr := r.svc.ApplyOnBindRules(in.QQ)
+	resp := map[string]any{"binding": b, "rules": rules}
+	if ruleErr != nil {
+		resp["rule_error"] = ruleErr.Error()
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (r *Router) deleteBinding(w http.ResponseWriter, req *http.Request) {
@@ -378,12 +395,22 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, 200, res)
 
 	case "promote":
-		res, err := r.svc.Promote()
+		// Kept as an alias so an old bookmark still works; it now runs the
+		// configured rules rather than a blanket promotion.
+		res, err := r.svc.RunScheduledRules()
 		if err != nil {
 			writeErr(w, 502, err)
 			return
 		}
-		writeJSON(w, 200, res)
+		writeJSON(w, 200, map[string]any{"rules": res})
+
+	case "rules":
+		res, err := r.svc.RunScheduledRules()
+		if err != nil {
+			writeErr(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"rules": res})
 
 	case "checkin":
 		if err := r.svc.SyncAllCheckins(date); err != nil {

@@ -21,8 +21,6 @@ export interface Config {
 }
 
 export interface Settings {
-  source_group: string
-  target_group: string
   member_sync_minutes: number
   checkin_sync_minutes: number
   reward_min: number
@@ -93,6 +91,30 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+export interface Condition {
+  type: string
+  op: string
+  value: number
+}
+
+export interface Rule {
+  id: number
+  name: string
+  enabled: boolean
+  on_bind: boolean
+  interval_minutes: number
+  source_groups: string[]
+  target_group: string
+  conditions: Condition[]
+  last_run_at: number
+  last_error?: string
+}
+
+export interface RuleMeta {
+  condition_types: { value: string; label: string }[]
+  operators: string[]
+}
+
 export interface AuthState {
   needs_setup: boolean
   authenticated: boolean
@@ -138,6 +160,17 @@ export const api = {
   settings: () => req<Settings>('/api/settings'),
   saveSettings: (s: Settings) =>
     req<Settings>('/api/settings', { method: 'POST', body: JSON.stringify(s) }),
+
+  rules: () => req<{ items: Rule[] }>('/api/rules'),
+  ruleMeta: () => req<RuleMeta>('/api/rules/meta'),
+  createRule: (r: Rule) => req<Rule>('/api/rules', { method: 'POST', body: JSON.stringify(r) }),
+  updateRule: (r: Rule) =>
+    req<Rule>(`/api/rules/${r.id}`, { method: 'PUT', body: JSON.stringify(r) }),
+  deleteRule: (id: number) =>
+    req<{ ok: boolean }>(`/api/rules/${id}/delete`, { method: 'POST', body: '{}' }),
+
+  /** new-api group names, for the source/target pickers. */
+  newAPIGroups: () => req<Record<string, { desc: string; ratio: number }>>('/api/newapi/groups'),
 
   action: (name: string) => req<Record<string, unknown>>(`/api/actions/${name}`, { method: 'POST', body: '{}' }),
 }

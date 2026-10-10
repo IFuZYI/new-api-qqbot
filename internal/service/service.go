@@ -17,10 +17,6 @@ import (
 // Settings is the operator-configurable state. It is stored as one JSON blob
 // under the "settings" key, so adding a field needs no migration.
 type Settings struct {
-	// Groups
-	SourceGroup string `json:"source_group"`
-	TargetGroup string `json:"target_group"`
-
 	// Sync cadence, in minutes. Each is independent: the sign-in board is
 	// today-only and needs a short cycle, the roster does not.
 	MemberSyncMinutes  int `json:"member_sync_minutes"`
@@ -38,8 +34,6 @@ type Settings struct {
 // DefaultSettings returns the shipped defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		SourceGroup:        "default",
-		TargetGroup:        "authorized",
 		MemberSyncMinutes:  120,
 		CheckinSyncMinutes: 30,
 		RewardMin:          100,
@@ -56,6 +50,7 @@ type Gateway interface {
 	GetUser(id int) (*newapi.User, error)
 	SetGroup(u *newapi.User, group string) error
 	AddQuota(userID, value int) error
+	Groups() (map[string]struct{}, error)
 }
 
 // QQ is the subset of the NapCat client the service needs.
@@ -97,12 +92,6 @@ func (s *Service) Settings() (Settings, error) {
 // withDefaults repairs zero values left by an older or partial settings blob.
 func withDefaults(in Settings) Settings {
 	d := DefaultSettings()
-	if in.SourceGroup == "" {
-		in.SourceGroup = d.SourceGroup
-	}
-	if in.TargetGroup == "" {
-		in.TargetGroup = d.TargetGroup
-	}
 	if in.MemberSyncMinutes <= 0 {
 		in.MemberSyncMinutes = d.MemberSyncMinutes
 	}
@@ -126,9 +115,6 @@ func (s *Service) SaveSettings(in Settings) error {
 	}
 	if in.RewardMin > in.RewardMax {
 		return fmt.Errorf("reward min (%d) must not exceed max (%d)", in.RewardMin, in.RewardMax)
-	}
-	if in.SourceGroup == in.TargetGroup {
-		return fmt.Errorf("source and target group must differ (both %q)", in.SourceGroup)
 	}
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
 		return fmt.Errorf("unknown timezone %q: %w", in.Timezone, err)
@@ -270,6 +256,12 @@ func (s *Service) AutoBind() (BindResult, error) {
 			return res, err
 		}
 		res.Bound++
+		// Apply the binding-triggered rules now, so a new member's group
+		// changes immediately instead of at the next sweep. A rule failure
+		// must not fail the binding that already succeeded.
+		if _, err := s.ApplyOnBindRules(m.QQ); err != nil {
+			res.Failed++
+		}
 	}
 	return res, nil
 }
@@ -289,6 +281,10 @@ func (s *Service) BindByCommand(qq int64) (*store.Binding, error) {
 		NewAPIEmail: u.Email, Source: "command",
 	}
 	if err := s.st.SetBinding(b); err != nil {
+		return nil, err
+	}
+	// A member who binds by command gets the same immediate group change.
+	if _, err := s.ApplyOnBindRules(qq); err != nil {
 		return nil, err
 	}
 	return s.st.GetBinding(qq)
@@ -311,59 +307,6 @@ func (s *Service) IsMonitoredGroup(groupID int64) (bool, error) {
 
 // qqEmail derives a QQ number's conventional email address.
 func qqEmail(qq int64) string { return fmt.Sprintf("%d@qq.com", qq) }
-
-// PromoteResult summarizes one promotion sweep.
-type PromoteResult struct {
-	Promoted int `json:"promoted"`
-	Skipped  int `json:"skipped"`
-	Failed   int `json:"failed"`
-}
-
-// Promote moves every bound member whose account sits in the source group into
-// the target group. Accounts in any other group are left alone, and a failure
-// on one account does not abort the sweep.
-//
-// The account is re-read by id before writing, because new-api's update
-// replaces the fields it accepts: sending a sparse object would blank the
-// account's display name.
-func (s *Service) Promote() (PromoteResult, error) {
-	var res PromoteResult
-	cfg, err := s.Settings()
-	if err != nil {
-		return res, err
-	}
-
-	ms, err := s.st.ListMembers()
-	if err != nil {
-		return res, err
-	}
-	for _, m := range ms {
-		b, err := s.st.GetBinding(m.QQ)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				res.Skipped++
-				continue
-			}
-			return res, err
-		}
-
-		u, err := s.gw.GetUser(b.NewAPIUserID)
-		if err != nil {
-			res.Failed++
-			continue
-		}
-		if u.Group != cfg.SourceGroup {
-			res.Skipped++
-			continue
-		}
-		if err := s.gw.SetGroup(u, cfg.TargetGroup); err != nil {
-			res.Failed++
-			continue
-		}
-		res.Promoted++
-	}
-	return res, nil
-}
 
 // AwardResult summarizes one reward sweep.
 type AwardResult struct {

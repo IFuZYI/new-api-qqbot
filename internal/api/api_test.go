@@ -6,6 +6,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,6 +25,9 @@ func (fakeGateway) GetUser(id int) (*newapi.User, error) {
 }
 func (fakeGateway) SetGroup(u *newapi.User, group string) error { return nil }
 func (fakeGateway) AddQuota(userID, value int) error            { return nil }
+func (fakeGateway) Groups() (map[string]struct{}, error) {
+	return map[string]struct{}{"default": {}, "authorized": {}, "vip": {}}, nil
+}
 
 type fakeQQ struct{}
 
@@ -108,6 +112,29 @@ func postJSON(t *testing.T, url string, body any, out any) int {
 	return postJSONWith(t, http.DefaultClient, url, body, out)
 }
 
+func putJSONWith(t *testing.T, c *http.Client, url string, body any, out any) int {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("PUT %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("PUT %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode %s: %v", url, err)
+		}
+	}
+	return resp.StatusCode
+}
+
+func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
 func postJSONWith(t *testing.T, c *http.Client, url string, body any, out any) int {
 	t.Helper()
 	raw, _ := json.Marshal(body)
@@ -139,7 +166,7 @@ func TestBootstrapReportsUnconfigured(t *testing.T) {
 	if got.Configured {
 		t.Error("a fresh install must report itself as unconfigured")
 	}
-	if got.Settings.TargetGroup != "authorized" {
+	if got.Settings.RewardMin != 100 || got.Settings.RewardMax != 200 {
 		t.Errorf("settings should be returned with defaults: %+v", got.Settings)
 	}
 }
@@ -277,14 +304,16 @@ func TestManualBindAndUnbind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var b store.Binding
+	var resp struct {
+		Binding store.Binding `json:"binding"`
+	}
 	if code := postJSONWith(t, cl, srv.URL+"/api/bindings", map[string]any{
 		"qq": 54321, "newapi_user_id": 42, "newapi_username": "forty-two",
-	}, &b); code != 200 {
+	}, &resp); code != 200 {
 		t.Fatalf("bind status %d", code)
 	}
-	if b.NewAPIUserID != 42 || b.Source != "manual" {
-		t.Errorf("unexpected binding: %+v", b)
+	if resp.Binding.NewAPIUserID != 42 || resp.Binding.Source != "manual" {
+		t.Errorf("unexpected binding: %+v", resp.Binding)
 	}
 
 	if code := postJSONWith(t, cl, srv.URL+"/api/bindings/54321/delete", map[string]any{}, nil); code != 200 {
@@ -300,7 +329,7 @@ func TestSettingsEndpointValidates(t *testing.T) {
 
 	var s service.Settings
 	getJSONWith(t, cl, srv.URL+"/api/settings", &s)
-	if s.TargetGroup != "authorized" {
+	if s.RewardMin != 100 || s.RewardMax != 200 {
 		t.Fatalf("unexpected defaults: %+v", s)
 	}
 
