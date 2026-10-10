@@ -333,7 +333,12 @@ export function Combobox({
   const openList = () => {
     if (disabled) return
     setText(committedLabel)
-    setHi(0)
+    // Highlight the current value, not the first row. A native select opens on
+    // the current option, and this control replaced one: opening and pressing
+    // Enter (or an ArrowDown meaning "next after the current") must not land on
+    // an unrelated row.
+    const i = options.findIndex((o) => o.value === value)
+    setHi(i >= 0 ? i : 0)
     setOpen(true)
     // Select the label so the first keystroke replaces it. This is safe because
     // the mousedown that opens the list suppresses the browser's caret
@@ -348,6 +353,14 @@ export function Combobox({
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // A composing IME confirms with Enter and walks its candidates with the
+    // arrow keys; those keystrokes belong to the IME, not to the list. Without
+    // this guard a Chinese-input operator pressing Enter to accept a pinyin
+    // candidate commits whichever option is highlighted — silently replacing
+    // the selection, and Save then writes the wrong binding. keyCode 229 covers
+    // Safari, which reports the composition keys out of order.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
+
     if (e.key === 'Escape') {
       if (!open) return
       // The dialog behind us also closes on Escape; stopping the event here is
@@ -387,7 +400,10 @@ export function Combobox({
         type="text"
         role="combobox"
         aria-expanded={open}
-        aria-controls={listId}
+        // Only point at the listbox when it is mounted with options: the
+        // no-match panel carries no listbox role, and a dangling aria-controls
+        // is worse than none.
+        aria-controls={open && filtered.length > 0 ? listId : undefined}
         aria-activedescendant={open && hiIdx >= 0 ? optId(hiIdx) : undefined}
         aria-autocomplete="list"
         aria-label={ariaLabel}
@@ -398,7 +414,11 @@ export function Combobox({
         onChange={(e) => {
           setText(e.target.value)
           setHi(0)
-          setOpen(true) // typing after Escape reopens the list instead of dead-ending
+          // Reopen only while the field still has focus. An IME commit can
+          // deliver its input event after a click-away blur, and reopening then
+          // leaves the list floating over the page with no focus and a stale
+          // filter. Typing after Escape still reopens, because focus stays put.
+          if (document.activeElement === input.current) setOpen(true)
         }}
         onFocus={openList}
         // The browser's default caret placement runs after focus and would land
@@ -420,18 +440,28 @@ export function Combobox({
         onKeyDown={onKeyDown}
         className={`block h-8 w-full max-w-full min-w-0 rounded-control border border-input bg-background px-2.5 text-sm text-foreground transition-colors placeholder:text-muted-foreground hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
       />
-      {open && (
-        <div
-          id={listId}
-          role="listbox"
-          className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
-        >
-          {filtered.length === 0 ? (
-            <p className="px-2 py-1.5 text-xs text-muted-foreground">{emptyText}</p>
-          ) : (
-            filtered.map((o, i) => (
+      {open &&
+        (filtered.length === 0 ? (
+          // No matches: render the message as its own panel, NOT inside the
+          // listbox. A listbox may only contain options, so a message inside it
+          // is invalid markup and screen readers announce an empty list instead
+          // of the explanation. role="status" announces the no-match case.
+          <div className="absolute z-30 mt-1 w-full rounded-panel border border-border bg-popover p-1 shadow-lg">
+            <p role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
+              {emptyText}
+            </p>
+          </div>
+        ) : (
+          <div
+            id={listId}
+            role="listbox"
+            className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
+          >
+            {filtered.map((o, i) => (
               <div
-                key={o.value}
+                // Two QQs may be bound to one account, which makes their
+                // account options share a value; index keeps the keys unique.
+                key={`${i}:${o.value}`}
                 id={optId(i)}
                 role="option"
                 aria-selected={i === hiIdx}
@@ -450,10 +480,9 @@ export function Combobox({
               >
                 {o.label}
               </div>
-            ))
-          )}
-        </div>
-      )}
+            ))}
+          </div>
+        ))}
     </div>
   )
 }
