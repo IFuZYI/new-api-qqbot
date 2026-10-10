@@ -156,30 +156,55 @@ func (c *Client) Login(username, password string) error {
 	return nil
 }
 
+// searchPageSize is the page size used when scanning the user search. It is the
+// server's maximum, so a realistic result set is covered in one round trip.
+const searchPageSize = 100
+
+// maxSearchPages bounds the scan so a pathological result set cannot make the
+// client loop forever.
+const maxSearchPages = 20
+
 // FindUserByEmail returns the account whose email equals addr, ignoring case.
 // It returns (nil, nil) when nothing matches and ErrAmbiguousEmail when more
-// than one does. /api/user/search is a LIKE across several columns, so the
-// exact-match filter here is what makes the result trustworthy.
+// than one does.
+//
+// /api/user/search is a LIKE across several columns and is paginated, so the
+// whole result set is scanned: reading only the first page would report a real
+// match as absent (and leave the member unbound forever) as soon as the exact
+// row sorts beyond the page size.
 func (c *Client) FindUserByEmail(addr string) (*User, error) {
 	want := strings.ToLower(strings.TrimSpace(addr))
 	if want == "" {
 		return nil, nil
 	}
 
-	var page struct {
-		Items []User `json:"items"`
-		Total int    `json:"total"`
-	}
-	if err := c.do(http.MethodGet, "/api/user/search?keyword="+queryEscape(addr), nil, &page); err != nil {
-		return nil, err
-	}
-
 	var matches []User
-	for _, u := range page.Items {
-		if strings.ToLower(strings.TrimSpace(u.Email)) == want {
-			matches = append(matches, u)
+	for page := 1; page <= maxSearchPages; page++ {
+		var resp struct {
+			Items []User `json:"items"`
+			Total int    `json:"total"`
+		}
+		path := fmt.Sprintf("/api/user/search?keyword=%s&p=%d&page_size=%d",
+			queryEscape(addr), page, searchPageSize)
+		if err := c.do(http.MethodGet, path, nil, &resp); err != nil {
+			return nil, err
+		}
+		for _, u := range resp.Items {
+			if strings.ToLower(strings.TrimSpace(u.Email)) == want {
+				matches = append(matches, u)
+			}
+		}
+
+		// Stop once the pages are exhausted. A short page also means the end,
+		// which covers servers that ignore page_size.
+		if len(resp.Items) == 0 || len(resp.Items) < searchPageSize {
+			break
+		}
+		if resp.Total > 0 && page*searchPageSize >= resp.Total {
+			break
 		}
 	}
+
 	switch len(matches) {
 	case 0:
 		return nil, nil
@@ -230,10 +255,14 @@ func (c *Client) GetUser(id int) (*User, error) {
 
 // Groups returns the group names configured on the instance, which is how the
 // service validates that its source/target groups really exist.
+//
+// The ratio is decoded as json.RawMessage, not a number: new-api's built-in
+// "auto" entry carries the string "auto" as its ratio, and a float64 field would
+// fail the whole response, leaving the group pickers empty.
 func (c *Client) Groups() (map[string]struct{}, error) {
 	var data map[string]struct {
-		Desc  string  `json:"desc"`
-		Ratio float64 `json:"ratio"`
+		Desc  string          `json:"desc"`
+		Ratio json.RawMessage `json:"ratio"`
 	}
 	if err := c.do(http.MethodGet, "/api/user/groups", nil, &data); err != nil {
 		return nil, err

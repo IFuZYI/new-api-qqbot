@@ -225,3 +225,88 @@ func TestLoginSurfacesErrorCode(t *testing.T) {
 		t.Errorf("error must name the code, got %v", err)
 	}
 }
+
+// new-api's group list carries an "auto" entry whose ratio is the string
+// "auto". Decoding that into a float64 failed the whole response, leaving the
+// rule group pickers empty.
+func TestGroupsToleratesStringRatio(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"default": map[string]any{"desc": "默认分组", "ratio": 1},
+			"auto":    map[string]any{"desc": "自动分组", "ratio": "auto"},
+			"vip":     map[string]any{"desc": "vip", "ratio": 0.5},
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	got, err := c.Groups()
+	if err != nil {
+		t.Fatalf("a string ratio must not fail the group list: %v", err)
+	}
+	for _, want := range []string{"default", "auto", "vip"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("group %q missing from %v", want, got)
+		}
+	}
+}
+
+// The user search is paginated; reading only page 1 reported a real match as
+// absent and left the member unbound forever.
+func TestFindUserByEmailScansAllPages(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("p")
+		pages = append(pages, page)
+
+		// Page 1 is a full page of decoys; the exact match is on page 2.
+		if page == "1" {
+			items := make([]map[string]any, 0, 100)
+			for i := 0; i < 100; i++ {
+				items = append(items, map[string]any{
+					"id": i + 100, "username": "decoy", "email": "decoy@qq.com",
+				})
+			}
+			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "total": 101})))
+			return
+		}
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"items": []map[string]any{{"id": 8, "username": "eight", "email": "54321@qq.com"}},
+			"total": 101,
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	u, err := c.FindUserByEmail("54321@qq.com")
+	if err != nil {
+		t.Fatalf("FindUserByEmail: %v", err)
+	}
+	if u == nil || u.ID != 8 {
+		t.Fatalf("the exact match on page 2 was not found (pages requested: %v)", pages)
+	}
+}
+
+// A short first page means the end: do not request further pages.
+func TestFindUserByEmailStopsAtShortPage(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"items": []map[string]any{{"id": 1, "username": "a", "email": "a@qq.com"}},
+			"total": 1,
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok")
+	if _, err := c.FindUserByEmail("nobody@qq.com"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("want 1 request for a short page, got %d", calls)
+	}
+}
