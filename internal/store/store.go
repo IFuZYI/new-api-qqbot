@@ -163,6 +163,13 @@ func (s *Store) EnabledGroups() ([]MonitoredGroup, error) {
 	return out, err
 }
 
+// SetGroupEnabled turns monitoring on or off for one group.
+func (s *Store) SetGroupEnabled(groupID int64, enabled bool) error {
+	return s.db.Model(&MonitoredGroup{}).
+		Where("group_id = ?", groupID).
+		Updates(map[string]any{"enabled": enabled, "updated_at": now()}).Error
+}
+
 // ---------- members ----------
 
 // UpsertMembers reconciles one group's roster: every member is created or
