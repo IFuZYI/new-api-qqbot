@@ -548,7 +548,14 @@ func (w *WebUI) EnsureAdapters(opts AdapterOptions) (*AdapterResult, error) {
 		opts.BindHost = "127.0.0.1"
 	}
 	if opts.ConnectHost == "" {
-		opts.ConnectHost = opts.BindHost
+		// The bind host is not always usable as a connect host: 0.0.0.0 means
+		// "every interface" and cannot be dialled. Fall back to loopback, which
+		// is what a same-host deployment (the default) wants.
+		if isWildcardHost(opts.BindHost) {
+			opts.ConnectHost = "127.0.0.1"
+		} else {
+			opts.ConnectHost = opts.BindHost
+		}
 	}
 	if opts.HTTPPort == 0 {
 		opts.HTTPPort = DefaultHTTPPort
@@ -661,6 +668,17 @@ func mustJSON(v any) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return raw
+}
+
+// isWildcardHost reports whether host means "every interface" rather than a
+// dialable address. 0.0.0.0 and :: are bind-only values; connecting to them is
+// meaningless, so callers must not reuse them as a destination.
+func isWildcardHost(host string) bool {
+	switch strings.TrimSpace(host) {
+	case "0.0.0.0", "::", "[::]", "":
+		return true
+	}
+	return false
 }
 
 // generateAdapterToken returns a fresh 32-hex-character token, matching the

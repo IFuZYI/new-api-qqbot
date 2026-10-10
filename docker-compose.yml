@@ -1,0 +1,52 @@
+# QQBot 群监测 — Docker Compose 部署
+#
+# 用法：
+#   1. cp .env.example .env 并填好 QQBOT_ADMIN_PASSWORD（面板登录密码，至少 8 位）
+#   2. docker compose up -d --build
+#   3. 打开 http://<主机>:4096/ ，在「连接配置」里填 new-api 与 NapCat
+#
+# 数据（SQLite 库 + config.yaml）保存在命名卷 qqbot-data 里，容器重建不丢。
+# 备份：docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar czf /b/qqbot-data.tgz -C /d .
+#
+# NapCat 在宿主机上时，容器内填的地址要用 host.docker.internal（见 README
+# 「Docker 下的 NapCat 地址」），并且 OneBot 适配器必须绑 0.0.0.0——容器访问不到
+# 宿主的 127.0.0.1。这一步可以在面板的「自动配置 → 高级选项 → 适配器监听地址」里完成。
+
+services:
+  qqbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qqbot:latest
+    container_name: qqbot
+    restart: unless-stopped
+
+    # The panel is the only port that needs publishing. NapCat's OneBot ports
+    # (3001/3002) are not exposed: the container calls them, not the reverse.
+    ports:
+      - "${QQBOT_PORT:-4096}:4096"
+
+    environment:
+      # Admin credential, read at startup before the panel accepts requests, so
+      # a fresh instance is never briefly open to whoever reaches it first.
+      # A blank password is ignored (it never clears a stored one).
+      QQBOT_ADMIN_USERNAME: "${QQBOT_ADMIN_USERNAME:-admin}"
+      QQBOT_ADMIN_PASSWORD: "${QQBOT_ADMIN_PASSWORD:-}"
+      # The listen port *inside* the container. It must stay 4096 to match the
+      # CMD and the mapping above; use the host side of `ports` to change the
+      # published port instead.
+      QQBOT_PORT: "4096"
+      # The day boundary for check-ins, e.g. Asia/Shanghai.
+      TZ: "${TZ:-Asia/Shanghai}"
+
+    volumes:
+      - qqbot-data:/app/data
+
+    # NapCat runs on the host, so the container has to reach the host's
+    # loopback. host.docker.internal is provided by Docker Desktop out of the
+    # box; on Linux it needs this mapping, which is why it is unconditional.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  qqbot-data:

@@ -490,3 +490,74 @@ func TestEnsureAdaptersHonoursRequestedPorts(t *testing.T) {
 		t.Errorf("onebot url = %q", res.OneBotURL)
 	}
 }
+
+// A bind address is not always a dialable one. 0.0.0.0 means "every interface",
+// so when the caller asks for it (a containerised deployment, where the service
+// cannot reach the host's loopback) the returned URLs must still name a real
+// destination - otherwise the operator stores "http://0.0.0.0:3002" and every
+// sweep fails with a confusing error.
+func TestEnsureAdaptersKeepsWildcardBindOutOfTheURLs(t *testing.T) {
+	var sent struct {
+		Network map[string][]map[string]any `json:"network"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{"httpServers":[],"websocketServers":[]}}}`))
+		case "/api/OB11Config/SetConfig":
+			var body map[string]string
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			_ = json.Unmarshal([]byte(body["config"]), &sent)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+
+	// BindHost set, ConnectHost deliberately left empty.
+	res, err := c.EnsureAdapters(AdapterOptions{BindHost: "0.0.0.0"})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	// The adapter itself binds on the wildcard, so a remote service can reach it.
+	if got := sent.Network["httpServers"][0]["host"]; got != "0.0.0.0" {
+		t.Errorf("adapter should bind the wildcard, got %v", got)
+	}
+	// But the stored URL must be dialable.
+	if res.OneBotURL == "http://0.0.0.0:3002" {
+		t.Error("OneBotURL must not be the wildcard address")
+	}
+	if res.EventWSURL == "ws://0.0.0.0:3001" {
+		t.Error("EventWSURL must not be the wildcard address")
+	}
+	if res.OneBotURL != "http://127.0.0.1:3002" || res.EventWSURL != "ws://127.0.0.1:3001" {
+		t.Errorf("expected loopback URLs, got %q / %q", res.OneBotURL, res.EventWSURL)
+	}
+}
+
+// An explicit ConnectHost still wins over the wildcard fallback, so a container
+// can store the host address it actually reaches NapCat at.
+func TestEnsureAdaptersPrefersExplicitConnectHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/OB11Config/GetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"network":{"httpServers":[],"websocketServers":[]}}}`))
+		case "/api/OB11Config/SetConfig":
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewWebUI(srv.URL, "t")
+	c.SetCredential("cred")
+	res, err := c.EnsureAdapters(AdapterOptions{BindHost: "0.0.0.0", ConnectHost: "host.docker.internal"})
+	if err != nil {
+		t.Fatalf("EnsureAdapters: %v", err)
+	}
+	if res.OneBotURL != "http://host.docker.internal:3002" {
+		t.Errorf("explicit connect host ignored: %q", res.OneBotURL)
+	}
+}

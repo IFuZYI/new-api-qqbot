@@ -1254,6 +1254,10 @@ function AutoConfigureNapCat({
   const [token, setToken] = useState('')
   const [httpPort, setHTTPPort] = useState('3002')
   const [wsPort, setWSPort] = useState('3001')
+  // Empty means the server's default (127.0.0.1). A containerised deployment
+  // must set 0.0.0.0 here, because the container can never reach the host's
+  // loopback and an adapter bound to 127.0.0.1 would be unreachable.
+  const [bindHost, setBindHost] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -1266,6 +1270,7 @@ function AutoConfigureNapCat({
         revision,
         http_port: Number(httpPort) || 0,
         ws_port: Number(wsPort) || 0,
+        bind_host: bindHost.trim(),
       })
       onDone(r)
     } catch (e) {
@@ -1312,12 +1317,20 @@ function AutoConfigureNapCat({
           {showAdvanced ? '收起高级选项' : '高级选项（适配器端口）'}
         </button>
         {showAdvanced && (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="OneBot HTTP 端口">
-              <Input value={httpPort} onChange={setHTTPPort} />
-            </Field>
-            <Field label="OneBot WebSocket 端口">
-              <Input value={wsPort} onChange={setWSPort} />
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="OneBot HTTP 端口">
+                <Input value={httpPort} onChange={setHTTPPort} />
+              </Field>
+              <Field label="OneBot WebSocket 端口">
+                <Input value={wsPort} onChange={setWSPort} />
+              </Field>
+            </div>
+            <Field
+              label="适配器监听地址"
+              hint="留空 = 127.0.0.1（本服务与 NapCat 同机）。Docker 部署必须填 0.0.0.0：容器访问不到宿主的 127.0.0.1。"
+            >
+              <Input value={bindHost} onChange={setBindHost} placeholder="0.0.0.0" />
             </Field>
           </div>
         )}

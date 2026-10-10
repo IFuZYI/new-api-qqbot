@@ -301,6 +301,12 @@ func (r *Router) autoConfigureNapCat(w http.ResponseWriter, req *http.Request) {
 		// Ports are optional; 0 means "use the defaults".
 		HTTPPort int `json:"http_port"`
 		WSPort   int `json:"ws_port"`
+		// BindHost is the interface the OneBot adapters listen on. Empty means
+		// 127.0.0.1, which is right when this service runs on the same host as
+		// NapCat. A containerised service must use 0.0.0.0: it can never reach
+		// the host's loopback, so an adapter bound to 127.0.0.1 is unreachable
+		// from inside the container no matter what URL is configured.
+		BindHost string `json:"bind_host"`
 	}
 	if err := decode(req, &in); err != nil {
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
@@ -332,6 +338,7 @@ func (r *Router) autoConfigureNapCat(w http.ResponseWriter, req *http.Request) {
 		// re-run does not rotate it out from under the running patrols.
 		Token:       cur.NapCat.OneBotToken,
 		ConnectHost: napcat.WebUIHost(webuiURL),
+		BindHost:    strings.TrimSpace(in.BindHost),
 		HTTPPort:    in.HTTPPort,
 		WSPort:      in.WSPort,
 	})

@@ -248,7 +248,14 @@ export const api = {
    * Provision NapCat's OneBot adapters from just its WebUI address, then store
    * the resulting OneBot/event URLs and token.
    */
-  autoConfigureNapCat: (body: { webui_url: string; webui_token: string; revision: string; http_port?: number; ws_port?: number }) =>
+  autoConfigureNapCat: (body: {
+    webui_url: string
+    webui_token: string
+    revision: string
+    http_port?: number
+    ws_port?: number
+    bind_host?: string
+  }) =>
     req<ConfigResponse & { napcat: NapCatAdapterResult }>('/api/config/napcat/autoconfigure', {
       method: 'POST',
       body: JSON.stringify(body),

@@ -1,25 +1,40 @@
-# build output
+# ---- build output ----
 /bin/
 /qqbot
+*.exe
+
+# ---- runtime state ----
+# The SQLite database and config.yaml live here. config.yaml stores the new-api
+# password and the NapCat tokens in clear, so this directory must never be
+# committed. *.tgz covers the backup tarball the README's docker command makes.
 /data/
 *.db
 *.db-shm
 *.db-wal
+*.tgz
 
-# frontend
+# ---- frontend ----
 /web/node_modules/
 /web/dist/
+/web/tsconfig.tsbuildinfo
 
-# secrets - the admin credential lives here, never commit it
+# ---- secrets ----
+# The panel admin credential lives here; .env.example is the committed template.
 .env
 .env.*
 !.env.example
 
-# scratch
+# ---- upstream reference checkouts ----
+# NapCatQQ and new-api are read as documentation for the protocols this service
+# drives. They are not part of the build and are refreshed from upstream, so a
+# local change here is never ours to keep.
+/reference/
+
+# ---- scratch ----
 /tmp/
 
-# web
-/web/node_modules/
-
-# tsc
-/web/tsconfig.tsbuildinfo
+# ---- editor / OS noise ----
+.vscode/
+.idea/
+.DS_Store
+*.swp

@@ -1,0 +1,37 @@
+# Build context exclusions. Two reasons: the upstream checkouts and node_modules
+# would add hundreds of MB to every build, and data/ plus .env hold live
+# credentials that must never be baked into an image layer.
+
+# version control
+.git/
+.gitignore
+
+# live state and secrets (mounted as a volume at runtime instead)
+data/
+.env
+.env.*
+
+# upstream documentation checkouts - not part of the build
+reference/
+
+# frontend dependencies and build output (rebuilt inside the image)
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# local build output
+/qqbot
+/bin/
+*.db
+*.db-shm
+*.db-wal
+
+# editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# this project's own docs are not needed to build the binary
+docs/
+*.md
+!README.md
