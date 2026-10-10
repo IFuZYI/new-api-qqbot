@@ -45,13 +45,13 @@ type MemberGroup struct {
 // Binding maps a QQ number to a new-api account. This project owns the mapping;
 // new-api's own email field is only ever read, as a matching clue.
 type Binding struct {
-	QQ            int64  `gorm:"primaryKey;autoIncrement:false" json:"qq"`
-	NewAPIUserID  int    `json:"newapi_user_id"`
+	QQ             int64  `gorm:"primaryKey;autoIncrement:false" json:"qq"`
+	NewAPIUserID   int    `json:"newapi_user_id"`
 	NewAPIUsername string `json:"newapi_username"`
-	NewAPIEmail   string `json:"newapi_email"`
-	Source        string `json:"source"` // auto | manual | command
-	CreatedAt     int64  `json:"created_at"`
-	UpdatedAt     int64  `json:"updated_at"`
+	NewAPIEmail    string `json:"newapi_email"`
+	Source         string `json:"source"` // auto | manual | command
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 // Checkin is one member's sign-in on one day, as read from the group's
