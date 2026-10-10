@@ -1,9 +1,30 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>QQBot 群监测</title>
+    <script>
+      /*
+       * Apply the saved theme before the bundle loads, otherwise the page paints
+       * the wrong palette for a frame. Mirrors theme.tsx's default: saved
+       * choice, else the OS preference, else dark.
+       */
+      (function () {
+        var t = null
+        try {
+          t = localStorage.getItem('qqbot.theme')
+        } catch (e) {}
+        if (t !== 'light' && t !== 'dark') {
+          t =
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark'
+        }
+        document.documentElement.classList.toggle('dark', t === 'dark')
+        document.documentElement.style.colorScheme = t
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

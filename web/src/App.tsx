@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, type AuthState, type Bootstrap, type Config, type Group, type Member, type MembersResponse, type Settings } from './api'
 import Login from './Login'
 import Rules from './Rules'
-import { Badge, Button, Card, Empty, ErrorNote, Field, Input, OkNote, Table } from './ui'
+import { ThemeToggle } from './theme'
+import { Badge, Button, Card, Empty, ErrorNote, Field, Input, Modal, OkNote, Select, Table } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -59,7 +60,7 @@ export default function App() {
 
   if (!auth) {
     return (
-      <div className="flex min-h-full items-center justify-center p-4 text-xs text-[var(--muted)]">
+      <div className="flex min-h-full items-center justify-center p-4 text-xs text-muted-foreground">
         载入中…
       </div>
     )
@@ -80,11 +81,11 @@ export default function App() {
 
   return (
     <div className="min-h-full">
-      <header className="border-b border-[var(--border)] bg-[var(--panel)]">
+      <header className="border-b border-border bg-background">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
           <div className="flex items-baseline gap-3">
             <h1 className="text-base font-semibold">QQBot 群监测</h1>
-            <span className="text-xs text-[var(--muted)]">QQ 群 ↔ new-api 绑定与签到</span>
+            <span className="hidden text-xs text-muted-foreground sm:inline">QQ 群与 new-api 账号绑定</span>
           </div>
           <div className="flex items-center gap-3">
             {boot && (
@@ -92,7 +93,8 @@ export default function App() {
                 {boot.configured ? '已配置' : '未配置'}
               </Badge>
             )}
-            <span className="text-xs text-[var(--muted)]">{auth.username}</span>
+            <span className="text-xs text-muted-foreground">{auth.username}</span>
+            <ThemeToggle />
             <Button kind="ghost" onClick={logout}>
               退出
             </Button>
@@ -105,8 +107,8 @@ export default function App() {
               onClick={() => setTab(t.id)}
               className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${
                 tab === t.id
-                  ? 'border-[var(--accent)] text-[var(--fg)]'
-                  : 'border-transparent text-[var(--muted)] hover:text-[var(--fg)]'
+                  ? 'border-primary text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
               {t.label}
@@ -193,7 +195,7 @@ function Overview({
           <Stat label="今日已签到" value={checked} />
           <Stat label="今日已发放" value={awarded} />
         </div>
-        <p className="mt-3 text-xs text-[var(--muted)]">
+        <p className="mt-3 text-xs text-muted-foreground">
           统计日期 {members?.date ?? '-'}　·　监测群 {boot?.groups?.filter((g) => g.enabled).length ?? 0} 个
         </p>
       </Card>
@@ -216,7 +218,7 @@ function Overview({
             发放奖励
           </Button>
         </div>
-        <p className="mt-3 text-xs text-[var(--muted)]">
+        <p className="mt-3 text-xs text-muted-foreground">
           这些操作也会按各自的周期自动执行；这里的按钮用于立即触发一次。
         </p>
       </Card>
@@ -226,8 +228,8 @@ function Overview({
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-md border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
-      <div className="text-xs text-[var(--muted)]">{label}</div>
+    <div className="rounded-md border border-border bg-background px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 text-xl font-semibold">{value}</div>
     </div>
   )
@@ -319,7 +321,7 @@ function Groups({
       ) : (
         <Table head={['监测', '群号', '群名', '人数']}>
           {groups.map((g) => (
-            <tr key={g.group_id} className="border-b border-[var(--border)]/60">
+            <tr key={g.group_id} className="border-b border-border/60">
               <td className="px-3 py-2">
                 <input
                   type="checkbox"
@@ -329,7 +331,7 @@ function Groups({
               </td>
               <td className="px-3 py-2 font-mono text-xs">{g.group_id}</td>
               <td className="px-3 py-2">{g.group_name}</td>
-              <td className="px-3 py-2 text-[var(--muted)]">{g.member_count}</td>
+              <td className="px-3 py-2 text-muted-foreground">{g.member_count}</td>
             </tr>
           ))}
         </Table>
@@ -375,15 +377,11 @@ function Users({
         title="用户管理"
         actions={
           <>
-            <select
-              value={only}
-              onChange={(e) => setOnly(e.target.value as typeof only)}
-              className="rounded-md border border-[var(--border)] bg-[var(--panel)] px-2 py-1.5 text-xs"
-            >
+            <Select value={only} onChange={(v) => setOnly(v as typeof only)}>
               <option value="all">全部</option>
               <option value="bound">已绑定</option>
               <option value="unbound">未绑定</option>
-            </select>
+            </Select>
             <Button onClick={load}>刷新</Button>
           </>
         }
@@ -393,20 +391,20 @@ function Users({
         ) : (
           <Table head={['QQ', '昵称', 'new-api 账号', '绑定方式', '今日已签到', '累计天数', '今日奖励', '操作']}>
             {items.map((m) => (
-              <tr key={m.qq} className="border-b border-[var(--border)]/60">
+              <tr key={m.qq} className="border-b border-border/60">
                 <td className="px-3 py-2 font-mono text-xs">{m.qq}</td>
                 <td className="px-3 py-2">{m.nickname}</td>
                 <td className="px-3 py-2">
                   {m.bound ? (
                     <span>
                       {m.newapi_username || '—'}
-                      <span className="ml-1 text-xs text-[var(--muted)]">#{m.newapi_user_id}</span>
+                      <span className="ml-1 text-xs text-muted-foreground">#{m.newapi_user_id}</span>
                     </span>
                   ) : (
                     <Badge tone="warn">未绑定</Badge>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-[var(--muted)]">{m.bind_source || '—'}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">{m.bind_source || '—'}</td>
                 <td className="px-3 py-2">
                   {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
                 </td>
@@ -488,26 +486,27 @@ function RebindDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md">
-        <Card title={`换绑 QQ ${member.qq}`}>
-          <div className="space-y-3">
-            <Field label="new-api 账号 ID" hint="在 new-api 后台用户列表里可以看到该账号的 ID">
-              <Input value={id} onChange={setId} placeholder="例如 12" />
-            </Field>
-            <Field label="new-api 用户名（可选）" hint="仅用于显示">
-              <Input value={name} onChange={setName} placeholder="例如 alice" />
-            </Field>
-            <div className="flex justify-end gap-2 pt-1">
-              <Button onClick={onClose}>取消</Button>
-              <Button kind="primary" onClick={save}>
-                保存
-              </Button>
-            </div>
-          </div>
-        </Card>
+    <Modal
+      title={`换绑 QQ ${member.qq}`}
+      onClose={onClose}
+      actions={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button kind="primary" onClick={save}>
+            保存
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <Field label="new-api 账号 ID" hint="在 new-api 后台用户列表里可以看到该账号的 ID">
+          <Input value={id} onChange={setId} placeholder="例如 12" />
+        </Field>
+        <Field label="new-api 用户名（可选）" hint="仅用于显示">
+          <Input value={name} onChange={setName} placeholder="例如 alice" />
+        </Field>
       </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -658,7 +657,7 @@ function Connection({
     >
       <div className="space-y-5">
         <div>
-          <h3 className="mb-3 text-xs font-medium text-[var(--muted)]">new-api 管理员账号</h3>
+          <h3 className="mb-3 text-xs font-medium text-muted-foreground">new-api 管理员账号</h3>
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="URL">
               <Input value={c.newapi.url} onChange={(v) => setC({ ...c, newapi: { ...c.newapi, url: v } })} />
@@ -680,7 +679,7 @@ function Connection({
         </div>
 
         <div>
-          <h3 className="mb-3 text-xs font-medium text-[var(--muted)]">NapCat</h3>
+          <h3 className="mb-3 text-xs font-medium text-muted-foreground">NapCat</h3>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="WebUI URL" hint="用于读取/改写 OneBot 配置，并在没有 OneBot 适配器时兜底调用">
               <Input
