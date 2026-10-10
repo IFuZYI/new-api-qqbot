@@ -1,0 +1,14 @@
+# build output
+/bin/
+/qqbot
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# frontend
+/web/node_modules/
+/web/dist/
+
+# scratch
+/tmp/
