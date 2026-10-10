@@ -348,3 +348,88 @@ func mustParse(t *testing.T, raw string) *url.URL {
 	}
 	return u
 }
+
+// An unauthenticated caller must not be able to sign the operator out: the
+// logout route is reachable without a session, so bumping the generation there
+// would be a credential-free denial of service.
+func TestUnauthenticatedLogoutDoesNotRevokeTheOperator(t *testing.T) {
+	srv, _, _ := newBareServer(t)
+
+	// The operator signs in.
+	jar, _ := cookiejar.New(nil)
+	op := &http.Client{Jar: jar}
+	post(t, op, srv.URL+"/api/auth/setup", `{"username":"admin","password":"hunter2hunter2"}`)
+	if code := getJSONWith(t, op, srv.URL+"/api/bootstrap", nil); code != 200 {
+		t.Fatal("operator should be signed in")
+	}
+
+	// An attacker with no session calls logout.
+	anon, _ := cookiejar.New(nil)
+	if code, _ := post(t, &http.Client{Jar: anon}, srv.URL+"/api/auth/logout", `{}`); code != 200 {
+		t.Fatalf("logout should still answer, got %d", code)
+	}
+
+	if code := getJSONWith(t, op, srv.URL+"/api/bootstrap", nil); code != 200 {
+		t.Errorf("an unauthenticated logout revoked the operator's session (%d)", code)
+	}
+}
+
+// The generation must move forward exactly once per authenticated logout, even
+// when the row does not exist yet: a lost initialiser would let a cookie issued
+// in that window survive the logout it raced with.
+func TestGenerationBumpIsNotLostOnInit(t *testing.T) {
+	srv, st, _ := newBareServer(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = st.BumpSettingInt("auth.generation")
+		}()
+	}
+	wg.Wait()
+
+	var g int64
+	if err := st.GetSetting("auth.generation", &g); err != nil {
+		t.Fatal(err)
+	}
+	if g != 16 {
+		t.Errorf("generation = %d after 16 concurrent bumps, want 16 (an increment was lost)", g)
+	}
+	_ = srv
+}
+
+// A cookie signed before any generation existed must stop working once the
+// generation is first bumped.
+func TestFirstBumpInvalidatesPreExistingCookies(t *testing.T) {
+	srv, st, _ := newBareServer(t)
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar}
+	post(t, cl, srv.URL+"/api/auth/setup", `{"username":"admin","password":"hunter2hunter2"}`)
+
+	var stolen string
+	for _, c := range jar.Cookies(mustParse(t, srv.URL)) {
+		if c.Name == sessionCookie {
+			stolen = c.Value
+		}
+	}
+	if stolen == "" {
+		t.Fatal("no cookie issued")
+	}
+	// Force the row into existence via a bump, as an authenticated logout would.
+	if _, err := st.BumpSettingInt("auth.generation"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/bootstrap", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: stolen})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a cookie from before the first bump still works (%d)", resp.StatusCode)
+	}
+}

@@ -493,6 +493,42 @@ func (s *Store) CheckinsOn(date string) ([]Checkin, error) {
 // ---------- settings ----------
 
 // PutSetting stores a JSON-encoded setting.
+// BumpSettingInt atomically increments an integer setting and returns the new
+// value, creating it at 1 on first use. A read-then-write would let two
+// concurrent callers (a logout racing the first-ever read) both observe the
+// same value and lose one increment, which is exactly what makes a session
+// revocation vanish.
+func (s *Store) BumpSettingInt(key string) (int64, error) {
+	var out int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var rec Setting
+		err := tx.First(&rec, "key = ?", key).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			out = 1
+			return tx.Create(&Setting{Key: key, Value: "1", UpdatedAt: now()}).Error
+		case err != nil:
+			return err
+		default:
+			var cur int64
+			if rec.Value != "" {
+				if err := json.Unmarshal([]byte(rec.Value), &cur); err != nil {
+					cur = 0
+				}
+			}
+			out = cur + 1
+			raw, err := json.Marshal(out)
+			if err != nil {
+				return err
+			}
+			rec.Value = string(raw)
+			rec.UpdatedAt = now()
+			return tx.Save(&rec).Error
+		}
+	})
+	return out, err
+}
+
 func (s *Store) PutSetting(key string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {

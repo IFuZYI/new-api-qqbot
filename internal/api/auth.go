@@ -60,27 +60,24 @@ func (r *Router) loadSessionKey() ([]byte, error) {
 const authGenerationSetting = "auth.generation"
 
 // generation reads the current session generation, creating it on first use.
+// generation reads the current session generation. An absent row reads as 0
+// without writing one: this is the read path, hit by every request, and the
+// writer path (bumpGeneration) creates the row. Reading 0 for "unset" is also
+// what makes the very first bump revoke the sessions issued before it, since
+// those were signed with 0.
 func (r *Router) generation() (int64, error) {
 	var g int64
 	if err := r.st.GetSetting(authGenerationSetting, &g); err != nil {
 		return 0, err
-	}
-	if g == 0 {
-		g = 1
-		if err := r.st.PutSetting(authGenerationSetting, g); err != nil {
-			return 0, err
-		}
 	}
 	return g, nil
 }
 
 // bumpGeneration invalidates every outstanding session.
 func (r *Router) bumpGeneration() error {
-	g, err := r.generation()
-	if err != nil {
-		return err
-	}
-	return r.st.PutSetting(authGenerationSetting, g+1)
+	// One atomic statement, so a bump can never be lost to a concurrent read.
+	_, err := r.st.BumpSettingInt(authGenerationSetting)
+	return err
 }
 
 // signSession builds a cookie value of the form base64(username)|expiry|mac.
@@ -332,13 +329,19 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, 200, map[string]any{"username": a.Username})
 }
 
-func (r *Router) logout(w http.ResponseWriter, _ *http.Request) {
+func (r *Router) logout(w http.ResponseWriter, req *http.Request) {
 	// Clearing the cookie only affects this browser; bumping the generation is
 	// what actually revokes the token, so a copy captured elsewhere stops
 	// working too.
-	if err := r.bumpGeneration(); err != nil {
-		writeErr(w, 500, err)
-		return
+	//
+	// Only do that for a caller who actually holds a session: the route is
+	// reachable without one, and an unauthenticated bump would let anyone sign
+	// the operator out of every device at will.
+	if r.currentUser(req) != "" {
+		if err := r.bumpGeneration(); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
