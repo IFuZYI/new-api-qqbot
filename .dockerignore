@@ -35,3 +35,7 @@ web/tsconfig.tsbuildinfo
 docs/
 *.md
 !README.md
+
+# QA evidence (screenshots + report from exploratory UI testing); it would add
+# tens of MB to the build context for files the build never reads.
+dogfood-output/
