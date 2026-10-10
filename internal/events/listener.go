@@ -106,6 +106,32 @@ func (l *Listener) Run(ctx context.Context) {
 	}
 }
 
+// Probe opens the event stream just long enough to prove it accepts this
+// service's credentials, then closes it. It exists so the connection test can
+// verify the event WebSocket without leaving a second consumer attached (a
+// second connection would receive its own copy of every event).
+func Probe(url, token string) error {
+	header := map[string][]string{}
+	if token != "" {
+		header["Authorization"] = []string{"Bearer " + token}
+		// NapCat also accepts the token as a WebSocket subprotocol.
+		header["Sec-WebSocket-Protocol"] = []string{"Bearer," + token}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, resp, err := dialer.DialContext(ctx, url, header)
+	if err != nil {
+		if resp != nil {
+			return &handshakeError{status: resp.Status, err: err}
+		}
+		return err
+	}
+	return conn.Close()
+}
+
 // session runs one connection until it fails.
 func (l *Listener) session(ctx context.Context, url, token string) error {
 	header := map[string][]string{}

@@ -393,3 +393,45 @@ func TestListUsersPropagatesAnError(t *testing.T) {
 		t.Fatal("a failed list must return an error, not an empty slice")
 	}
 }
+
+// Self reports the account behind the token, which is what a connection test
+// shows the operator so they can see *which* account they configured.
+func TestSelfReturnsTheTokenOwner(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/user/self" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(okEnvelope(map[string]any{
+			"id": 3, "username": "napcat", "display_name": "管理", "role": 10, "group": "authorized",
+		})))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetToken("tok-abc")
+	u, err := c.Self()
+	if err != nil {
+		t.Fatalf("Self: %v", err)
+	}
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("token not attached: %q", gotAuth)
+	}
+	if u.ID != 3 || u.Username != "napcat" || u.Role != 10 || u.Group != "authorized" {
+		t.Errorf("unexpected user: %+v", u)
+	}
+}
+
+// A rejected Self must surface the error, so a bad token is not read as a
+// working connection.
+func TestSelfSurfacesRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false,"message":"无权进行此操作","code":"AUTH_UNAUTHORIZED"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).Self(); err == nil {
+		t.Error("a rejected Self must be an error")
+	}
+}

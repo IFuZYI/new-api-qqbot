@@ -135,3 +135,49 @@ func TestHandleMatchesNapCatWireFormat(t *testing.T) {
 		t.Fatalf("wire-format event did not bind: %v", svc.bound)
 	}
 }
+
+// Probe must connect with the same credentials the listener uses and then close,
+// so the connection test can verify the event socket without leaving a second
+// consumer attached (a second connection would receive its own copy of events).
+func TestProbeConnectsAndCloses(t *testing.T) {
+	var gotAuth string
+	var upgraded int
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		upgraded++
+		defer conn.Close()
+		// Hold it open long enough for Probe to consider the dial a success.
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	if err := Probe(url, "probe-tok"); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if gotAuth != "Bearer probe-tok" {
+		t.Errorf("Probe must send the token, got %q", gotAuth)
+	}
+	if upgraded != 1 {
+		t.Errorf("expected exactly one connection, got %d", upgraded)
+	}
+}
+
+// A rejected handshake must surface as an error, or a bad token would look like
+// a working event stream.
+func TestProbeSurfacesRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	if err := Probe(url, "bad"); err == nil {
+		t.Error("a rejected handshake must be an error")
+	}
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type AuthState, type Bootstrap, type Config, type ConfigRevisions, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
+import { api, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
@@ -923,6 +923,33 @@ function SettingsView({
 
 /* ---------------- connection ---------------- */
 
+/**
+ * CheckList renders the outcome of a connection test: one row per probed hop,
+ * each with its own verdict, so a failure names the hop that is broken instead
+ * of collapsing into a single "cannot connect".
+ */
+function CheckList({ results }: { results: CheckResult[] }) {
+  return (
+    <div className="mt-3 space-y-1.5">
+      {results.map((r) => (
+        <div key={r.name} className="flex items-start gap-2 text-xs">
+          <span className="w-32 shrink-0 text-muted-foreground">{r.name}</span>
+          {r.skipped ? (
+            <Badge>跳过</Badge>
+          ) : r.ok ? (
+            <Badge tone="ok">成功</Badge>
+          ) : (
+            <Badge tone="err">失败</Badge>
+          )}
+          <span className={`min-w-0 break-all ${r.ok ? 'text-muted-foreground' : 'text-destructive'}`}>
+            {r.error || r.detail}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function Connection({
   onDone,
   onFail,
@@ -936,6 +963,8 @@ function Connection({
   const [revs, setRevs] = useState<ConfigRevisions>({ newapi: '', napcat: '' })
   const [busy, setBusy] = useState('')
   const [autoOpen, setAutoOpen] = useState(false)
+  const [newapiCheck, setNewapiCheck] = useState<CheckResult[] | null>(null)
+  const [napcatCheck, setNapcatCheck] = useState<CheckResult[] | null>(null)
 
   const apply = useCallback((r: { config: Config; revisions: ConfigRevisions }) => {
     setC(r.config)
@@ -954,6 +983,45 @@ function Connection({
   }, [load])
 
   if (!c) return <Card title="连接配置">载入中…</Card>
+
+  // Testing is a separate action from saving: the operator can check what they
+  // typed before committing it, and a failed test never blocks a save.
+  const testNewAPI = async () => {
+    setBusy('test-newapi')
+    setNewapiCheck(null)
+    try {
+      const r = await api.testNewAPI({
+        url: c.newapi.url,
+        username: c.newapi.username,
+        password: c.newapi.password,
+      })
+      setNewapiCheck(r.results)
+    } catch (e) {
+      onFail(e)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const testNapCat = async () => {
+    setBusy('test-napcat')
+    setNapcatCheck(null)
+    try {
+      const r = await api.testNapCat({
+        webui_url: c.napcat.webui_url,
+        webui_token: c.napcat.webui_token,
+        onebot_url: c.napcat.onebot_url,
+        onebot_token: c.napcat.onebot_token,
+        event_ws_url: c.napcat.event_ws_url,
+        event_ws_token: c.napcat.event_ws_token,
+      })
+      setNapcatCheck(r.results)
+    } catch (e) {
+      onFail(e)
+    } finally {
+      setBusy('')
+    }
+  }
 
   // The two halves save independently, so a half-filled NapCat form can never
   // block (or overwrite) the gateway, and vice versa.
@@ -982,9 +1050,14 @@ function Connection({
       <Card
         title="new-api 管理员账号"
         actions={
-          <Button kind="primary" disabled={busy !== ''} onClick={() => saveSection('newapi', 'new-api 连接配置')}>
-            {busy === 'newapi' ? '保存中…' : '保存'}
-          </Button>
+          <>
+            <Button disabled={busy !== ''} onClick={testNewAPI}>
+              {busy === 'test-newapi' ? '测试中…' : '测试连接'}
+            </Button>
+            <Button kind="primary" disabled={busy !== ''} onClick={() => saveSection('newapi', 'new-api 连接配置')}>
+              {busy === 'newapi' ? '保存中…' : '保存'}
+            </Button>
+          </>
         }
       >
         <div className="grid gap-4 sm:grid-cols-3">
@@ -1005,6 +1078,7 @@ function Connection({
             />
           </Field>
         </div>
+        {newapiCheck && <CheckList results={newapiCheck} />}
       </Card>
 
       <Card
@@ -1013,6 +1087,9 @@ function Connection({
           <>
             <Button onClick={() => setAutoOpen(true)} disabled={busy !== ''}>
               自动配置
+            </Button>
+            <Button disabled={busy !== ''} onClick={testNapCat}>
+              {busy === 'test-napcat' ? '测试中…' : '测试连接'}
             </Button>
             <Button kind="primary" disabled={busy !== ''} onClick={() => saveSection('napcat', 'NapCat 连接配置')}>
               {busy === 'napcat' ? '保存中…' : '保存'}
@@ -1065,6 +1142,7 @@ function Connection({
             />
           </Field>
         </div>
+        {napcatCheck && <CheckList results={napcatCheck} />}
       </Card>
 
       {autoOpen && (

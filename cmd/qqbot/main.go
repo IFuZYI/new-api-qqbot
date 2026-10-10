@@ -101,6 +101,7 @@ func main() {
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 	router.SetNapCatAdmin(napcatAdmin{})
+	router.SetProber(prober{})
 
 	// The admin credential was read from the environment above. Provisioning it
 	// before the server accepts requests means a fresh instance is never
@@ -323,6 +324,49 @@ func (napcatAdmin) EnsureAdapters(webuiURL, webuiToken string, opts napcat.Adapt
 		return nil, err
 	}
 	return w.EnsureAdapters(opts)
+}
+
+// prober reaches the two external systems for the connection tests. Every probe
+// builds a throwaway client from the values it is given, so testing a form
+// never disturbs the cached production clients or their sessions.
+type prober struct{}
+
+// ProbeGateway logs in to new-api and returns the account behind the
+// credentials, so the operator sees which account they configured.
+func (prober) ProbeGateway(url, username, password string) (*newapi.User, error) {
+	c := newapi.New(url)
+	if err := c.Login(username, password); err != nil {
+		return nil, err
+	}
+	return c.Self()
+}
+
+// ProbeWebUI logs in to NapCat's panel and asks the debug bridge for the bot
+// identity. The bridge needs QQ to be logged in; when it is not, the login
+// itself still proves the panel and token are right, so that is reported as a
+// partial success rather than a failure.
+func (prober) ProbeWebUI(webuiURL, webuiToken string) (*napcat.LoginInfo, error) {
+	w := napcat.NewWebUI(webuiURL, webuiToken)
+	if err := w.Login(); err != nil {
+		return nil, err
+	}
+	info, err := w.GetLoginInfo()
+	if err != nil {
+		// The panel accepted the credential but QQ is not logged in. Say so
+		// explicitly: "not logged in" is a different problem from "wrong token".
+		return nil, nil
+	}
+	return info, nil
+}
+
+// ProbeOneBot asks an OneBot HTTP endpoint for the bot identity.
+func (prober) ProbeOneBot(onebotURL, onebotToken string) (*napcat.LoginInfo, error) {
+	return napcat.New(onebotURL, onebotToken).GetLoginInfo()
+}
+
+// ProbeEventWS opens the event stream just long enough to prove it accepts us.
+func (prober) ProbeEventWS(wsURL, token string) error {
+	return events.Probe(wsURL, token)
 }
 
 // bindAdapter narrows the service to the one method the event listener needs.

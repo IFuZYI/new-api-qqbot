@@ -39,6 +39,15 @@ export interface NapCatAdapterResult {
   event_ws_url: string
 }
 
+/** One transport's outcome from a connection test. */
+export interface CheckResult {
+  name: string
+  ok: boolean
+  detail?: string
+  error?: string
+  skipped?: boolean
+}
+
 export interface Settings {
   member_patrol_enabled: boolean
   member_sync_minutes: number
@@ -241,6 +250,25 @@ export const api = {
    */
   autoConfigureNapCat: (body: { webui_url: string; webui_token: string; revision: string; http_port?: number; ws_port?: number }) =>
     req<ConfigResponse & { napcat: NapCatAdapterResult }>('/api/config/napcat/autoconfigure', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Test the gateway credentials; returns one result per probed hop. */
+  testNewAPI: (body: { url: string; username: string; password: string }) =>
+    req<{ results: CheckResult[] }>('/api/config/test/newapi', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Test each configured NapCat transport independently. */
+  testNapCat: (body: {
+    webui_url: string
+    webui_token: string
+    onebot_url: string
+    onebot_token: string
+    event_ws_url: string
+    event_ws_token: string
+  }) =>
+    req<{ results: CheckResult[] }>('/api/config/test/napcat', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

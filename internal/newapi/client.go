@@ -285,6 +285,17 @@ func (c *Client) GetUser(id int) (*User, error) {
 	return &u, nil
 }
 
+// Self returns the account the current token belongs to. It is what a
+// connection test reports as the identity behind the credentials, so the
+// operator can see *which* account they configured rather than just "ok".
+func (c *Client) Self() (*User, error) {
+	var u User
+	if err := c.do(http.MethodGet, "/api/user/self", nil, &u); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 // Groups returns the group names configured on the instance, which is how the
 // service validates that its source/target groups really exist.
 //

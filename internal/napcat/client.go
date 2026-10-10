@@ -412,6 +412,15 @@ func (w *WebUI) GetGroupSignedList(groupID int64) ([]SignedMember, error) {
 	return ss, nil
 }
 
+// GetLoginInfo via the WebUI bridge.
+func (w *WebUI) GetLoginInfo() (*LoginInfo, error) {
+	var li LoginInfo
+	if err := w.callAction("get_login_info", nil, &li); err != nil {
+		return nil, err
+	}
+	return &li, nil
+}
+
 // GetOneBotConfig reads NapCat's current OneBot configuration.
 func (w *WebUI) GetOneBotConfig() (*OneBotConfig, error) {
 	var raw map[string]json.RawMessage

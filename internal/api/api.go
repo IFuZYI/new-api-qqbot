@@ -13,6 +13,7 @@ import (
 
 	"qqbot/internal/config"
 	"qqbot/internal/napcat"
+	"qqbot/internal/newapi"
 	"qqbot/internal/service"
 	"qqbot/internal/store"
 )
@@ -30,6 +31,10 @@ type Router struct {
 	// every other endpoint is unaffected.
 	napcatAdmin NapCatAdmin
 
+	// prober runs the connection tests. Optional: when unset the test endpoints
+	// report that testing is unavailable.
+	prober Prober
+
 	// setupMu serialises first-run setup (see auth.go).
 	setupMu sync.Mutex
 }
@@ -39,6 +44,20 @@ type Router struct {
 // a live NapCat.
 type NapCatAdmin interface {
 	EnsureAdapters(webuiURL, webuiToken string, opts napcat.AdapterOptions) (*napcat.AdapterResult, error)
+}
+
+// Prober reaches the two external systems on the connection page's behalf, so
+// the operator can verify what they typed before relying on it. It is separate
+// from NapCatAdmin because a test only needs to read, never to write.
+type Prober interface {
+	// ProbeGateway logs in and reports the account the credentials belong to.
+	ProbeGateway(url, username, password string) (*newapi.User, error)
+	// ProbeWebUI logs in to NapCat's panel and reports the bot it drives.
+	ProbeWebUI(webuiURL, webuiToken string) (*napcat.LoginInfo, error)
+	// ProbeOneBot asks an OneBot endpoint for the bot identity.
+	ProbeOneBot(onebotURL, onebotToken string) (*napcat.LoginInfo, error)
+	// ProbeEventWS opens the event WebSocket and reports success.
+	ProbeEventWS(wsURL, token string) error
 }
 
 // NewRouter builds the API router. The WebUI is served from webDist and
@@ -53,6 +72,9 @@ func NewRouter(st *store.Store, svc *service.Service, cfg *config.Manager, webDi
 // SetNapCatAdmin installs the adapter-provisioning dependency used by the
 // connection page's auto-configure action.
 func (r *Router) SetNapCatAdmin(a NapCatAdmin) { r.napcatAdmin = a }
+
+// SetProber installs the connection-test dependency.
+func (r *Router) SetProber(p Prober) { r.prober = p }
 
 // Handler returns the root handler.
 func (r *Router) Handler() http.Handler { return r.mux }
@@ -78,6 +100,10 @@ func (r *Router) routes() {
 	// Auto-configure NapCat from just its WebUI address: log in, write the
 	// OneBot adapters, and store the resulting OneBot/event URLs and token.
 	r.mux.HandleFunc("POST /api/config/napcat/autoconfigure", r.requireAuth(r.autoConfigureNapCat))
+	// Connection tests: each transport is probed on its own, so a failure names
+	// the broken hop instead of just "cannot connect".
+	r.mux.HandleFunc("POST /api/config/test/newapi", r.requireAuth(r.testNewAPI))
+	r.mux.HandleFunc("POST /api/config/test/napcat", r.requireAuth(r.testNapCat))
 
 	r.mux.HandleFunc("GET /api/groups", r.requireAuth(r.listGroups))
 	r.mux.HandleFunc("POST /api/groups", r.requireAuth(r.saveGroups))
