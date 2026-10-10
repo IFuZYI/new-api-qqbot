@@ -47,8 +47,10 @@ password (minimum 8 characters) and that same form becomes the login afterwards.
 The admin can also be provisioned from the environment — `.env` in the data
 directory (or `QQBOT_ENV_FILE`), or the process environment, via
 `QQBOT_ADMIN_USERNAME` / `QQBOT_ADMIN_PASSWORD` — read at startup before the
-server accepts requests, so a fresh instance is never briefly open. Auth state
-lives in the `admins` table; the session cookie is HMAC-signed with a key
+server accepts requests, so a fresh instance is never briefly open. The same
+file sets the listen port (`QQBOT_PORT`, a bare port or a full address; an
+explicit `-addr` flag wins over it, which wins over the default `:4096`). Auth
+state lives in the `admins` table; the session cookie is HMAC-signed with a key
 generated on first use and stored in settings. Only `/api/auth/state`,
 `/api/auth/setup`, `/api/auth/login` and `/api/auth/logout` are reachable
 without a session — add new endpoints through `r.requireAuth(...)`.
