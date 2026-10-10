@@ -78,10 +78,16 @@ below) and never as part of `go test`.
   and polled repeatedly, so re-recording must never re-randomise the reward or
   re-award it. The reward amount is persisted *before* the gateway call, and the
   claim is released only when that call fails.
-- **Promotion only moves accounts sitting in the source group** and must be a
-  no-op on a second run. Re-read the account by id before writing: new-api's
-  `PUT /api/user/` replaces the fields it accepts, so a sparse object blanks
-  `display_name`.
+- **Group conversion is rules-driven, with one decision point.** Each rule
+  picks its trigger (on bind and/or a patrol interval), source groups, target
+  group and optional conditions; a rule with no trigger and no conditions is
+  unfinished and matches nothing, so it cannot move a whole group. Do not add a
+  second, implicit conversion path: the old blanket `Promote` sweep ran
+  alongside the rules and moved accounts behind the operator's back.
+- **Conversion must be a no-op on a second run**, and only touches accounts
+  sitting in the rule's source groups. Re-read the account by id before writing:
+  new-api's `PUT /api/user/` replaces the fields it accepts, so a sparse object
+  blanks `display_name`.
 - **Polling is the source of truth.** The event listener only shortens reaction
   time; nothing may depend on it (see `docs/adr/0003-polling-authoritative-events-optional.md`).
 
@@ -95,6 +101,12 @@ below) and never as part of `go test`.
   common user (role 1), not the admin account.
 - **A group name must exist on the instance** (in both the usable-groups and
   group-ratio settings) before it can be assigned. Check `/api/user/groups`.
+- **The gateway caps active login sessions (50 by default) and answers 409
+  AUTH_SESSION_LIMIT.** Logging in per request exhausts that under any real
+  sweep, so the client is cached and only re-authenticates when the config
+  changes or a request is rejected. Sessions live 30 days, so repeated logins
+  also accumulate: if the cap is hit, an existing session must be revoked
+  (`POST /api/user/sessions/revoke-others`) or they must expire.
 - **NapCat's WebUI credential is signed with a per-process secret** unless
   `NAPCAT_WEBUI_JWT_SECRET_KEY` is set, so it dies with the NapCat process and
   must be re-obtained (tolerating the login rate limit) after a restart.
