@@ -3,7 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="QQ 群与 new-api 账号绑定、签到与奖励管理面板" />
     <title>QQBot 群监测</title>
+    <!--
+      Inline SVG favicon: the panel is served from a single Go binary, so an
+      extra icon file would be one more thing to embed and keep in step. The
+      two-tone mark matches the header title and follows the browser theme.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234a7fd1'/%3E%3Cpath d='M10 12.5h12M10 16h8M10 19.5h10' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
     <script>
       /*
        * Apply the saved theme before the bundle loads, otherwise the page paints

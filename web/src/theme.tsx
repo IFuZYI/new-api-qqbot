@@ -55,15 +55,38 @@ export function useTheme() {
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme()
   const next: Theme = theme === 'dark' ? 'light' : 'dark'
+  const label = next === 'light' ? '切换到日间模式' : '切换到夜间模式'
   return (
     <button
       type="button"
       onClick={() => setTheme(next)}
-      title={next === 'light' ? '切换到日间模式' : '切换到夜间模式'}
-      aria-label={next === 'light' ? '切换到日间模式' : '切换到夜间模式'}
-      className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
+      title={label}
+      aria-label={label}
+      className="inline-flex size-8 shrink-0 items-center justify-center rounded-control border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]"
     >
-      {theme === 'dark' ? '日间模式' : '夜间模式'}
+      {theme === 'dark' ? (
+        // Sun: shown while dark, offering the light mode.
+        <svg aria-hidden="true" viewBox="0 0 16 16" className="size-4">
+          <circle cx="8" cy="8" r="3.25" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          <path
+            d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.15 1.15M11.45 11.45l1.15 1.15M12.6 3.4l-1.15 1.15M4.55 11.45L3.4 12.6"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+        </svg>
+      ) : (
+        // Moon: shown while light, offering the dark mode.
+        <svg aria-hidden="true" viewBox="0 0 16 16" className="size-4">
+          <path
+            d="M13 9.8A5.5 5.5 0 0 1 6.2 3a5.5 5.5 0 1 0 6.8 6.8Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
     </button>
   )
 }

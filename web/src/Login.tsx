@@ -48,34 +48,65 @@ export default function Login({ needsSetup, onDone }: { needsSetup: boolean; onD
   return (
     <div className="flex min-h-full items-center justify-center p-4">
       <div className="w-full max-w-sm">
-        <div className="mb-6 text-center">
-          <h1 className="text-lg font-semibold">QQBot 群监测</h1>
+        <div className="mb-6 flex flex-col items-center text-center">
+          <span
+            aria-hidden="true"
+            className="mb-3 flex size-10 items-center justify-center rounded-surface bg-primary text-primary-foreground"
+          >
+            <svg viewBox="0 0 16 16" className="size-5">
+              <path
+                d="M2.5 4.5h11M2.5 8h7.5M2.5 11.5h9.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+              />
+            </svg>
+          </span>
+          <h1 className="text-base font-semibold tracking-tight">QQBot 群监测</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             {needsSetup ? '首次使用，请设置管理账号' : '请登录管理后台'}
           </p>
         </div>
         <Card>
           {err && <ErrorNote onClose={() => setErr('')}>{err}</ErrorNote>}
-          <div className="space-y-3">
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void submit()
+            }}
+          >
             <Field label="用户名">
-              <Input value={username} onChange={setUsername} placeholder="admin" />
+              <Input
+                value={username}
+                onChange={setUsername}
+                placeholder="admin"
+                autoComplete="username"
+                autoFocus
+              />
             </Field>
             <Field label="密码" hint={needsSetup ? '至少 8 位' : undefined}>
-              <Input type="password" value={password} onChange={setPassword} />
+              <Input
+                type="password"
+                value={password}
+                onChange={setPassword}
+                autoComplete={needsSetup ? 'new-password' : 'current-password'}
+              />
             </Field>
             {needsSetup && (
               <Field label="确认密码">
-                <Input type="password" value={confirm} onChange={setConfirm} />
+                <Input type="password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
               </Field>
             )}
             <div className="pt-1">
-              <Button kind="primary" disabled={busy} onClick={submit}>
+              <Button kind="primary" type="submit" disabled={busy} full>
                 {busy ? '处理中…' : needsSetup ? '创建并登录' : '登录'}
               </Button>
             </div>
-          </div>
+          </form>
         </Card>
-        <p className="mt-4 text-center text-[11px] text-muted-foreground">
+        <p className="mt-4 text-center text-[11px] leading-4 text-muted-foreground">
           这是本服务自己的管理账号，与 new-api 无关。
         </p>
       </div>

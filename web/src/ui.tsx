@@ -1,17 +1,58 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 /**
  * Shared UI kit. Colours come from the token layer in index.css (new-api's
  * palette), so every component follows the light/dark switch automatically and
  * no component hard-codes a colour.
+ *
+ * Sizing follows the same rule: components name a role (`rounded-control`,
+ * `h-8`) rather than a raw step, so a form cannot drift into five unrelated
+ * field widths or two button heights. The radius ladder is
+ * surface > panel > control > chip.
  */
 
-export function Card({ title, children, actions }: { title?: string; children: ReactNode; actions?: ReactNode }) {
+/**
+ * Focus ring shared by every interactive element.
+ *
+ * Deliberately does NOT include `outline-none`: that utility sets
+ * `--tw-outline-style: none`, and Tailwind's `focus-visible:outline-2` reads
+ * `outline-style: var(--tw-outline-style)` — so the ring silently stayed
+ * suppressed (measured: `outline: none 0px` on exactly the buttons carrying
+ * this class, while unclassed ones got the global ring). The base-layer
+ * `:focus-visible` rule in index.css supplies the ring for everything.
+ */
+const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]'
+
+export function Card({
+  title,
+  children,
+  actions,
+  description,
+  className = '',
+}: {
+  title?: string
+  children: ReactNode
+  actions?: ReactNode
+  /** Optional one-line subtitle under the title. */
+  description?: string
+  className?: string
+}) {
+  const id = useId()
   return (
-    <section className="rounded-xl border border-border bg-card text-card-foreground shadow-sm">
+    <section
+      aria-labelledby={title ? id : undefined}
+      className={`rounded-surface border border-border bg-card text-card-foreground shadow-sm ${className}`}
+    >
       {(title || actions) && (
-        <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-          {title && <h2 className="text-sm font-medium">{title}</h2>}
+        <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            {title && (
+              <h2 id={id} className="text-sm font-semibold tracking-tight">
+                {title}
+              </h2>
+            )}
+            {description && <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>}
+          </div>
           {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
         </header>
       )}
@@ -26,38 +67,67 @@ export function Button({
   kind = 'default',
   disabled,
   type = 'button',
+  size = 'md',
+  title,
+  className = '',
+  full,
 }: {
   children: ReactNode
   onClick?: () => void
   kind?: 'default' | 'primary' | 'danger' | 'ghost'
   disabled?: boolean
   type?: 'button' | 'submit'
+  size?: 'sm' | 'md'
+  title?: string
+  className?: string
+  /** Stretch to the container (used by dialog actions on narrow screens). */
+  full?: boolean
 }) {
   const styles: Record<string, string> = {
-    primary: 'border-transparent bg-primary text-primary-foreground hover:opacity-90',
+    primary:
+      'border-transparent bg-primary text-primary-foreground shadow-xs hover:bg-primary/90 active:bg-primary/95',
     default: 'border-border bg-background text-foreground hover:bg-accent hover:text-accent-foreground',
-    danger: 'border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20',
-    ghost: 'border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+    danger:
+      'border-transparent bg-destructive/10 text-destructive hover:bg-destructive/20 active:bg-destructive/25',
+    ghost:
+      'border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+  }
+  const sizes: Record<string, string> = {
+    sm: 'h-7 gap-1.5 px-2 text-xs',
+    md: 'h-8 gap-1.5 px-3 text-xs',
   }
   return (
     <button
       type={type}
+      title={title}
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-md border px-3 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-50 ${styles[kind]}`}
+      className={`inline-flex shrink-0 items-center justify-center rounded-control border font-medium whitespace-nowrap transition-[background-color,color,box-shadow,opacity] disabled:pointer-events-none disabled:opacity-50 ${sizes[size]} ${styles[kind]} ${FOCUS} ${full ? 'w-full' : ''} ${className}`}
     >
       {children}
     </button>
   )
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+export function Field({
+  label,
+  hint,
+  children,
+  htmlFor,
+}: {
+  label: string
+  hint?: string
+  children: ReactNode
+  htmlFor?: string
+}) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-xs text-muted-foreground">{label}</span>
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label htmlFor={htmlFor} className="text-xs font-medium text-foreground/80">
+        {label}
+      </label>
       {children}
-      {hint && <span className="mt-1 block text-[11px] text-muted-foreground">{hint}</span>}
-    </label>
+      {hint && <p className="text-[11px] leading-4 text-muted-foreground">{hint}</p>}
+    </div>
   )
 }
 
@@ -66,19 +136,53 @@ export function Input({
   onChange,
   type = 'text',
   placeholder,
+  id,
+  disabled,
+  invalid,
+  min,
+  max,
+  autoFocus,
+  autoComplete,
+  inputMode,
+  className = '',
+  ariaLabel,
 }: {
   value: string | number
   onChange: (v: string) => void
   type?: string
   placeholder?: string
+  id?: string
+  disabled?: boolean
+  invalid?: boolean
+  min?: number
+  max?: number
+  autoFocus?: boolean
+  autoComplete?: string
+  inputMode?: 'text' | 'numeric' | 'decimal'
+  className?: string
+  ariaLabel?: string
 }) {
+  // No `w-full` in the base: Field is a flex column, so the control already
+  // stretches to the field width, and a hard-coded 100% here would outrank any
+  // `w-*` the caller passes (measured: a `w-20` interval input rendered 203px).
   return (
     <input
+      id={id}
       type={type}
       value={value}
       placeholder={placeholder}
+      disabled={disabled}
+      min={min}
+      max={max}
+      autoFocus={autoFocus}
+      autoComplete={autoComplete}
+      inputMode={inputMode}
+      aria-label={ariaLabel}
+      aria-invalid={invalid || undefined}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/30"
+      className={`h-8 max-w-full min-w-0 rounded-control border bg-background px-2.5 text-sm text-foreground transition-colors placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 ${
+        invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
+      } ${FOCUS} ${className}`}
     />
   )
 }
@@ -88,17 +192,26 @@ export function Select({
   onChange,
   children,
   className = '',
+  id,
+  disabled,
+  ariaLabel,
 }: {
   value: string | number
   onChange: (v: string) => void
   children: ReactNode
   className?: string
+  id?: string
+  disabled?: boolean
+  ariaLabel?: string
 }) {
   return (
     <select
+      id={id}
       value={value}
+      disabled={disabled}
+      aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value)}
-      className={`rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-ring ${className}`}
+      className={`h-8 max-w-full min-w-0 cursor-pointer rounded-control border border-input bg-background px-2 text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
     >
       {children}
     </select>
@@ -120,6 +233,7 @@ export function MultiSelect({
   emptyText = '无可选项',
   allText = '任意',
   disabled,
+  ariaLabel,
 }: {
   options: string[]
   selected: string[]
@@ -129,9 +243,11 @@ export function MultiSelect({
   /** Shown when there are no options at all. */
   emptyText?: string
   disabled?: boolean
+  ariaLabel?: string
 }) {
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  const btn = useRef<HTMLButtonElement>(null)
 
   // Close on an outside click or Escape, so the dropdown cannot get stuck open.
   useEffect(() => {
@@ -140,7 +256,11 @@ export function MultiSelect({
       if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setOpen(false)
+        btn.current?.focus()
+      }
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -156,28 +276,37 @@ export function MultiSelect({
   const summary = selected.length === 0 ? allText : selected.join('、')
 
   return (
-    <div ref={box} className="relative">
+    <div ref={box} className="relative min-w-0">
       <button
+        ref={btn}
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1.5 text-left text-sm text-foreground outline-none transition hover:bg-accent focus:border-ring disabled:cursor-not-allowed disabled:opacity-50"
+        aria-label={ariaLabel}
+        className={`flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-control border border-input bg-background px-2.5 text-left text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS}`}
       >
         <span className={`min-w-0 truncate ${selected.length === 0 ? 'text-muted-foreground' : ''}`}>
           {summary}
         </span>
-        <span className="flex shrink-0 items-center gap-1">
+        <span className="flex shrink-0 items-center gap-1.5">
           {selected.length > 0 && <Badge tone="accent">{selected.length}</Badge>}
-          <span className="text-muted-foreground">{open ? '▴' : '▾'}</span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 12 12"
+            className={`size-3 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
+          >
+            <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </span>
       </button>
 
       {open && (
         <div
           role="listbox"
-          className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-card p-1 shadow-md"
+          aria-multiselectable="true"
+          className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
         >
           {options.length === 0 ? (
             <p className="px-2 py-1.5 text-xs text-muted-foreground">{emptyText}</p>
@@ -187,7 +316,7 @@ export function MultiSelect({
                 <button
                   type="button"
                   onClick={() => onChange([])}
-                  className="mb-1 w-full rounded px-2 py-1 text-left text-xs text-muted-foreground transition hover:bg-accent"
+                  className={`mb-1 w-full rounded-sm px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent ${FOCUS}`}
                 >
                   清除选择（= {allText}）
                 </button>
@@ -195,9 +324,14 @@ export function MultiSelect({
               {options.map((opt) => (
                 <label
                   key={opt}
-                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm transition hover:bg-accent"
+                  className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
                 >
-                  <input type="checkbox" checked={selected.includes(opt)} onChange={() => toggle(opt)} />
+                  <input
+                    type="checkbox"
+                    className="size-4 shrink-0"
+                    checked={selected.includes(opt)}
+                    onChange={() => toggle(opt)}
+                  />
                   <span className="min-w-0 truncate">{opt}</span>
                 </label>
               ))}
@@ -217,28 +351,34 @@ export function MultiSelect({
  * and knob are drawn from the theme tokens so both light and dark follow
  * automatically. The knob is positioned by transform (not left/right) so the
  * transition animates instead of jumping.
+ *
+ * The hit area is padded to 32px tall even though the track is 20px, so the
+ * control clears the 24x24 minimum target size (WCAG 2.5.8) on touch screens.
  */
 export function Switch({
   checked,
   onChange,
   label,
   disabled,
+  id,
 }: {
   checked: boolean
   onChange: (v: boolean) => void
   /** Accessible name; also rendered beside the control. */
   label?: string
   disabled?: boolean
+  id?: string
 }) {
   return (
     <button
+      id={id}
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="group inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
+      className={`group inline-flex min-h-8 items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS} rounded-control`}
     >
       <span
         className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors ${
@@ -246,13 +386,15 @@ export function Switch({
         }`}
       >
         <span
-          className={`pointer-events-none block h-3.5 w-3.5 rounded-full bg-background shadow-sm transition-transform ${
+          className={`pointer-events-none block size-3.5 rounded-full bg-background shadow-sm transition-transform ${
             checked ? 'translate-x-[18px]' : 'translate-x-[3px]'
           }`}
         />
       </span>
       {label && (
-        <span className={`text-sm ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>{label}</span>
+        <span className={`text-xs ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>
+          {label}
+        </span>
       )}
     </button>
   )
@@ -274,22 +416,48 @@ export function Badge({
     muted: 'text-muted-foreground border-border bg-muted',
   }
   return (
-    <span className={`inline-block rounded border px-1.5 py-0.5 text-[11px] leading-4 ${tones[tone]}`}>
+    <span
+      className={`inline-flex items-center rounded-chip border px-1.5 py-px text-[11px] leading-4 font-medium whitespace-nowrap ${tones[tone]}`}
+    >
       {children}
     </span>
   )
 }
 
-export function Table({ head, children }: { head: ReactNode[]; children: ReactNode }) {
+/**
+ * Table renders a data grid with an optional column pinned to the inline end.
+ *
+ * `stickyEnd` exists for the action column: on a phone the buttons otherwise
+ * sit past the viewport edge with no hint they are there (measured at
+ * x=769-853px inside a 390px viewport), so the operator sees a table with no
+ * way to act on a row.
+ */
+export function Table({
+  head,
+  children,
+  stickyEnd,
+  className = '',
+}: {
+  head: ReactNode[]
+  children: ReactNode
+  /** Number of trailing columns to pin while the table scrolls sideways. */
+  stickyEnd?: number
+  className?: string
+}) {
+  const n = head.length
+  const isSticky = (i: number) => stickyEnd !== undefined && i >= n - stickyEnd
   return (
-    <div className="overflow-x-auto">
+    <div className={`scroll-slim -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0 ${className}`}>
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="text-left text-xs text-muted-foreground">
             {head.map((h, i) => (
               <th
                 key={i}
-                className="whitespace-nowrap border-b border-border bg-[var(--table-header)] px-3 py-2 font-normal"
+                scope="col"
+                className={`border-b border-border bg-[var(--table-header)] px-3 py-2 font-medium whitespace-nowrap ${
+                  isSticky(i) ? 'cell-sticky-head' : ''
+                }`}
               >
                 {h}
               </th>
@@ -302,16 +470,71 @@ export function Table({ head, children }: { head: ReactNode[]; children: ReactNo
   )
 }
 
+/** One row of a data table; pairs with Table's sticky-end support. */
+export function Row({
+  children,
+  className = '',
+}: {
+  children: ReactNode
+  className?: string
+}) {
+  return <tr className={`data-row border-b border-border/60 ${className}`}>{children}</tr>
+}
+
+/** A cell. `sticky` pins it to the inline end (see Table's stickyEnd). */
+export function Cell({
+  children,
+  sticky,
+  className = '',
+  align,
+}: {
+  children: ReactNode
+  sticky?: boolean
+  className?: string
+  align?: 'right'
+}) {
+  return (
+    <td
+      className={`px-3 py-2 align-middle ${sticky ? 'cell-sticky' : ''} ${
+        align === 'right' ? 'text-right' : ''
+      } ${className}`}
+    >
+      {children}
+    </td>
+  )
+}
+
 export function Empty({ children }: { children: ReactNode }) {
-  return <p className="py-8 text-center text-xs text-muted-foreground">{children}</p>
+  return (
+    <div className="flex flex-col items-center gap-2 py-10 text-center">
+      <svg aria-hidden="true" viewBox="0 0 24 24" className="size-6 text-muted-foreground/60">
+        <path
+          d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+        <path d="M4 10h16" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+      <p className="max-w-md text-xs leading-5 text-muted-foreground">{children}</p>
+    </div>
+  )
 }
 
 export function ErrorNote({ children, onClose }: { children: ReactNode; onClose?: () => void }) {
   return (
-    <div className="mb-3 flex items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-      <span className="break-all">{children}</span>
+    <div
+      role="alert"
+      className="mb-3 flex items-start justify-between gap-3 rounded-control border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+    >
+      <span className="min-w-0 break-words">{children}</span>
       {onClose && (
-        <button onClick={onClose} className="shrink-0 opacity-70 hover:opacity-100">
+        <button
+          type="button"
+          aria-label="关闭提示"
+          onClick={onClose}
+          className={`shrink-0 rounded-sm px-1 leading-none opacity-70 transition-opacity hover:opacity-100 ${FOCUS}`}
+        >
           ✕
         </button>
       )}
@@ -321,36 +544,158 @@ export function ErrorNote({ children, onClose }: { children: ReactNode; onClose?
 
 export function OkNote({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-3 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-xs text-success">
-      {children}
+    <div
+      role="status"
+      className="mb-3 flex items-start gap-2 rounded-control border border-success/40 bg-success/10 px-3 py-2 text-xs text-success"
+    >
+      <span className="min-w-0 break-words">{children}</span>
     </div>
   )
 }
 
-/** Modal shell shared by the dialogs. */
+/** Inline validation / warning note used inside forms. */
+export function WarnNote({ children }: { children: ReactNode }) {
+  return (
+    <p className="rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+      {children}
+    </p>
+  )
+}
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/**
+ * Modal shell shared by the dialogs.
+ *
+ * It is a real dialog: role/aria-modal so a screen reader announces it, focus
+ * moved in on open and returned to the trigger on close, Tab cycling inside
+ * (otherwise the keyboard wanders onto the page behind an overlay the user
+ * cannot see through), Escape to dismiss, and background scroll locked.
+ */
 export function Modal({
   title,
   children,
   actions,
   onClose,
   wide,
+  closeLabel = '关闭',
 }: {
   title: string
   children: ReactNode
   actions?: ReactNode
   onClose: () => void
   wide?: boolean
+  closeLabel?: string
 }) {
+  const panel = useRef<HTMLDivElement>(null)
+  const titleID = useId()
+  const restoreTo = useRef<HTMLElement | null>(null)
+
+  // Remember what had focus so closing can hand it back.
+  useEffect(() => {
+    restoreTo.current = document.activeElement as HTMLElement | null
+    return () => restoreTo.current?.focus?.()
+  }, [])
+
+  // Move focus into the dialog once it is mounted.
+  useEffect(() => {
+    const el = panel.current?.querySelector<HTMLElement>(FOCUSABLE)
+    el?.focus()
+  }, [])
+
+  // Escape closes; Tab is trapped inside the dialog.
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const nodes = panel.current?.querySelectorAll<HTMLElement>(FOCUSABLE)
+      if (!nodes || nodes.length === 0) return
+      const first = nodes[0]
+      const last = nodes[nodes.length - 1]
+      const active = document.activeElement
+      if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      }
+    },
+    [onClose],
+  )
+
+  // Lock the page behind the overlay.
+  useEffect(() => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [])
+
   return (
     <div
-      className="fixed inset-0 z-10 flex items-start justify-center overflow-y-auto bg-black/50 p-4"
-      onClick={onClose}
+      className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-[1px]"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+      onKeyDown={onKeyDown}
     >
-      <div onClick={(e) => e.stopPropagation()} className={`my-8 w-full ${wide ? 'max-w-2xl' : 'max-w-md'}`}>
-        <Card title={title} actions={actions}>
-          {children}
-        </Card>
+      <div
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleID}
+        className={`my-8 w-full ${wide ? 'max-w-2xl' : 'max-w-md'}`}
+      >
+        <section className="rounded-surface border border-border bg-card text-card-foreground shadow-xl">
+          <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+            <h2 id={titleID} className="text-sm font-semibold tracking-tight">
+              {title}
+            </h2>
+            <button
+              type="button"
+              aria-label={closeLabel}
+              onClick={onClose}
+              className={`-m-1 shrink-0 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground ${FOCUS}`}
+            >
+              <svg aria-hidden="true" viewBox="0 0 14 14" className="size-3.5">
+                <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+          </header>
+          <div className="p-4">{children}</div>
+          {actions && (
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-3">
+              {actions}
+            </footer>
+          )}
+        </section>
       </div>
     </div>
+  )
+}
+
+/** A labelled block of related fields, used to group long forms. */
+export function Fieldset({
+  legend,
+  children,
+  hint,
+}: {
+  legend: string
+  children: ReactNode
+  hint?: string
+}) {
+  return (
+    <fieldset className="rounded-panel border border-border px-3 pt-3 pb-3.5">
+      <legend className="px-1 text-xs font-medium text-foreground/80">{legend}</legend>
+      {hint && <p className="mb-3 text-[11px] leading-4 text-muted-foreground">{hint}</p>}
+      <div className="space-y-3.5">{children}</div>
+    </fieldset>
   )
 }

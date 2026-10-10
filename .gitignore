@@ -13,6 +13,11 @@
 *.db-wal
 *.tgz
 
+# ---- QA output ----
+# dogfood-output/ holds throwaway screenshots and a report from exploratory UI
+# testing; it is evidence for a review, not part of the service.
+/dogfood-output/
+
 # ---- frontend ----
 /web/node_modules/
 /web/dist/

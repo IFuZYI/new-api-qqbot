@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Condition, type Rule, type RuleMeta } from './api'
-import { Badge, Button, Card, Empty, Field, Input, Modal, MultiSelect, Select, Switch, Table } from './ui'
+import { Badge, Button, Card, Cell, Empty, Field, Fieldset, Input, Modal, MultiSelect, Row, Select, Switch, Table, WarnNote } from './ui'
 
 /** Group-conversion rules: when a member matches, move their new-api account. */
 export default function Rules({
@@ -62,6 +62,7 @@ export default function Rules({
     <>
       <Card
         title="分组转换规则"
+        description="规则在绑定成功时和/或巡检周期执行；源分组留空表示任意分组。既无触发方式又无条件的规则不会匹配任何人。"
         actions={
           <>
             <Button disabled={busy} onClick={run}>
@@ -73,14 +74,10 @@ export default function Rules({
           </>
         }
       >
-        <p className="mb-3 text-xs text-muted-foreground">
-          规则在<b>绑定成功时</b>和/或<b>巡检周期</b>执行；源分组留空表示任意分组。既无触发方式又无条件的规则
-          不会匹配任何人。
-        </p>
         {groupsErr && (
-          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            <span className="break-all">读取 new-api 分组失败：{groupsErr}（源/目标分组需手动填写）</span>
-            <Button kind="ghost" onClick={loadGroups}>
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <span className="min-w-0 break-all">读取 new-api 分组失败：{groupsErr}（源/目标分组需手动填写）</span>
+            <Button kind="ghost" size="sm" onClick={loadGroups}>
               重试
             </Button>
           </div>
@@ -88,14 +85,14 @@ export default function Rules({
         {rules.length === 0 ? (
           <Empty>还没有规则。新建一条，选择触发条件与源/目标分组。</Empty>
         ) : (
-          <Table head={['启用', '名称', '触发', '源分组', '目标分组', '条件', '上次执行', '操作']}>
+          <Table stickyEnd={1} head={['启用', '名称', '触发', '源分组', '目标分组', '条件', '上次执行', '操作']}>
             {rules.map((r) => (
-              <tr key={r.id} className="border-b border-border/60">
-                <td className="px-3 py-2">
+              <Row key={r.id}>
+                <Cell>
                   <Badge tone={r.enabled ? 'ok' : 'muted'}>{r.enabled ? '启用' : '停用'}</Badge>
-                </td>
-                <td className="px-3 py-2">{r.name}</td>
-                <td className="px-3 py-2 text-xs">
+                </Cell>
+                <Cell className="font-medium">{r.name}</Cell>
+                <Cell className="text-xs">
                   <div className="flex flex-wrap gap-1">
                     {r.on_bind && <Badge tone="accent">绑定</Badge>}
                     {r.interval_minutes > 0 && <Badge>巡检 {r.interval_minutes}min</Badge>}
@@ -103,8 +100,8 @@ export default function Rules({
                       <span className="text-muted-foreground">无触发</span>
                     )}
                   </div>
-                </td>
-                <td className="px-3 py-2 text-xs">
+                </Cell>
+                <Cell className="text-xs">
                   {r.source_groups.length ? (
                     <div className="flex flex-wrap gap-1">
                       {r.source_groups.map((g) => (
@@ -114,11 +111,11 @@ export default function Rules({
                   ) : (
                     <span className="text-muted-foreground">任意</span>
                   )}
-                </td>
-                <td className="px-3 py-2 text-xs">
+                </Cell>
+                <Cell className="text-xs">
                   <Badge tone="info">{r.target_group}</Badge>
-                </td>
-                <td className="px-3 py-2 text-xs">
+                </Cell>
+                <Cell className="text-xs">
                   {r.conditions.length === 0 ? (
                     <span className="text-muted-foreground">无</span>
                   ) : (
@@ -130,18 +127,20 @@ export default function Rules({
                       ))}
                     </div>
                   )}
-                </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">
+                </Cell>
+                <Cell className="text-xs text-muted-foreground">
                   {r.last_run_at ? new Date(r.last_run_at * 1000).toLocaleString() : '—'}
                   {r.last_error && <div className="text-destructive">{r.last_error}</div>}
-                </td>
-                <td className="px-3 py-2">
-                  <div className="flex gap-1">
-                    <Button kind="ghost" onClick={() => setEditing(r)}>
+                </Cell>
+                <Cell sticky>
+                  <div className="flex justify-end gap-1.5">
+                    <Button kind="ghost" size="sm" onClick={() => setEditing(r)}>
                       编辑
                     </Button>
                     <Button
                       kind="ghost"
+                      size="sm"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                       onClick={async () => {
                         try {
                           await api.deleteRule(r.id)
@@ -155,8 +154,8 @@ export default function Rules({
                       删除
                     </Button>
                   </div>
-                </td>
-              </tr>
+                </Cell>
+              </Row>
             ))}
           </Table>
         )}
@@ -283,7 +282,7 @@ function RuleDialog({
             <Input value={r.name} onChange={(v) => set({ name: v })} placeholder="例如 绑定即提升" />
           </Field>
           <Field label="启用" hint="停用的规则不参与绑定触发，也不参与巡检">
-            <div className="pt-1">
+            <div className="flex h-8 items-center">
               <Switch
                 checked={r.enabled}
                 onChange={(v) => set({ enabled: v })}
@@ -293,27 +292,26 @@ function RuleDialog({
           </Field>
         </div>
 
-        <div className="rounded-md border border-border p-3">
-          <div className="mb-3 text-xs font-medium text-muted-foreground">触发条件（至少选一个）</div>
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            <Switch
-              checked={r.on_bind}
-              onChange={(v) => set({ on_bind: v })}
-              label="绑定成功时立即执行"
+        <Fieldset legend="触发条件（至少选一个）">
+          <Switch
+            checked={r.on_bind}
+            onChange={(v) => set({ on_bind: v })}
+            label="绑定成功时立即执行"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">巡检周期</span>
+            <Input
+              type="number"
+              min={0}
+              value={r.interval_minutes}
+              onChange={(v) => set({ interval_minutes: Number(v) })}
+              ariaLabel="巡检周期（分钟）"
+              className="w-20"
+              inputMode="numeric"
             />
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">巡检周期</span>
-              <input
-                type="number"
-                min={0}
-                value={r.interval_minutes}
-                onChange={(e) => set({ interval_minutes: Number(e.target.value) })}
-                className="w-20 rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus:border-ring"
-              />
-              <span className="text-xs text-muted-foreground">分钟（0 = 不巡检）</span>
-            </div>
+            <span className="text-xs text-muted-foreground">分钟（0 = 不巡检）</span>
           </div>
-        </div>
+        </Fieldset>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="源分组" hint="可多选；留空 = 任意分组">
@@ -323,6 +321,7 @@ function RuleDialog({
               onChange={(v) => set({ source_groups: v })}
               allText="任意分组"
               emptyText="未读取到 new-api 分组（请在「连接配置」确认账号可登录）"
+              ariaLabel="源分组"
             />
           </Field>
           <Field label="目标分组" hint="账号被移动到这个分组">
@@ -330,6 +329,7 @@ function RuleDialog({
               value={r.target_group}
               onChange={(v) => set({ target_group: v })}
               className="w-full"
+              ariaLabel="目标分组"
             >
               <option value="">请选择</option>
               {targetOptions.map((g) => (
@@ -342,41 +342,49 @@ function RuleDialog({
         </div>
 
         <div>
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-medium text-foreground/80">
               附加条件（全部满足才触发；留空 = 只按触发条件）
             </span>
-            <Button onClick={addCondition}>添加条件</Button>
+            <Button size="sm" onClick={addCondition}>
+              添加条件
+            </Button>
           </div>
           {r.conditions.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-[11px] leading-4 text-muted-foreground">
               无条件：所有匹配源分组的绑定成员都会被转换。
             </p>
           ) : (
             <div className="space-y-2">
               {r.conditions.map((c, i) => (
                 <div key={i} className="flex flex-wrap items-center gap-2">
-                  <Select value={c.type} onChange={(v) => setCondition(i, { type: v })}>
+                  <Select
+                    value={c.type}
+                    onChange={(v) => setCondition(i, { type: v })}
+                    ariaLabel="条件类型"
+                  >
                     {meta?.condition_types.map((t) => (
                       <option key={t.value} value={t.value}>
                         {t.label}
                       </option>
                     ))}
                   </Select>
-                  <Select value={c.op} onChange={(v) => setCondition(i, { op: v })}>
+                  <Select value={c.op} onChange={(v) => setCondition(i, { op: v })} ariaLabel="比较运算符">
                     {meta?.operators.map((o) => (
                       <option key={o} value={o}>
                         {o}
                       </option>
                     ))}
                   </Select>
-                  <input
+                  <Input
                     type="number"
                     value={c.value}
-                    onChange={(e) => setCondition(i, { value: Number(e.target.value) })}
-                    className="w-28 rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus:border-ring"
+                    onChange={(v) => setCondition(i, { value: Number(v) })}
+                    ariaLabel="条件数值"
+                    className="w-28"
+                    inputMode="numeric"
                   />
-                  <Button kind="ghost" onClick={() => removeCondition(i)}>
+                  <Button kind="ghost" size="sm" onClick={() => removeCondition(i)}>
                     移除
                   </Button>
                 </div>
@@ -385,11 +393,7 @@ function RuleDialog({
           )}
         </div>
 
-        {problemText && (
-          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {problemText}
-          </p>
-        )}
+        {problemText && <WarnNote>{problemText}</WarnNote>}
       </div>
     </Modal>
   )

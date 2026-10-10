@@ -3,7 +3,7 @@ import { api, type AuthState, type Bootstrap, type CheckResult, type Config, typ
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Empty, ErrorNote, Field, Input, Modal, OkNote, Select, Switch, Table } from './ui'
+import { Badge, Button, Card, Cell, Empty, ErrorNote, Field, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -105,39 +105,66 @@ export default function App() {
 
   return (
     <div className="min-h-full">
-      <header className="border-b border-border bg-background">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <div className="flex items-baseline gap-3">
-            <h1 className="text-base font-semibold">QQBot 群监测</h1>
-            <span className="hidden text-xs text-muted-foreground sm:inline">QQ 群与 new-api 账号绑定</span>
+      <header className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span
+              aria-hidden="true"
+              className="flex size-7 shrink-0 items-center justify-center rounded-control bg-primary text-primary-foreground"
+            >
+              <svg viewBox="0 0 16 16" className="size-3.5">
+                <path
+                  d="M2.5 4.5h11M2.5 8h7.5M2.5 11.5h9.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </span>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold tracking-tight">QQBot 群监测</h1>
+              <p className="hidden truncate text-[11px] text-muted-foreground sm:block">
+                QQ 群与 new-api 账号绑定
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2">
             {boot && (
               <Badge tone={boot.configured ? 'ok' : 'warn'}>
                 {boot.configured ? '已配置' : '未配置'}
               </Badge>
             )}
-            <span className="text-xs text-muted-foreground">{auth.username}</span>
+            <span className="hidden text-xs text-muted-foreground sm:inline">{auth.username}</span>
             <ThemeToggle />
-            <Button kind="ghost" onClick={logout}>
+            <Button kind="ghost" onClick={logout} title="退出登录">
               退出
             </Button>
           </div>
         </div>
-        <nav className="mx-auto flex max-w-6xl gap-1 px-4">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${
-                tab === t.id
-                  ? 'border-primary text-foreground'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        {/*
+          The strip scrolls rather than wraps: six tabs wrapped to 81px each on a
+          390px screen against 38px on desktop, which doubled the header for no
+          extra information.
+        */}
+        <nav className="mx-auto max-w-6xl px-4">
+          <div className="tab-strip -mb-px flex gap-1 overflow-x-auto">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                aria-current={tab === t.id ? 'page' : undefined}
+                onClick={() => setTab(t.id)}
+                className={`shrink-0 border-b-2 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
+                  tab === t.id
+                    ? 'border-primary font-medium text-foreground'
+                    : 'border-transparent text-muted-foreground hover:border-border hover:text-foreground'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </nav>
       </header>
 
@@ -219,12 +246,18 @@ function Overview({
           <Stat label="今日已签到" value={checked} />
           <Stat label="今日已发放" value={awarded} />
         </div>
-        <p className="mt-3 text-xs text-muted-foreground">
-          统计日期 {members?.date ?? '-'}　·　监测群 {boot?.groups?.filter((g) => g.enabled).length ?? 0} 个
+        <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
+          <span>统计日期 {members?.date ?? '-'}</span>
+          <span aria-hidden="true">·</span>
+          <span>监测群 {boot?.groups?.filter((g) => g.enabled).length ?? 0} 个</span>
         </p>
       </Card>
 
-      <Card title="手动执行" actions={busy ? <Badge tone="accent">执行中…</Badge> : null}>
+      <Card
+        title="手动执行"
+        description="这些操作也会按各自的周期自动执行；这里的按钮用于立即触发一次。"
+        actions={busy ? <Badge tone="accent">执行中…</Badge> : null}
+      >
         <div className="flex flex-wrap gap-2">
           <Button kind="primary" disabled={!!busy} onClick={() => run('sync', '同步成员')}>
             同步成员
@@ -242,9 +275,6 @@ function Overview({
             发放奖励
           </Button>
         </div>
-        <p className="mt-3 text-xs text-muted-foreground">
-          这些操作也会按各自的周期自动执行；这里的按钮用于立即触发一次。
-        </p>
       </Card>
     </>
   )
@@ -252,9 +282,9 @@ function Overview({
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-md border border-border bg-background px-3 py-2">
+    <div className="rounded-panel border border-border bg-background px-3 py-2.5">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 text-xl font-semibold">{value}</div>
+      <div className="mt-1 text-xl leading-7 font-semibold tabular-nums">{value}</div>
     </div>
   )
 }
@@ -329,6 +359,7 @@ function Groups({
   return (
     <Card
       title="监测群"
+      description="用开关选择要监测的群。新发现的群默认不监测，需要手动打开。"
       actions={
         <>
           <Button disabled={busy} onClick={refresh}>
@@ -340,26 +371,23 @@ function Groups({
         </>
       }
     >
-      <p className="mb-3 text-xs text-muted-foreground">
-        用开关选择要监测的群。新发现的群默认<b>不监测</b>，需要手动打开。
-      </p>
       {groups.length === 0 ? (
         <Empty>还没有群。点「从 QQ 刷新」读取机器人账号所在的群。</Empty>
       ) : (
         <Table head={['监测', '群号', '群名', '人数']}>
           {groups.map((g) => (
-            <tr key={g.group_id} className="border-b border-border/60">
-              <td className="px-3 py-2">
+            <Row key={g.group_id}>
+              <Cell>
                 <Switch
                   checked={selected.has(g.group_id)}
                   onChange={() => toggle(g.group_id)}
                   label={selected.has(g.group_id) ? '已监测' : '未监测'}
                 />
-              </td>
-              <td className="px-3 py-2 font-mono text-xs">{g.group_id}</td>
-              <td className="px-3 py-2">{g.group_name}</td>
-              <td className="px-3 py-2 text-muted-foreground">{g.member_count}</td>
-            </tr>
+              </Cell>
+              <Cell className="font-mono text-xs">{g.group_id}</Cell>
+              <Cell>{g.group_name}</Cell>
+              <Cell className="text-muted-foreground tabular-nums">{g.member_count}</Cell>
+            </Row>
           ))}
         </Table>
       )}
@@ -515,54 +543,69 @@ function Users({
         }
       >
         {s && (
-          <p className="mb-3 text-xs text-muted-foreground">
-            共 {s.total} 行　·　在群 {s.in_group}　·　已退群 {s.left}　·　已绑定 {s.bound}　·　未绑定{' '}
-            {s.unbound}　·　未进群账号 {s.not_joined}
+          <p className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <span>共 {s.total} 行</span>
+            <span aria-hidden="true">·</span>
+            <span>在群 {s.in_group}</span>
+            <span aria-hidden="true">·</span>
+            <span>已退群 {s.left}</span>
+            <span aria-hidden="true">·</span>
+            <span>已绑定 {s.bound}</span>
+            <span aria-hidden="true">·</span>
+            <span>未绑定 {s.unbound}</span>
+            <span aria-hidden="true">·</span>
+            <span>未进群账号 {s.not_joined}</span>
           </p>
         )}
 
-        <div className="mb-3 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          <Field label="绑定状态">
-            <Select value={bound} onChange={(v) => setBound(v as typeof bound)} className="w-full">
-              <option value="">全部</option>
-              <option value="bound">已绑定</option>
-              <option value="unbound">未绑定</option>
-            </Select>
-          </Field>
-          <Field label="群状态">
-            <Select value={inGroup} onChange={(v) => setInGroup(v as typeof inGroup)} className="w-full">
-              <option value="">全部</option>
-              <option value="in">在群</option>
-              <option value="out">已退群 / 未进群</option>
-            </Select>
-          </Field>
-          <Field label="分组">
-            <Select value={group} onChange={setGroup} className="w-full">
-              <option value="">全部分组</option>
-              {groups.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="类型">
-            <Select value={kind} onChange={(v) => setKind(v as typeof kind)} className="w-full">
-              <option value="">全部</option>
-              <option value="member">在群成员</option>
-              <option value="left">已退群成员</option>
-              <option value="account">未进群账号</option>
-            </Select>
-          </Field>
-          <Field label="搜索" hint="QQ / 昵称 / new-api 用户名 / 邮箱">
-            <Input value={q} onChange={setQ} placeholder="例如 54321 或 alice" />
-          </Field>
+        <div className="mb-4 flex flex-wrap items-end gap-3">
+          <div className="grid min-w-0 flex-1 basis-full gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <Field label="绑定状态">
+              <Select value={bound} onChange={(v) => setBound(v as typeof bound)} className="w-full">
+                <option value="">全部</option>
+                <option value="bound">已绑定</option>
+                <option value="unbound">未绑定</option>
+              </Select>
+            </Field>
+            <Field label="群状态">
+              <Select value={inGroup} onChange={(v) => setInGroup(v as typeof inGroup)} className="w-full">
+                <option value="">全部</option>
+                <option value="in">在群</option>
+                <option value="out">已退群 / 未进群</option>
+              </Select>
+            </Field>
+            <Field label="分组">
+              <Select value={group} onChange={setGroup} className="w-full">
+                <option value="">全部分组</option>
+                {groups.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="类型">
+              <Select value={kind} onChange={(v) => setKind(v as typeof kind)} className="w-full">
+                <option value="">全部</option>
+                <option value="member">在群成员</option>
+                <option value="left">已退群成员</option>
+                <option value="account">未进群账号</option>
+              </Select>
+            </Field>
+            <Field label="搜索" hint="QQ / 昵称 / new-api 用户名 / 邮箱">
+              <Input value={q} onChange={setQ} placeholder="例如 54321 或 alice" />
+            </Field>
+          </div>
+          {/* Clearing sits with the controls that set the filters, not below the table. */}
+          <Button kind="ghost" onClick={resetFilters} disabled={busy}>
+            清除筛选
+          </Button>
         </div>
 
         {selected.size > 0 && (
-          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-2">
-            <span className="text-xs">已选 {selected.size} 个账号</span>
-            <Select value={batchGroup} onChange={setBatchGroup}>
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-panel border border-primary/40 bg-primary/5 px-3 py-2">
+            <span className="text-xs font-medium">已选 {selected.size} 个账号</span>
+            <Select value={batchGroup} onChange={setBatchGroup} ariaLabel="批量调整的目标分组">
               <option value="">选择目标分组…</option>
               {groups.map((g) => (
                 <option key={g} value={g}>
@@ -585,73 +628,120 @@ function Users({
             new-api 同步账号」。
           </Empty>
         ) : (
-          <>
-            <Table
-              head={[
+          <Table
+            stickyEnd={1}
+            head={[
+              <label
+                key="all"
+                className="flex size-6 cursor-pointer items-center justify-center"
+                title="全选可调整的账号"
+              >
                 <input
-                  key="all"
                   type="checkbox"
+                  className="size-4"
                   checked={selectable.length > 0 && selected.size === selectable.length}
                   onChange={toggleAll}
-                  title="全选可调整的账号"
-                />,
-                'QQ',
-                '昵称',
-                'new-api 账号',
-                '分组',
-                '绑定方式',
-                '今日已签到',
-                '累计天数',
-                '今日奖励',
-                '操作',
-              ]}
-            >
-              {items.map((m) => (
-                <tr key={`${m.kind}-${m.qq}-${m.newapi_user_id ?? 0}`} className="border-b border-border/60">
-                  <td className="px-3 py-2">
-                    {m.newapi_user_id ? (
+                  aria-label="全选可调整的账号"
+                />
+              </label>,
+              'QQ',
+              '昵称',
+              'new-api 账号',
+              '分组',
+              '绑定方式',
+              '今日已签到',
+              '累计天数',
+              '今日奖励',
+              '操作',
+            ]}
+          >
+            {items.map((m) => (
+              <Row key={`${m.kind}-${m.qq}-${m.newapi_user_id ?? 0}`}>
+                <Cell>
+                  {m.newapi_user_id ? (
+                    // The label carries the hit area: a bare 14px checkbox is well
+                    // under the 24x24 minimum target size on a touch screen.
+                    <label className="flex size-6 cursor-pointer items-center justify-center">
                       <input
                         type="checkbox"
+                        className="size-4"
                         checked={selected.has(m.newapi_user_id)}
                         onChange={() => toggle(m.newapi_user_id!)}
+                        aria-label={`选择账号 #${m.newapi_user_id}`}
                       />
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs">{m.qq || '—'}</td>
-                  <td className="px-3 py-2">
+                    </label>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </Cell>
+                <Cell className="font-mono text-xs">{m.qq || '—'}</Cell>
+                <Cell>
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
                     {m.nickname || '—'}
-                    {m.kind === 'account' && (
-                      <span className="ml-1">
-                        <Badge tone="info">未进群</Badge>
-                      </span>
-                    )}
-                    {m.kind === 'left' && (
-                      <span className="ml-1">
-                        <Badge tone="warn">已退群</Badge>
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {m.bound || m.kind === 'account' ? (
-                      <span>
-                        {m.newapi_username || '—'}
-                        <span className="ml-1 text-xs text-muted-foreground">#{m.newapi_user_id}</span>
-                      </span>
-                    ) : (
-                      <Badge tone="warn">未绑定</Badge>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {m.newapi_user_id ? (
-                      <Select
-                        value={m.newapi_group ?? ''}
-                        onChange={async (v) => {
-                          if (!v || v === m.newapi_group) return
+                    {m.kind === 'account' && <Badge tone="info">未进群</Badge>}
+                    {m.kind === 'left' && <Badge tone="warn">已退群</Badge>}
+                  </span>
+                </Cell>
+                <Cell>
+                  {m.bound || m.kind === 'account' ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      {m.newapi_username || '—'}
+                      <span className="text-xs text-muted-foreground">#{m.newapi_user_id}</span>
+                    </span>
+                  ) : (
+                    <Badge tone="warn">未绑定</Badge>
+                  )}
+                </Cell>
+                <Cell>
+                  {m.newapi_user_id ? (
+                    <Select
+                      value={m.newapi_group ?? ''}
+                      ariaLabel={`账号 #${m.newapi_user_id} 的分组`}
+                      onChange={async (v) => {
+                        if (!v || v === m.newapi_group) return
+                        try {
+                          await api.setUserGroup(m.newapi_user_id!, v)
+                          onDone(`已把 #${m.newapi_user_id} 调整到「${v}」`)
+                          await load()
+                          await onRefresh()
+                        } catch (e) {
+                          onFail(e)
+                        }
+                      }}
+                    >
+                      <option value={m.newapi_group ?? ''}>{m.newapi_group || '—'}</option>
+                      {groups
+                        .filter((g) => g !== m.newapi_group)
+                        .map((g) => (
+                          <option key={g} value={g}>
+                            {g}
+                          </option>
+                        ))}
+                    </Select>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </Cell>
+                <Cell className="text-xs text-muted-foreground">{m.bind_source || '—'}</Cell>
+                <Cell>
+                  {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
+                </Cell>
+                <Cell className="tabular-nums">{m.checkin_days}</Cell>
+                <Cell className="tabular-nums">{m.reward_today || '—'}</Cell>
+                <Cell sticky>
+                  <div className="flex justify-end gap-1.5">
+                    <Button kind="ghost" size="sm" onClick={() => setEditing(m)}>
+                      {m.bound ? '换绑' : m.kind === 'account' ? '绑定 QQ' : '绑定'}
+                    </Button>
+                    {m.bound && (
+                      <Button
+                        kind="ghost"
+                        size="sm"
+                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={async () => {
                           try {
-                            await api.setUserGroup(m.newapi_user_id!, v)
-                            onDone(`已把 #${m.newapi_user_id} 调整到「${v}」`)
+                            await api.deleteBinding(m.qq)
+                            onDone(`已解绑 ${m.qq}`)
                             await load()
                             await onRefresh()
                           } catch (e) {
@@ -659,58 +749,14 @@ function Users({
                           }
                         }}
                       >
-                        <option value={m.newapi_group ?? ''}>{m.newapi_group || '—'}</option>
-                        {groups
-                          .filter((g) => g !== m.newapi_group)
-                          .map((g) => (
-                            <option key={g} value={g}>
-                              {g}
-                            </option>
-                          ))}
-                      </Select>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{m.bind_source || '—'}</td>
-                  <td className="px-3 py-2">
-                    {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
-                  </td>
-                  <td className="px-3 py-2">{m.checkin_days}</td>
-                  <td className="px-3 py-2">{m.reward_today || '—'}</td>
-                  <td className="px-3 py-2">
-                    <div className="flex gap-1">
-                      <Button kind="ghost" onClick={() => setEditing(m)}>
-                        {m.bound ? '换绑' : m.kind === 'account' ? '绑定 QQ' : '绑定'}
+                        解绑
                       </Button>
-                      {m.bound && (
-                        <Button
-                          kind="ghost"
-                          onClick={async () => {
-                            try {
-                              await api.deleteBinding(m.qq)
-                              onDone(`已解绑 ${m.qq}`)
-                              await load()
-                              await onRefresh()
-                            } catch (e) {
-                              onFail(e)
-                            }
-                          }}
-                        >
-                          解绑
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </Table>
-            <div className="mt-2 flex justify-end">
-              <Button kind="ghost" onClick={resetFilters}>
-                清除筛选
-              </Button>
-            </div>
-          </>
+                    )}
+                  </div>
+                </Cell>
+              </Row>
+            ))}
+          </Table>
         )}
       </Card>
 
@@ -819,9 +865,9 @@ function RebindDialog({
         </>
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-4">
         <Field label="QQ 号" hint="从群成员里选择">
-          <Select value={qq} onChange={setQQ} className="w-full">
+          <Select value={qq} onChange={setQQ} className="w-full" ariaLabel="选择 QQ 号">
             <option value="">请选择</option>
             {qqOptions.map((o) => (
               <option key={o.value} value={o.value}>
@@ -831,7 +877,7 @@ function RebindDialog({
           </Select>
         </Field>
         <Field label="new-api 账号" hint="从已同步的账号里选择；账号邮箱是 qq@qq.com 时通常可自动绑定">
-          <Select value={accountID} onChange={setAccountID} className="w-full">
+          <Select value={accountID} onChange={setAccountID} className="w-full" ariaLabel="选择 new-api 账号">
             <option value="">请选择</option>
             {accountOptions.map((o) => (
               <option key={o.value} value={o.value}>
@@ -841,10 +887,11 @@ function RebindDialog({
           </Select>
         </Field>
         {accountOptions.length <= 1 && (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-[11px] leading-4 text-muted-foreground">
             账号列表为空？先在上方点「同步 new-api 账号」把账号拉取下来。
           </p>
         )}
+        {problem && <WarnNote>{problem}</WarnNote>}
       </div>
     </Modal>
   )
@@ -894,13 +941,14 @@ function SettingsView({
     <>
       <Card
         title="监测设置"
+        description="巡检周期与奖励规则；保存后立即生效。"
         actions={
           <Button kind="primary" disabled={busy} onClick={save}>
-            保存
+            {busy ? '保存中…' : '保存'}
           </Button>
         }
       >
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
           <Field
             label="成员列表巡检"
             hint="兜底功能。新成员进群会立即记录，绑定成功也会立即记录；关闭后只在成员变动时同步昵称等资料。"
@@ -911,13 +959,16 @@ function SettingsView({
                 onChange={(v) => setS({ ...s, member_patrol_enabled: v })}
                 label={s.member_patrol_enabled ? '已启用' : '已停用'}
               />
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Input
                   type="number"
+                  min={0}
                   value={s.member_sync_minutes}
                   onChange={num('member_sync_minutes')}
+                  ariaLabel="成员列表巡检间隔（分钟）"
+                  className="w-20"
                 />
-                <span className="whitespace-nowrap text-xs text-muted-foreground">分钟</span>
+                <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
               </div>
             </div>
           </Field>
@@ -931,37 +982,40 @@ function SettingsView({
                 onChange={(v) => setS({ ...s, checkin_patrol_enabled: v })}
                 label={s.checkin_patrol_enabled ? '已启用' : '已停用'}
               />
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Input
                   type="number"
+                  min={0}
                   value={s.checkin_sync_minutes}
                   onChange={num('checkin_sync_minutes')}
+                  ariaLabel="打卡榜巡检间隔（分钟）"
+                  className="w-20"
                 />
-                <span className="whitespace-nowrap text-xs text-muted-foreground">分钟</span>
+                <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
               </div>
             </div>
           </Field>
           <Field label="签到奖励下限（quota）">
-            <Input type="number" value={s.reward_min} onChange={num('reward_min')} />
+            <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
           </Field>
           <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
-            <Input type="number" value={s.reward_max} onChange={num('reward_max')} />
+            <Input type="number" min={0} value={s.reward_max} onChange={num('reward_max')} className="w-40" />
           </Field>
           <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
-            <Input value={s.timezone} onChange={str('timezone')} />
+            <Input value={s.timezone} onChange={str('timezone')} className="w-56" />
           </Field>
         </div>
       </Card>
 
-      <Card title={`修改密码（${username}）`}>
-        <div className="grid gap-4 sm:grid-cols-3">
+      <Card title="修改密码" description={`当前管理账号：${username}`}>
+        <div className="grid items-end gap-4 sm:grid-cols-3">
           <Field label="当前密码">
-            <Input type="password" value={cur} onChange={setCur} />
+            <Input type="password" value={cur} onChange={setCur} autoComplete="current-password" />
           </Field>
           <Field label="新密码" hint="至少 8 位">
-            <Input type="password" value={next} onChange={setNext} />
+            <Input type="password" value={next} onChange={setNext} autoComplete="new-password" />
           </Field>
-          <div className="flex items-end">
+          <div>
             <Button
               disabled={busy}
               onClick={async () => {
@@ -996,10 +1050,10 @@ function SettingsView({
  */
 function CheckList({ results }: { results: CheckResult[] }) {
   return (
-    <div className="mt-3 space-y-1.5">
+    <ul className="mt-3 space-y-1.5 border-t border-border pt-3">
       {results.map((r) => (
-        <div key={r.name} className="flex items-start gap-2 text-xs">
-          <span className="w-32 shrink-0 text-muted-foreground">{r.name}</span>
+        <li key={r.name} className="flex items-start gap-2 text-xs">
+          <span className="w-28 shrink-0 text-muted-foreground sm:w-32">{r.name}</span>
           {r.skipped ? (
             <Badge>跳过</Badge>
           ) : r.ok ? (
@@ -1010,9 +1064,9 @@ function CheckList({ results }: { results: CheckResult[] }) {
           <span className={`min-w-0 break-all ${r.ok ? 'text-muted-foreground' : 'text-destructive'}`}>
             {r.error || r.detail}
           </span>
-        </div>
+        </li>
       ))}
-    </div>
+    </ul>
   )
 }
 
@@ -1115,6 +1169,7 @@ function Connection({
     <div className="space-y-4">
       <Card
         title="new-api 管理员账号"
+        description="服务用这个账号登录 new-api 读取账号列表、调整分组与发放奖励。"
         actions={
           <>
             <Button disabled={busy !== ''} onClick={testNewAPI}>
@@ -1128,12 +1183,18 @@ function Connection({
       >
         <div className="grid gap-4 sm:grid-cols-3">
           <Field label="URL" hint="例如 https://api.example.com">
-            <Input value={c.newapi.url} onChange={(v) => setC({ ...c, newapi: { ...c.newapi, url: v } })} />
+            <Input
+              value={c.newapi.url}
+              onChange={(v) => setC({ ...c, newapi: { ...c.newapi, url: v } })}
+              inputMode="text"
+              autoComplete="url"
+            />
           </Field>
           <Field label="账号">
             <Input
               value={c.newapi.username}
               onChange={(v) => setC({ ...c, newapi: { ...c.newapi, username: v } })}
+              autoComplete="username"
             />
           </Field>
           <Field label="密码" hint="留空或保持 ******** 表示不修改">
@@ -1141,6 +1202,7 @@ function Connection({
               type="password"
               value={c.newapi.password}
               onChange={(v) => setC({ ...c, newapi: { ...c.newapi, password: v } })}
+              autoComplete="new-password"
             />
           </Field>
         </div>
@@ -1149,6 +1211,7 @@ function Connection({
 
       <Card
         title="NapCat"
+        description="服务通过 NapCat 读取群成员与打卡榜、接收进群事件。"
         actions={
           <>
             <Button onClick={() => setAutoOpen(true)} disabled={busy !== ''}>
@@ -1163,10 +1226,12 @@ function Connection({
           </>
         }
       >
-        <p className="mb-4 text-xs text-muted-foreground">
-          只填 <b>WebUI 地址</b>与 <b>WebUI Token</b>，点「自动配置」即可：服务会登录 NapCat，
-          自动开启 OneBot 的 HTTP 与 WebSocket 适配器，并把下面的 OneBot / 事件地址与 token 一并填好。
-        </p>
+        <div className="mb-4 flex flex-wrap items-start gap-2 rounded-panel border border-info/40 bg-info/10 px-3 py-2.5 text-xs text-info">
+          <span className="min-w-0 leading-5">
+            只填 <b>WebUI 地址</b>与 <b>WebUI Token</b>，点「自动配置」即可：服务会登录 NapCat，
+            自动开启 OneBot 的 HTTP 与 WebSocket 适配器，并把下面的 OneBot / 事件地址与 token 一并填好。
+          </span>
+        </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="WebUI 地址" hint="浏览器里打开 NapCat 面板的地址，例如 http://127.0.0.1:6099">
             <Input
@@ -1179,6 +1244,7 @@ function Connection({
               type="password"
               value={c.napcat.webui_token}
               onChange={(v) => setC({ ...c, napcat: { ...c.napcat, webui_token: v } })}
+              autoComplete="new-password"
             />
           </Field>
           <Field label="OneBot HTTP URL" hint="巡检调用动作走这里；自动配置会填好">
@@ -1192,6 +1258,7 @@ function Connection({
               type="password"
               value={c.napcat.onebot_token}
               onChange={(v) => setC({ ...c, napcat: { ...c.napcat, onebot_token: v } })}
+              autoComplete="new-password"
             />
           </Field>
           <Field label="事件 WebSocket URL（可选）" hint="接收新成员进群与绑定指令；留空也能工作，只是反应慢一些">
@@ -1205,6 +1272,7 @@ function Connection({
               type="password"
               value={c.napcat.event_ws_token}
               onChange={(v) => setC({ ...c, napcat: { ...c.napcat, event_ws_token: v } })}
+              autoComplete="new-password"
             />
           </Field>
         </div>
@@ -1296,7 +1364,7 @@ function AutoConfigureNapCat({
       }
     >
       <div className="space-y-4">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-xs leading-5 text-muted-foreground">
           服务会用它登录 NapCat，开启 OneBot 的 HTTP 与 WebSocket 适配器（无需重启），并把得到的地址与
           token 写回「连接配置」。
         </p>
@@ -1307,23 +1375,21 @@ function AutoConfigureNapCat({
           label="WebUI Token"
           hint={config.napcat.webui_token ? '留空则沿用已保存的 Token' : '首次配置必填'}
         >
-          <Input type="password" value={token} onChange={setToken} />
+          <Input type="password" value={token} onChange={setToken} autoComplete="new-password" />
         </Field>
-        <button
-          type="button"
-          className="text-xs text-muted-foreground underline"
-          onClick={() => setShowAdvanced((v) => !v)}
-        >
-          {showAdvanced ? '收起高级选项' : '高级选项（适配器端口）'}
-        </button>
+        <div>
+          <Button kind="ghost" size="sm" onClick={() => setShowAdvanced((v) => !v)}>
+            {showAdvanced ? '收起高级选项' : '高级选项（适配器端口）'}
+          </Button>
+        </div>
         {showAdvanced && (
-          <div className="space-y-4">
+          <Fieldset legend="适配器端口" hint="不确定就留默认值；服务与 NapCat 同机时用默认端口即可。">
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="OneBot HTTP 端口">
-                <Input value={httpPort} onChange={setHTTPPort} />
+                <Input value={httpPort} onChange={setHTTPPort} inputMode="numeric" />
               </Field>
               <Field label="OneBot WebSocket 端口">
-                <Input value={wsPort} onChange={setWSPort} />
+                <Input value={wsPort} onChange={setWSPort} inputMode="numeric" />
               </Field>
             </div>
             <Field
@@ -1332,7 +1398,7 @@ function AutoConfigureNapCat({
             >
               <Input value={bindHost} onChange={setBindHost} placeholder="0.0.0.0" />
             </Field>
-          </div>
+          </Fieldset>
         )}
       </div>
     </Modal>
