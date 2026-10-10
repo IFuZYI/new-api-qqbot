@@ -112,7 +112,17 @@ below) and never as part of `go test`.
   must be re-obtained (tolerating the login rate limit) after a restart.
 - **`get_group_signed_list` errors when a group has no sign-in board**, and
   returns only today's page. Treat it as a union across polls; a group without a
-  board is normal, not a failure.
+  board is normal, not a failure — the client reports it as
+  `napcat.ErrNoSigninBoard` so a sweep can ignore it without hiding real errors.
+  A board's `rank` is fractional (NapCat computes `(rank-1)/2+1`), so it is
+  decoded as a float and rounded for storage; an int field loses the whole page.
+- **The user search is paginated.** `FindUserByEmail` pages through
+  `/api/user/search` because a real exact match can sort past the first page, and
+  reading only page 1 reports the member as unbound forever.
+- **SQLite runs on a single connection.** The member and check-in patrols write
+  from separate goroutines; with two connections they can each hold a read lock
+  and then both try to upgrade, which deadlocks and `busy_timeout` does not
+  cover. Serialising at the pool (plus WAL) removes that path.
 - **NapCat's OneBot config can be rewritten live** over the WebUI
   (`/api/OB11Config/SetConfig` → save + reload), so enabling an adapter needs no
   restart — do not claim otherwise.
