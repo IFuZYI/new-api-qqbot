@@ -10,6 +10,11 @@
 /web/node_modules/
 /web/dist/
 
+# secrets - the admin credential lives here, never commit it
+.env
+.env.*
+!.env.example
+
 # scratch
 /tmp/
 

@@ -433,3 +433,200 @@ func TestFirstBumpInvalidatesPreExistingCookies(t *testing.T) {
 		t.Errorf("a cookie from before the first bump still works (%d)", resp.StatusCode)
 	}
 }
+
+// ---------- admin provisioned from the environment ----------
+
+// newBareRouter is newBareServer plus the Router itself, so startup behaviour
+// (which runs before any HTTP request) can be exercised directly.
+func newBareRouter(t *testing.T) (*Router, *store.Store, *httptest.Server, *http.Client) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	svc := service.New(st, fakeGateway{}, fakeQQ{})
+	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
+	r := NewRouter(st, svc, cfgMgr, t.TempDir())
+	srv := httptest.NewServer(r.Handler())
+	t.Cleanup(srv.Close)
+
+	jar, _ := cookiejar.New(nil)
+	return r, st, srv, &http.Client{Jar: jar}
+}
+
+func TestEnsureAdminFromEnvCreatesTheAdmin(t *testing.T) {
+	r, st, srv, cl := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{
+		Set: true, Username: "admin", Password: "hunter2hunter2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := st.GetAdmin("admin")
+	if err != nil {
+		t.Fatalf("the admin was not created: %v", err)
+	}
+	if !checkPassword(a.PasswordHash, "hunter2hunter2") {
+		t.Error("the stored hash does not match the configured password")
+	}
+
+	// The panel must not ask for first-run setup any more.
+	var got struct {
+		NeedsSetup bool `json:"needs_setup"`
+	}
+	getJSONWith(t, cl, srv.URL+"/api/auth/state", &got)
+	if got.NeedsSetup {
+		t.Error("setup should not be needed once the env admin exists")
+	}
+
+	// And the configured credential must actually sign in.
+	if code, _ := post(t, cl, srv.URL+"/api/auth/login",
+		`{"username":"admin","password":"hunter2hunter2"}`); code != 200 {
+		t.Errorf("login with the configured credential failed: %d", code)
+	}
+}
+
+// The env value is authoritative: changing it and restarting must reset the
+// password, which is the documented recovery path when it is lost.
+func TestEnsureAdminFromEnvResetsAnExistingPassword(t *testing.T) {
+	r, st, _, _ := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "oldpassword1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "newpassword2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ := st.GetAdmin("admin")
+	if !checkPassword(a.PasswordHash, "newpassword2") {
+		t.Error("the password was not reset to the configured value")
+	}
+	if checkPassword(a.PasswordHash, "oldpassword1") {
+		t.Error("the old password still works")
+	}
+	if n, _ := st.CountAdmins(); n != 1 {
+		t.Errorf("admin count = %d, want 1 (it must not create a second account)", n)
+	}
+}
+
+// Re-applying the same credential must be a no-op: every restart runs this, and
+// rewriting the hash each time would revoke every session on every restart.
+func TestEnsureAdminFromEnvIsIdempotent(t *testing.T) {
+	r, st, srv, cl := newBareRouter(t)
+
+	creds := config.AdminCreds{Set: true, Username: "admin", Password: "hunter2hunter2"}
+	if err := r.EnsureAdminFromEnv(creds); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.GetAdmin("admin")
+
+	if code, _ := post(t, cl, srv.URL+"/api/auth/login",
+		`{"username":"admin","password":"hunter2hunter2"}`); code != 200 {
+		t.Fatal("login should work")
+	}
+	if err := r.EnsureAdminFromEnv(creds); err != nil {
+		t.Fatal(err)
+	}
+
+	after, _ := st.GetAdmin("admin")
+	if before.PasswordHash != after.PasswordHash {
+		t.Error("an unchanged credential rewrote the hash, which would revoke sessions")
+	}
+	if code := getJSONWith(t, cl, srv.URL+"/api/bootstrap", nil); code != 200 {
+		t.Errorf("the session was invalidated by an unchanged env credential (%d)", code)
+	}
+}
+
+// A different configured username must not silently lock the existing account
+// out: it is added, and both keep working.
+func TestEnsureAdminFromEnvWithADifferentUsernameKeepsTheOldOne(t *testing.T) {
+	r, st, _, _ := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "hunter2hunter2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "root", Password: "hunter2hunter2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.GetAdmin("admin"); err != nil {
+		t.Error("the original admin was removed")
+	}
+	if _, err := st.GetAdmin("root"); err != nil {
+		t.Error("the newly configured admin was not created")
+	}
+}
+
+// An unset credential must leave whatever the WebUI set up alone.
+func TestEnsureAdminFromEnvUnsetIsANoOp(t *testing.T) {
+	r, st, _, _ := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "hunter2hunter2"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.GetAdmin("admin")
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.GetAdmin("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.PasswordHash != after.PasswordHash {
+		t.Error("an unset credential changed the stored password")
+	}
+}
+
+// A too-short configured password is refused rather than quietly weakening the
+// panel's only gate.
+func TestEnsureAdminFromEnvRejectsAShortPassword(t *testing.T) {
+	r, st, _, _ := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "short"}); err == nil {
+		t.Error("a password below the minimum length must be refused")
+	}
+	if n, _ := st.CountAdmins(); n != 0 {
+		t.Errorf("a rejected credential created %d admins", n)
+	}
+}
+
+// Resetting the password must invalidate sessions issued before it, which is
+// how a leaked cookie stops working.
+func TestEnsureAdminFromEnvResetRevokesSessions(t *testing.T) {
+	r, _, srv, cl := newBareRouter(t)
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "hunter2hunter2"}); err != nil {
+		t.Fatal(err)
+	}
+	post(t, cl, srv.URL+"/api/auth/login", `{"username":"admin","password":"hunter2hunter2"}`)
+
+	var stolen string
+	for _, c := range cl.Jar.(*cookiejar.Jar).Cookies(mustParse(t, srv.URL)) {
+		if c.Name == sessionCookie {
+			stolen = c.Value
+		}
+	}
+	if stolen == "" {
+		t.Fatal("no session cookie issued")
+	}
+
+	if err := r.EnsureAdminFromEnv(config.AdminCreds{Set: true, Username: "admin", Password: "rotated-pw-9"}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/bootstrap", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: stolen})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a cookie from before the reset still works (%d)", resp.StatusCode)
+	}
+}

@@ -74,6 +74,23 @@ func main() {
 	}, bindAdapter{svc}).Run(ctx)
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
+
+	// The admin credential can be provisioned from the environment (.env in the
+	// data directory, or the process environment). Doing this before the server
+	// accepts requests means a fresh instance is never briefly open to whoever
+	// reaches it first. Without it, the WebUI's first-run form creates the admin
+	// as before.
+	env, err := config.LoadEnv(*dataDir)
+	if err != nil {
+		log.Printf("warning: could not read the env file: %v", err)
+	}
+	if creds := config.AdminCredsFromEnv(env); creds.Set {
+		if err := router.EnsureAdminFromEnv(creds); err != nil {
+			log.Fatalf("configure admin from %s: %v", config.EnvAdminPassword, err)
+		}
+		log.Printf("admin %q configured from the environment", creds.Username)
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           router.Handler(),

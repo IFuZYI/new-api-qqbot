@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"qqbot/internal/config"
+	"qqbot/internal/store"
 )
 
 // sessionCookie is the WebUI's session cookie.
@@ -26,8 +29,6 @@ const sessionTTL = 7 * 24 * time.Hour
 // minPasswordLength is enforced at setup and when changing a password.
 const minPasswordLength = 8
 
-// setupMu serialises first-run setup, which is otherwise a check-then-create
-// race that concurrent requests can win several times.
 // sessionKeySetting holds the signing key for session cookies, generated on
 // first use. It lives in the database so logins survive a restart.
 const sessionKeySetting = "auth.session_key"
@@ -59,7 +60,6 @@ func (r *Router) loadSessionKey() ([]byte, error) {
 // password changed" take effect on cookies that were already issued.
 const authGenerationSetting = "auth.generation"
 
-// generation reads the current session generation, creating it on first use.
 // generation reads the current session generation. An absent row reads as 0
 // without writing one: this is the read path, hit by every request, and the
 // writer path (bumpGeneration) creates the row. Reading 0 for "unset" is also
@@ -165,6 +165,58 @@ func (r *Router) needsSetup() (bool, error) {
 		return false, err
 	}
 	return n == 0, nil
+}
+
+// EnsureAdminFromEnv creates or updates the WebUI admin from the credential
+// configured in the environment, and is meant to run at startup before the
+// server accepts requests.
+//
+// The environment is authoritative, which makes it both the way to provision a
+// fresh instance and the way to recover one whose password was lost: change the
+// value and restart. It is deliberately idempotent - an unchanged credential
+// leaves the stored hash alone, because rewriting it on every restart would
+// revoke every session each time the service comes up.
+func (r *Router) EnsureAdminFromEnv(c config.AdminCreds) error {
+	if !c.Set {
+		return nil
+	}
+	if len(c.Password) < minPasswordLength {
+		return fmt.Errorf("%s 至少 %d 位", config.EnvAdminPassword, minPasswordLength)
+	}
+
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
+
+	existing, err := r.st.GetAdmin(c.Username)
+	switch {
+	case err == nil && existing != nil:
+		if checkPassword(existing.PasswordHash, c.Password) {
+			return nil
+		}
+		hash, err := hashPassword(c.Password)
+		if err != nil {
+			return err
+		}
+		if err := r.st.SetAdminPassword(c.Username, hash); err != nil {
+			return err
+		}
+		// The password changed, so every session issued under the old one must
+		// stop working - the same rule the WebUI's change-password applies.
+		return r.bumpGeneration()
+
+	case errors.Is(err, store.ErrNotFound):
+		hash, err := hashPassword(c.Password)
+		if err != nil {
+			return err
+		}
+		// A configured username that differs from an existing one adds an
+		// account rather than replacing it, so a typo in the name cannot lock
+		// the operator out of the account they were using.
+		return r.st.CreateAdmin(c.Username, hash)
+
+	default:
+		return err
+	}
 }
 
 func (r *Router) setSessionCookie(w http.ResponseWriter, key []byte, username string) error {
