@@ -206,10 +206,14 @@ func (l *lazyGateway) waitForSession() error {
 //
 // This is the defect the review proved: client() imported the stored session
 // whenever it rebuilt the client, and a URL change rebuilds it.
+//
+// This covers the fresh-gateway branch (c == nil); the operator's own path — a
+// URL change on the running service, which keeps the gateway and takes the
+// l.key != key branch — is pinned by the test below.
 func TestStoredSessionIsNotSentToANewHost(t *testing.T) {
 	// Host A: the service logs in and persists its session.
 	stubA := &deadSessionGateway{}
-	srvA, st, mgr, gw := newGatewayEnvFor(t, stubA)
+	srvA, _, mgr, gw := newGatewayEnvFor(t, stubA)
 	if err := gw.waitForSession(); err != nil {
 		t.Fatalf("host A: could not establish a session: %v", err)
 	}
@@ -241,7 +245,49 @@ func TestStoredSessionIsNotSentToANewHost(t *testing.T) {
 			t.Fatalf("host B received host A's stored session verbatim — the credential leaked across hosts")
 		}
 	}
-	_ = st
+}
+
+// The same rule on the operator's actual path: the service is running against
+// host A, the operator edits the URL in the panel, and the NEXT call rebuilds
+// the client in place — the l.key != key branch, with a cached client already
+// present. That branch is where the import used to happen on a live config
+// change, so it needs its own witness: a fix that only covered the restart
+// (c == nil) path would leave the leak open here.
+func TestChangingTheURLOnALiveGatewayDoesNotReuseTheOldSession(t *testing.T) {
+	seen := make(chan string, 8)
+	stubA := &deadSessionGateway{}
+	_, _, mgr, gw := newGatewayEnvFor(t, stubA)
+	if err := gw.waitForSession(); err != nil {
+		t.Fatalf("host A: could not establish a session: %v", err)
+	}
+
+	// The operator repoints the running service at host B. Same gateway object:
+	// its cache is keyed on the config fingerprint, so the next call rebuilds.
+	stubB := &deadSessionGateway{seenRefresh: seen}
+	srvB := httptest.NewServer(stubB.handler())
+	t.Cleanup(srvB.Close)
+
+	cfgB := mgr.MustLoad()
+	cfgB.NewAPI.URL = srvB.URL
+	if err := mgr.Save(cfgB); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// A call on the SAME gateway must now reach host B, and must not carry
+	// host A's credential there.
+	if err := gw.waitForSession(); err != nil {
+		t.Fatalf("host B: the service must work after the URL change: %v", err)
+	}
+	if stubB.logins.Load() == 0 {
+		t.Error("the live gateway must log in to the new host, not silently keep using the old session")
+	}
+
+	close(seen)
+	for token := range seen {
+		if token == "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret" {
+			t.Fatalf("a live URL change sent host A's stored session to host B")
+		}
+	}
 }
 
 // newGatewayEnvFor points a lazyGateway at an arbitrary stub, with a real store
