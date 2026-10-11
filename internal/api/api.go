@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,8 +110,9 @@ func (r *Router) SetPatrolStatus(p PatrolStatus) { r.patrols = p }
 // SetPatrolRunner installs the on-demand patrol runner.
 func (r *Router) SetPatrolRunner(p PatrolRunner) { r.patrolRunner = p }
 
-// Handler returns the root handler.
-func (r *Router) Handler() http.Handler { return r.mux }
+// Handler returns the root handler: the mux with panic recovery wrapped around
+// it, so the pattern matching inside the mux is untouched.
+func (r *Router) Handler() http.Handler { return recoverPanics(r.mux) }
 
 func (r *Router) routes() {
 	// Authentication. These must be reachable without a session: the UI needs
@@ -178,20 +181,91 @@ func (r *Router) routes() {
 
 // ---------- helpers ----------
 
+// maxBodyBytes caps a decoded request body. The largest legitimate request is
+// the NapCat connection form (URLs, tokens, adapter options) at a few KB, so
+// 1 MiB leaves ample headroom while keeping the unauthenticated routes -
+// /api/auth/state, setup, login and logout are reachable without a session -
+// from letting anyone POST a body of arbitrary size and have it buffered.
+const maxBodyBytes = 1 << 20
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// The status line is already on the wire, so this cannot become an
+		// error response; without the log the operator just sees a truncated
+		// body and has nothing to correlate it with.
+		log.Printf("[api] encoding the response failed: %v", err)
+	}
+}
+
+// bodyTooLargeError is the readable form of the body-limit failure. decode
+// returns it in place of the standard library's "http: request body too large",
+// and writeErr renders it without the "invalid JSON: " prefix its callers would
+// otherwise add, which misdescribes the problem.
+type bodyTooLargeError struct{ limit int64 }
+
+func (e *bodyTooLargeError) Error() string {
+	return fmt.Sprintf("请求体过大（上限 %d 字节）", e.limit)
 }
 
 func writeErr(w http.ResponseWriter, code int, err error) {
+	var tooLarge *bodyTooLargeError
+	if errors.As(err, &tooLarge) {
+		writeJSON(w, code, map[string]any{"error": tooLarge.Error()})
+		return
+	}
 	writeJSON(w, code, map[string]any{"error": err.Error()})
 }
 
+// writeAuthErr is writeErr for the routes reachable without a session. Those
+// responses must not carry internal detail - a SQLite message names the file
+// and the statement - so the caller gets a generic line and the server keeps
+// the detail in its log. Client mistakes (a bad password, a short one) are
+// still reported as they were: they say nothing about the inside of the
+// process, and hiding them would make the panel unusable.
+func writeAuthErr(w http.ResponseWriter, code int, err error) {
+	if code >= 500 {
+		log.Printf("[api] request failed: %v", err)
+		writeJSON(w, code, map[string]any{"error": "服务器内部错误，请查看服务端日志"})
+		return
+	}
+	writeErr(w, code, err)
+}
+
+// recoverPanics turns a panic in a handler into a 500 for that one request.
+//
+// net/http already recovers, but it then closes the connection: the caller sees
+// an EOF rather than a response, which in the panel is indistinguishable from
+// "the button did nothing", and the process logs nothing at all. Recovering
+// here keeps the connection usable and puts the method, path, panic value and
+// stack in the log.
+func recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[api] panic handling %s %s: %v\n%s", req.Method, req.URL.Path, r, debug.Stack())
+				writeJSON(w, 500, map[string]any{"error": "服务器内部错误，请查看服务端日志"})
+			}
+		}()
+		next.ServeHTTP(w, req)
+	})
+}
+
 func decode(r *http.Request, out any) error {
-	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
-	return dec.Decode(out)
+	// The limit is applied here, on every decoded body, because the size of
+	// what arrives is not a property of any single handler.
+	body := http.MaxBytesReader(nil, r.Body, maxBodyBytes)
+	defer body.Close()
+	dec := json.NewDecoder(body)
+	if err := dec.Decode(out); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return &bodyTooLargeError{limit: tooLarge.Limit}
+		}
+		return err
+	}
+	return nil
 }
 
 // ---------- handlers ----------

@@ -276,7 +276,8 @@ func (r *Router) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 func (r *Router) authState(w http.ResponseWriter, req *http.Request) {
 	setup, err := r.needsSetup()
 	if err != nil {
-		writeErr(w, 500, err)
+		// Reachable without a session, so the SQLite error stays in the log.
+		writeAuthErr(w, 500, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{
@@ -298,7 +299,7 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 
 	setup, err := r.needsSetup()
 	if err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	if !setup {
@@ -325,21 +326,21 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 	}
 	hash, err := hashPassword(in.Password)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	if err := r.st.CreateAdmin(in.Username, hash); err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 
 	key, err := r.loadSessionKey()
 	if err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	if err := r.setSessionCookie(w, key, in.Username); err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"username": in.Username})
@@ -371,11 +372,11 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 
 	key, err := r.loadSessionKey()
 	if err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	if err := r.setSessionCookie(w, key, a.Username); err != nil {
-		writeErr(w, 500, err)
+		writeAuthErr(w, 500, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"username": a.Username})
@@ -391,7 +392,7 @@ func (r *Router) logout(w http.ResponseWriter, req *http.Request) {
 	// the operator out of every device at will.
 	if r.currentUser(req) != "" {
 		if err := r.bumpGeneration(); err != nil {
-			writeErr(w, 500, err)
+			writeAuthErr(w, 500, err)
 			return
 		}
 	}
