@@ -379,6 +379,65 @@ type BindResult struct {
 	Pending   int `json:"pending"`
 	Ambiguous int `json:"ambiguous"`
 	Failed    int `json:"failed"`
+	// Skipped counts members that already had a binding. They are never
+	// re-pointed, so they are not attempts at all.
+	Skipped int `json:"skipped"`
+}
+
+// bindOutcome is what a bind attempt concluded.
+type bindOutcome int
+
+const (
+	// bindBound: the member had no binding and now has one.
+	bindBound bindOutcome = iota
+	// bindSkipped: the member already had a binding, which is never touched.
+	bindSkipped
+	// bindNoAccount: no new-api account uses the member's QQ email (yet).
+	bindNoAccount
+)
+
+// bindQQ is the single binding decision point: given a QQ, find the new-api
+// account registered under its QQ email and bind it, unless the member already
+// has a binding.
+//
+// Only an exact, unique match binds (FindUserByEmail narrows the gateway's LIKE
+// search, and reports ambiguity as an error); no match means "no account yet".
+// Every path - the automatic pass, the join and the in-group command - goes
+// through here, so they cannot drift apart.
+//
+// A member who already has a binding is left exactly as they are: that is what
+// makes all three paths safe to switch on, since none of them can re-point a
+// binding the operator made by hand.
+func (s *Service) bindQQ(qq int64, source string) (*store.Binding, bindOutcome, error) {
+	existing, err := s.st.GetBinding(qq)
+	switch {
+	case err == nil:
+		return existing, bindSkipped, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return nil, bindSkipped, err
+	}
+
+	u, err := s.gw.FindUserByEmail(qqEmail(qq))
+	if err != nil {
+		return nil, bindSkipped, err
+	}
+	if u == nil {
+		return nil, bindNoAccount, nil
+	}
+	b := store.Binding{
+		QQ: qq, NewAPIUserID: u.ID, NewAPIUsername: u.Username,
+		NewAPIEmail: u.Email, Source: source,
+	}
+	if err := s.st.SetBinding(b); err != nil {
+		return nil, bindSkipped, err
+	}
+	// Apply the binding-triggered rules now, so the member's group changes
+	// immediately instead of at the next sweep. A rule failure must not fail
+	// the binding that already succeeded, so it is reported alongside it.
+	if _, err := s.ApplyOnBindRules(qq); err != nil {
+		return &b, bindBound, err
+	}
+	return &b, bindBound, nil
 }
 
 // AutoBind matches every unbound member to a new-api account by their QQ email
@@ -390,34 +449,40 @@ func (s *Service) AutoBind() (BindResult, error) {
 		return res, err
 	}
 	for _, m := range ms {
-		u, err := s.gw.FindUserByEmail(qqEmail(m.QQ))
+		_, outcome, err := s.bindQQ(m.QQ, "auto")
 		switch {
 		case errors.Is(err, newapi.ErrAmbiguousEmail):
 			res.Ambiguous++
-			continue
 		case err != nil:
 			res.Failed++
-			continue
-		}
-		if u == nil {
+		case outcome == bindSkipped:
+			// The list can be stale, so a member bound since it was read shows
+			// up here. Counting it as a skip keeps the totals honest.
+			res.Skipped++
+		case outcome == bindNoAccount:
 			res.Pending++
-			continue
-		}
-		if err := s.st.SetBinding(store.Binding{
-			QQ: m.QQ, NewAPIUserID: u.ID, NewAPIUsername: u.Username,
-			NewAPIEmail: u.Email, Source: "auto",
-		}); err != nil {
-			return res, err
-		}
-		res.Bound++
-		// Apply the binding-triggered rules now, so a new member's group
-		// changes immediately instead of at the next sweep. A rule failure
-		// must not fail the binding that already succeeded.
-		if _, err := s.ApplyOnBindRules(m.QQ); err != nil {
-			res.Failed++
+		default:
+			res.Bound++
 		}
 	}
 	return res, nil
+}
+
+// BindMember binds a member who has just joined a monitored group. Unlike
+// BindByCommand there is no member-triggered command behind it, so a member
+// with no account yet is not an error: they stay unbound and the patrol retries
+// once they register.
+func (s *Service) BindMember(groupID, qq int64) error {
+	if groupID == 0 || qq == 0 {
+		return errors.New("binding needs both a group and a QQ")
+	}
+	// Record the member first: the join is proof they are in the group, and it
+	// means a lookup failure below cannot lose them.
+	if err := s.EnsureMember(groupID, qq, ""); err != nil {
+		return err
+	}
+	_, _, err := s.bindQQ(qq, "join")
+	return err
 }
 
 // EnsureMember records a member row (and group membership) from a QQ-side
@@ -429,35 +494,26 @@ func (s *Service) EnsureMember(groupID, qq int64, nickname string) error {
 }
 
 // BindByCommand binds a QQ to the new-api account matching qq@qq.com, which is
-// what a member triggers with ">>绑定<<". The member cannot name another email.
+// what a member triggers with a configured bind command. The member cannot name
+// another email.
 //
 // The member is recorded first, so the command works with the roster patrol
-// switched off: the message itself is proof the member is in that group.
+// switched off: the message itself is proof the member is in that group. A
+// member who already has a binding keeps it.
 func (s *Service) BindByCommand(groupID, qq int64) (*store.Binding, error) {
 	if groupID != 0 {
 		if err := s.EnsureMember(groupID, qq, ""); err != nil {
 			return nil, err
 		}
 	}
-	u, err := s.gw.FindUserByEmail(qqEmail(qq))
+	b, outcome, err := s.bindQQ(qq, "command")
 	if err != nil {
 		return nil, err
 	}
-	if u == nil {
+	if outcome == bindNoAccount {
 		return nil, fmt.Errorf("no new-api account uses %s", qqEmail(qq))
 	}
-	b := store.Binding{
-		QQ: qq, NewAPIUserID: u.ID, NewAPIUsername: u.Username,
-		NewAPIEmail: u.Email, Source: "command",
-	}
-	if err := s.st.SetBinding(b); err != nil {
-		return nil, err
-	}
-	// A member who binds by command gets the same immediate group change.
-	if _, err := s.ApplyOnBindRules(qq); err != nil {
-		return nil, err
-	}
-	return s.st.GetBinding(qq)
+	return b, nil
 }
 
 // CheckinResult reports what a message-driven check-in did.

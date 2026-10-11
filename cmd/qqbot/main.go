@@ -369,7 +369,11 @@ func (prober) ProbeEventWS(wsURL, token string) error {
 	return events.Probe(wsURL, token)
 }
 
-// bindAdapter narrows the service to the one method the event listener needs.
+// bindAdapter narrows the service to the methods the event listener needs.
+//
+// The switches and the command patterns are read through the service on every
+// event rather than cached here, so an operator's change in the WebUI takes
+// effect on the next message with no restart.
 type bindAdapter struct{ svc *service.Service }
 
 func (b bindAdapter) IsMonitoredGroup(groupID int64) (bool, error) {
@@ -379,6 +383,34 @@ func (b bindAdapter) IsMonitoredGroup(groupID int64) (bool, error) {
 func (b bindAdapter) BindByCommand(groupID, qq int64) error {
 	_, err := b.svc.BindByCommand(groupID, qq)
 	return err
+}
+
+func (b bindAdapter) BindMember(groupID, qq int64) error {
+	return b.svc.BindMember(groupID, qq)
+}
+
+func (b bindAdapter) IsBindCommand(message string) bool {
+	return b.svc.IsBindCommand(message)
+}
+
+func (b bindAdapter) IsCheckinCommand(message string) bool {
+	return b.svc.IsCheckinCommand(message)
+}
+
+func (b bindAdapter) CheckinByAnyMessage() bool {
+	return b.svc.CheckinByAnyMessage()
+}
+
+func (b bindAdapter) BindOnJoinEnabled() bool {
+	return b.svc.BindOnJoinEnabled()
+}
+
+func (b bindAdapter) CheckinByMessage(groupID, qq int64) (events.CheckinOutcome, error) {
+	res, err := b.svc.CheckinByMessage(groupID, qq)
+	return events.CheckinOutcome{
+		Recorded:         res.Recorded,
+		AlreadyCheckedIn: res.AlreadyCheckedIn,
+	}, err
 }
 
 func (b bindAdapter) EnsureMember(groupID, qq int64, nickname string) error {

@@ -18,7 +18,7 @@ import (
 //	{"time":…,"self_id":…,"post_type":"message","message_type":"group",
 //	 "group_id":…,"user_id":…,"raw_message":">>绑定<<"}
 func TestListenerBindsOverRealWebSocket(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}, bindCmd: ">>绑定<<"}
 
 	var gotAuth string
 	upgrader := websocket.Upgrader{}
@@ -119,7 +119,7 @@ func TestRunRetriesAfterHandshakeFailure(t *testing.T) {
 // A raw payload of the exact shape NapCat sends must dispatch the bind, which
 // pins the field names against drift.
 func TestHandleMatchesNapCatWireFormat(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
 	raw, _ := json.Marshal(map[string]any{

@@ -10,6 +10,10 @@ import (
 
 // fakeSvc is driven from the listener goroutine and read from the test
 // goroutine, so its recorders are guarded.
+//
+// It answers "no" to every feature switch, so the tests written against the
+// original hardcoded command keep pinning exactly that: the bind command still
+// works only when the service says the message is one.
 type fakeSvc struct {
 	mu        sync.Mutex
 	monitored map[int64]bool
@@ -17,7 +21,34 @@ type fakeSvc struct {
 	ensured   []ensureCall
 	bindErr   error
 	bindPanic bool
+	// bindCmd is the single message that counts as a bind command.
+	bindCmd string
 }
+
+// IsBindCommand reports whether message is the configured bind command.
+func (f *fakeSvc) IsBindCommand(message string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bindCmd != "" && message == f.bindCmd
+}
+
+// IsCheckinCommand is always false here: the check-in paths have their own
+// tests in feature_test.go.
+func (f *fakeSvc) IsCheckinCommand(string) bool { return false }
+
+// CheckinByAnyMessage is off, so these tests exercise the bind path alone.
+func (f *fakeSvc) CheckinByAnyMessage() bool { return false }
+
+// BindOnJoinEnabled is off, so a join only records the member.
+func (f *fakeSvc) BindOnJoinEnabled() bool { return false }
+
+// CheckinByMessage is unused while the check-in switches are off.
+func (f *fakeSvc) CheckinByMessage(int64, int64) (CheckinOutcome, error) {
+	return CheckinOutcome{}, nil
+}
+
+// BindMember is unused while the join-bind switch is off.
+func (f *fakeSvc) BindMember(int64, int64) error { return nil }
 
 // boundQQs returns a copy of the bound QQs.
 func (f *fakeSvc) boundQQs() []int64 {
@@ -73,10 +104,10 @@ func msgEvent(groupID, userID int64, raw string) []byte {
 }
 
 func TestBindCommandBindsMember(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
-	l.Handle(msgEvent(1129535731, 54321, BindCommand))
+	l.Handle(msgEvent(1129535731, 54321, ">>绑定<<"))
 
 	if b := svc.boundQQs(); len(b) != 1 || b[0] != 54321 {
 		t.Fatalf("expected 54321 to be bound, got %v", b)
@@ -85,10 +116,10 @@ func TestBindCommandBindsMember(t *testing.T) {
 
 // The command must not work in a group this service does not monitor.
 func TestBindCommandIgnoredOutsideMonitoredGroups(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
-	l.Handle(msgEvent(999999999, 54321, BindCommand))
+	l.Handle(msgEvent(999999999, 54321, ">>绑定<<"))
 
 	if b := svc.boundQQs(); len(b) != 0 {
 		t.Errorf("must not bind from an unmonitored group: %v", b)
@@ -96,7 +127,7 @@ func TestBindCommandIgnoredOutsideMonitoredGroups(t *testing.T) {
 }
 
 func TestOnlyExactCommandTriggers(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
 	// Anything with extra content, or a truncated variant, must not trigger.
@@ -111,7 +142,7 @@ func TestOnlyExactCommandTriggers(t *testing.T) {
 // QQ clients routinely append a space or newline, so surrounding whitespace is
 // tolerated while extra content is not.
 func TestCommandToleratesSurroundingWhitespace(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
 	l.Handle(msgEvent(1, 54321, " >>绑定<< "))
@@ -123,7 +154,7 @@ func TestCommandToleratesSurroundingWhitespace(t *testing.T) {
 }
 
 func TestNonMessageAndPrivateEventsIgnored(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1: true}}
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindCmd: ">>绑定<<"}
 	l := New(func() (string, string) { return "", "" }, svc)
 
 	// a notice event
@@ -140,10 +171,10 @@ func TestNonMessageAndPrivateEventsIgnored(t *testing.T) {
 
 // A failed bind must not panic or retry-storm; it is logged and dropped.
 func TestBindFailureIsTolerated(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindErr: errors.New("no such account")}
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindCmd: ">>绑定<<", bindErr: errors.New("no such account")}
 	l := New(func() (string, string) { return "", "" }, svc)
 
-	l.Handle(msgEvent(1, 54321, BindCommand))
+	l.Handle(msgEvent(1, 54321, ">>绑定<<"))
 
 	if len(svc.bound) != 0 {
 		t.Errorf("a failed bind must not be recorded: %v", svc.bound)
@@ -209,7 +240,7 @@ func TestGroupIncreaseWithZeroUserIgnored(t *testing.T) {
 
 // A panic while handling an event must not kill the process.
 func TestHandlePanicIsContained(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindPanic: true}
+	svc := &fakeSvc{monitored: map[int64]bool{1: true}, bindCmd: ">>绑定<<", bindPanic: true}
 	l := New(func() (string, string) { return "", "" }, svc)
 
 	done := make(chan struct{})

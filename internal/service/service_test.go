@@ -21,6 +21,7 @@ type fakeNewAPI struct {
 	quotaAdds []quotaAdd
 	failSet   error
 	failQuota error
+	failFind  error
 
 	// failSetFor fails SetGroup for specific account ids, so a batch can be
 	// exercised with one protected account among successful ones.
@@ -52,6 +53,9 @@ func newFakeNewAPI() *fakeNewAPI {
 }
 
 func (f *fakeNewAPI) FindUserByEmail(addr string) (*newapi.User, error) {
+	if f.failFind != nil {
+		return nil, f.failFind
+	}
 	if f.ambig[addr] {
 		return nil, newapi.ErrAmbiguousEmail
 	}

@@ -1,10 +1,14 @@
 // Package events listens on NapCat's OneBot WebSocket for push events and acts
 // on them. The patrols remain the backstop (see ADR-0003); this listener is
-// what lets the two event-driven cases react immediately: the ">>绑定<<" command
-// a member sends, and a member joining a group.
+// what lets the event-driven cases react immediately: the configured bind
+// command a member sends, a member joining a group, and a message that counts
+// as the day's check-in.
 //
-// There is deliberately no check-in handling here: NapCat exposes no check-in
-// notice event, so the sign-in board can only be read by polling.
+// Which of those are active, and what the commands are, comes from the service's
+// settings: every path here has a switch, so an operator who does not use one
+// pays nothing for it. There is deliberately no sign-in-board handling here:
+// NapCat exposes no check-in notice event, so the board can only be read by
+// polling.
 package events
 
 import (
@@ -17,17 +21,40 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// BindCommand is the message a member sends to link their QQ to the new-api
-// account registered under their QQ email.
-const BindCommand = ">>绑定<<"
-
 // Service is the subset of business logic the listener needs.
 type Service interface {
 	IsMonitoredGroup(groupID int64) (bool, error)
+
+	// BindByCommand binds a member who sent a bind command.
 	BindByCommand(groupID, qq int64) error
+	// BindMember binds a member without a command (the join path).
+	BindMember(groupID, qq int64) error
+	// IsBindCommand reports whether a message is one of the configured bind
+	// commands. The listener does not know the patterns itself, so the operator
+	// can change them without a restart.
+	IsBindCommand(message string) bool
+
+	// CheckinByMessage records a message-driven check-in.
+	CheckinByMessage(groupID, qq int64) (CheckinOutcome, error)
+	// IsCheckinCommand reports whether a message is one of the configured
+	// check-in commands.
+	IsCheckinCommand(message string) bool
+	// CheckinByAnyMessage reports whether every message counts as a check-in.
+	CheckinByAnyMessage() bool
+
+	// BindOnJoinEnabled reports whether a member is bound when they join.
+	BindOnJoinEnabled() bool
+
 	// EnsureMember records a member observed via an event, so the roster patrol
 	// is not the only way a member becomes known.
 	EnsureMember(groupID, qq int64, nickname string) error
+}
+
+// CheckinOutcome is what a message-driven check-in did. The listener only needs
+// to know whether the day was recorded, which is what the log line says.
+type CheckinOutcome struct {
+	Recorded         bool
+	AlreadyCheckedIn bool
 }
 
 // MessageEvent is the OneBot message event the listener cares about.
@@ -215,6 +242,9 @@ func (l *Listener) Handle(raw []byte) {
 	}
 }
 
+// handleMessage dispatches one group message: it may be a bind command and/or a
+// check-in, and the two are independent (a bind command is also a message, so
+// with message check-ins on it counts for both).
 func (l *Listener) handleMessage(raw []byte) {
 	var ev MessageEvent
 	if err := json.Unmarshal(raw, &ev); err != nil {
@@ -223,22 +253,39 @@ func (l *Listener) handleMessage(raw []byte) {
 	if ev.GroupID == 0 || ev.UserID == 0 {
 		return
 	}
-	if strings.TrimSpace(ev.RawMessage) != BindCommand {
-		return
-	}
 	if !l.monitored(ev.GroupID) {
 		return
 	}
-	if err := l.svc.BindByCommand(ev.GroupID, ev.UserID); err != nil {
-		// The member is not told: this service does not speak in groups.
-		log.Printf("[events] bind command from %d failed: %v", ev.UserID, err)
+	text := strings.TrimSpace(ev.RawMessage)
+	if text == "" {
 		return
 	}
-	log.Printf("[events] bound %d via %s", ev.UserID, BindCommand)
+
+	if l.svc.IsBindCommand(text) {
+		if err := l.svc.BindByCommand(ev.GroupID, ev.UserID); err != nil {
+			// The member is not told: this service does not speak in groups.
+			log.Printf("[events] bind command from %d failed: %v", ev.UserID, err)
+		} else {
+			log.Printf("[events] bound %d via a bind command", ev.UserID)
+		}
+	}
+
+	// A check-in is evaluated separately from the bind command: the operator can
+	// switch either path on without the other.
+	if l.svc.CheckinByAnyMessage() || l.svc.IsCheckinCommand(text) {
+		res, err := l.svc.CheckinByMessage(ev.GroupID, ev.UserID)
+		switch {
+		case err != nil:
+			log.Printf("[events] check-in for %d failed: %v", ev.UserID, err)
+		case res.Recorded:
+			log.Printf("[events] recorded check-in for %d", ev.UserID)
+		}
+	}
 }
 
 // handleGroupIncrease records a new member straight away, so they become known
-// (and can be bound and converted) without waiting for a roster patrol.
+// (and can be bound and converted) without waiting for a roster patrol, and
+// binds them immediately when the operator has that path switched on.
 //
 // The event carries no nickname, so the member is stored with an empty one and
 // the next roster patrol fills it in. That is complete enough to bind and to
@@ -259,6 +306,17 @@ func (l *Listener) handleGroupIncrease(raw []byte) {
 		return
 	}
 	log.Printf("[events] new member %d recorded in group %d", ev.UserID, ev.GroupID)
+
+	// Binding is a separate switch, and its failure must not undo the
+	// recording above: the member is known either way, and the patrol retries.
+	if !l.svc.BindOnJoinEnabled() {
+		return
+	}
+	if err := l.svc.BindMember(ev.GroupID, ev.UserID); err != nil {
+		log.Printf("[events] binding new member %d failed: %v", ev.UserID, err)
+		return
+	}
+	log.Printf("[events] new member %d bound on join", ev.UserID)
 }
 
 func (l *Listener) monitored(groupID int64) bool {

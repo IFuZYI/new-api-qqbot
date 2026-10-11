@@ -38,12 +38,14 @@ func New(svc *service.Service) *Scheduler {
 // Run starts the loops and blocks until ctx is cancelled.
 func (s *Scheduler) Run(ctx context.Context) {
 	go s.loop(ctx, "members", s.memberInterval, func() error {
-		if err := s.svc.SyncAllMembers(); err != nil {
-			return err
-		}
-		// New members appear here, so follow up immediately: bind them. Group
-		// conversion is the rules' job (each rule opts in via its own interval
-		// or the bind trigger), not a blanket sweep.
+		return s.svc.SyncAllMembers()
+	})
+
+	// The bind patrol is separate from the roster patrol on purpose: binding is
+	// cheap (one account lookup per unbound member) while reading a roster is
+	// not, so an operator can retry bindings far more often than they re-read
+	// the rosters. It only ever touches members with no binding.
+	go s.loop(ctx, "bind", s.bindInterval, func() error {
 		_, err := s.svc.AutoBind()
 		return err
 	})
@@ -69,6 +71,19 @@ func (s *Scheduler) Run(ctx context.Context) {
 	})
 
 	<-ctx.Done()
+}
+
+// bindInterval returns 0 when the bind patrol is switched off or its interval
+// is 0, which is what makes the loop idle instead of running.
+func (s *Scheduler) bindInterval() time.Duration {
+	cfg, err := s.svc.Settings()
+	if err != nil {
+		return time.Hour
+	}
+	if !cfg.BindPatrolEnabled || cfg.BindPatrolMinutes <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.BindPatrolMinutes) * time.Minute
 }
 
 // memberInterval returns 0 when the roster patrol is switched off.
@@ -184,7 +199,7 @@ func (s *Scheduler) Status() map[string]any {
 	defer s.mu.Unlock()
 
 	out := map[string]any{}
-	for _, name := range []string{"members", "checkins", "rules"} {
+	for _, name := range []string{"members", "bind", "checkins", "rules"} {
 		entry := map[string]any{}
 		if t, ok := s.lastRun[name]; ok {
 			entry["last_run"] = t.Unix()
