@@ -186,23 +186,67 @@ export interface Bootstrap {
   groups: Group[] | null
 }
 
+/**
+ * Every panel request is bounded by this. 30s is the budget the backends give
+ * their own upstream calls (internal/newapi/client.go and
+ * internal/napcat/client.go both build an http.Client with a 30s timeout), so
+ * the panel must not give up earlier: if it did, a slow gateway call would be
+ * reported as a panel-side timeout instead of the backend's own, more specific
+ * error. A request that outlives 30s is a hang — without this the panel spins
+ * forever with no feedback, so the operator is told instead.
+ */
+const REQUEST_TIMEOUT_MS = 30_000
+
+/** Timeout wording: it must not read like a network failure. */
+const TIMEOUT_MESSAGE =
+  '请求超时：30 秒内未收到后端响应，已中断。通常是后端或上游服务（new-api / NapCat）卡住，而不是网络断开。'
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const text = await res.text()
-  let body: unknown = null
+  const ctl = new AbortController()
+  // Distinguishes our deadline from a caller-side cancellation: both surface
+  // as AbortError, and only ours may be reported as a timeout.
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    ctl.abort()
+  }, REQUEST_TIMEOUT_MS)
+  // A caller-supplied signal (none today, but RequestInit allows one) is
+  // forwarded rather than dropped: the fetch below uses our controller, so the
+  // caller's abort is relayed to it.
+  const caller = init?.signal
+  const relay = () => ctl.abort()
+  if (caller) {
+    if (caller.aborted) ctl.abort()
+    else caller.addEventListener('abort', relay, { once: true })
+  }
   try {
-    body = text ? JSON.parse(text) : null
-  } catch {
-    throw new Error(`${res.status}: ${text.slice(0, 200)}`)
+    const res = await fetch(path, {
+      ...init,
+      signal: ctl.signal,
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    })
+    const text = await res.text()
+    let body: unknown = null
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch {
+      throw new Error(`${res.status}: ${text.slice(0, 200)}`)
+    }
+    if (!res.ok) {
+      const msg = (body as { error?: string })?.error ?? `HTTP ${res.status}`
+      throw new Error(msg)
+    }
+    return body as T
+  } catch (e) {
+    if (timedOut && e instanceof Error && e.name === 'AbortError') {
+      throw new Error(TIMEOUT_MESSAGE)
+    }
+    throw e
+  } finally {
+    // Without this every request would leave a pending timer behind.
+    clearTimeout(timer)
+    caller?.removeEventListener('abort', relay)
   }
-  if (!res.ok) {
-    const msg = (body as { error?: string })?.error ?? `HTTP ${res.status}`
-    throw new Error(msg)
-  }
-  return body as T
 }
 
 export interface Condition {
@@ -222,6 +266,10 @@ export interface Rule {
   conditions: Condition[]
   last_run_at: number
   last_error?: string
+  // Set when the stored rule could not be read back. Such a rule matches
+  // nobody, so it must be shown as broken rather than as a working rule with
+  // its lists silently emptied.
+  decode_error?: string
 }
 
 export interface RuleMeta {

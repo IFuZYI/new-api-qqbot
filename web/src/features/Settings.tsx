@@ -252,7 +252,7 @@ export default function SettingsView({
           </Select>
         </Field>
         {anyMessage ? (
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             当前配置下，群里的任意一条消息都会为发送者记录当天签到。
           </p>
         ) : (
@@ -273,70 +273,101 @@ export default function SettingsView({
             const on = spec.enabledKey ? s[spec.enabledKey] : true
             const p = patrols[spec.key]
             return (
+              // One grid for every row, so the interval, the test button and the
+              // switch hold the same columns on all four. Laid out with flex,
+              // the last row (分组转换巡检) has no interval field, so its 测试一次
+              // button slid right to x=1190 while the other three sat at x=1094
+              // — the action column moved between rows.
+              //
+              // The three columns only exist from `sm` up. `1fr auto auto` on a
+              // 320px screen resolved the description to 0px and pushed the
+              // controls to x=331 (measured: the whole page scrolled sideways by
+              // 11px), because two `auto` columns take their content width first
+              // and there was nothing left. Below `sm` the row stacks instead.
               <div
                 key={spec.key}
-                className="flex flex-wrap items-start gap-x-4 gap-y-3 py-3.5 first:pt-0 last:pb-0"
+                className="grid grid-cols-1 items-start gap-x-4 gap-y-3 py-3.5 first:pt-0 last:pb-0 sm:grid-cols-[1fr_7rem_10rem]"
               >
-                <div className="min-w-0 flex-1 basis-64">
+                <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-medium">{spec.label}</span>
                     <PatrolHealth state={p} on={on} />
                   </div>
-                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  <p className="mt-1 text-2xs text-muted-foreground">
                     {spec.hint}
                     {on && p?.last_run && <> · 上次运行 {formatDateTime(p.last_run)}</>}
                   </p>
                   {on && p?.last_error && (
-                    <p className="mt-1 text-[11px] leading-4 break-all text-destructive">{p.last_error}</p>
+                    <p className="mt-1 text-2xs break-all text-destructive">{p.last_error}</p>
                   )}
                   {tested[spec.key] && (
-                    <p className="mt-1 text-[11px] leading-4 break-all text-foreground/80">
+                    <p className="mt-1 text-2xs break-all text-foreground/80">
                       测试结果：{tested[spec.key]}
                     </p>
                   )}
                 </div>
 
-                {spec.minutesKey && (
-                  <div className={`flex items-center gap-2 ${on ? '' : 'opacity-60'}`}>
-                    <Input
-                      type="number"
-                      min={spec.zeroPauses ? 0 : 1}
-                      value={s[spec.minutesKey]}
-                      onChange={(v) => {
-                        // The server repairs a 0 on every patrol except 绑定巡检,
-                        // so letting one be typed here would be silently undone
-                        // on the next read. Clamp at the input instead: a
-                        // near-miss becomes the smallest legal value rather than
-                        // a number the server quietly rewrites.
-                        const n = Number(v)
-                        const floor = spec.zeroPauses ? 0 : 1
-                        const next = Number.isFinite(n) ? Math.max(floor, n) : floor
-                        setS({ ...s, [spec.minutesKey as string]: next } as Settings)
-                      }}
-                      ariaLabel={`${spec.label}间隔（分钟）`}
-                      className="w-20"
+                {/*
+                  The third column is a fixed 10rem, and the row without an
+                  interval still renders an element to occupy that cell. What
+                  holds 测试一次 and its switch at one x across all four rows is
+                  that occupancy, not the spacer's own width: measured, the
+                  spacer can be narrowed to 10px or widened to 200px with the
+                  buttons staying at x=1095.5, but deleting it drops that row's
+                  buttons to x=967.5 (the actions div falls back into the
+                  interval column). The numbers this replaced — the last row's
+                  controls at x=1135 against 1102 on the other three — came from
+                  an `auto` third column, which sizes per row: 121px on the row
+                  whose actions are a bare button, 154px on the rows carrying a
+                  switch, so the column started at a different x on each row.
+                */}
+                <div className="flex h-8 w-28 items-center gap-2" aria-hidden={!spec.minutesKey}>
+                  {spec.minutesKey && (
+                    <>
+                      <Input
+                        type="number"
+                        min={spec.zeroPauses ? 0 : 1}
+                        value={s[spec.minutesKey]}
+                        onChange={(v) => {
+                          // The server repairs a 0 on every patrol except 绑定巡检,
+                          // so letting one be typed here would be silently undone
+                          // on the next read. Clamp at the input instead: a
+                          // near-miss becomes the smallest legal value rather than
+                          // a number the server quietly rewrites.
+                          const n = Number(v)
+                          const floor = spec.zeroPauses ? 0 : 1
+                          const next = Number.isFinite(n) ? Math.max(floor, n) : floor
+                          setS({ ...s, [spec.minutesKey as string]: next } as Settings)
+                        }}
+                        ariaLabel={`${spec.label}间隔（分钟）`}
+                        className="w-20"
+                      />
+                      <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    disabled={testing !== ''}
+                    title={`立即执行一次${spec.label}，用于在打开开关前先试一次`}
+                    onClick={() => void test(spec)}
+                  >
+                    {testing === spec.key ? '测试中…' : '测试一次'}
+                  </Button>
+
+                  {spec.enabledKey ? (
+                    <Switch
+                      checked={on}
+                      onChange={(v) => setS({ ...s, [spec.enabledKey as string]: v } as Settings)}
+                      label={on ? '已启用' : '已停用'}
+                      ariaLabel={`${spec.label}：${on ? '已启用' : '已停用'}`}
                     />
-                    <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-                  </div>
-                )}
-
-                <Button
-                  size="sm"
-                  disabled={testing !== ''}
-                  title={`立即执行一次${spec.label}，用于在打开开关前先试一次`}
-                  onClick={() => void test(spec)}
-                >
-                  {testing === spec.key ? '测试中…' : '测试一次'}
-                </Button>
-
-                {spec.enabledKey && (
-                  <Switch
-                    checked={on}
-                    onChange={(v) => setS({ ...s, [spec.enabledKey as string]: v } as Settings)}
-                    label={on ? '已启用' : '已停用'}
-                    ariaLabel={`${spec.label}：${on ? '已启用' : '已停用'}`}
-                  />
-                )}
+                  ) : (
+                    <Badge>按规则</Badge>
+                  )}
+                </div>
               </div>
             )
           })}

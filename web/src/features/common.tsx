@@ -60,12 +60,39 @@ export function FeatureCard({
       }
     >
       {/*
-        The body is dimmed rather than unmounted while the feature is off: the
+        Body is dimmed rather than unmounted while the feature is off: the
         operator can still read (and edit) the parameters before switching it
         back on, and nothing jumps around. Inputs stay enabled for the same
         reason — the switch alone decides whether the feature runs.
+
+        The dimming is a *surface* wash, not a whole-block opacity. `opacity-60`
+        multiplies the alpha of every descendant, including text, and the
+        panel's caption grey then measured 2.63:1 on a white card (3.56:1 in
+        dark) — the hint lines that explain what a switched-off feature does
+        were the least readable text on the page, which is exactly backwards. A
+        `muted` tint over the body reads as "this is off" without touching a
+        single glyph's contrast.
+
+        The wash carries no padding. An earlier `p-3` version moved the inputs
+        12px right and grew the card 24px the moment the switch flipped
+        (measured 227px → 251px), so turning a feature off shoved the rest of
+        the page down — the opposite of "nothing jumps around". The band's box
+        is the card body's own content box, so both states are geometrically
+        identical.
+
+        `bg-muted` and not `bg-muted/50`: half-strength muted composites to
+        rgb(250,250,250) on a white card, 1.044:1 — below the 1.10:1 the
+        `--table-header` comment calls the smallest visible step in light mode,
+        and close to the 1.035:1 it calls invisible. The off state would have
+        had no surface signal at all. Full muted measures 1.09:1 light / 1.072:1
+        dark, the same surface the muted badge uses.
+
+        A card with nothing in its body (进群自动绑定 has only a switch) renders
+        no body at all: an empty `p-4` box measured 56px of blank card under a
+        20px header, which is the "why is there a hole here" the layout audit
+        found. The state it would have shown is already in the header badge.
       */}
-      <div className={off ? 'space-y-4 opacity-60' : 'space-y-4'}>{children}</div>
+      {children && <div className={off ? 'space-y-4 rounded-panel bg-muted' : 'space-y-4'}>{children}</div>}
     </Card>
   )
 }
@@ -104,7 +131,7 @@ export function CommandList({
           invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
         } focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]`}
       />
-      <p id={uid} className="text-[11px] leading-4 text-muted-foreground">
+      <p id={uid} className="text-2xs text-muted-foreground">
         {hint ?? '一行一个指令。字面量需整条消息完全匹配（前后空格忽略）；/表达式/ 是正则，未加 ^$ 时在消息里任意位置命中即可，例如 /^签到\\s*\\d*$/；/表达式/i 表示忽略大小写。'}
       </p>
     </div>

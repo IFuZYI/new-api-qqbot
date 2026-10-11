@@ -93,8 +93,22 @@ export default function Rules({
                 <Cell>
                   <Badge tone={r.enabled ? 'ok' : 'muted'}>{r.enabled ? '启用' : '停用'}</Badge>
                 </Cell>
-                <Cell className="font-medium">{r.name}</Cell>
-                <Cell className="text-xs">
+                <Cell className="font-medium">
+                  {r.name}
+                  {/*
+                    A rule whose stored JSON could not be read is refused by the
+                    backend (it matches nobody) and its lists come back empty.
+                    Without this badge it renders exactly like a healthy
+                    "任意分组" rule, so the operator would never learn that it
+                    stopped working.
+                  */}
+                  {r.decode_error && (
+                    <Badge tone="err">
+                      规则已损坏，不匹配任何人
+                    </Badge>
+                  )}
+                </Cell>
+                <Cell>
                   <div className="flex flex-wrap gap-1">
                     {r.on_bind && <Badge tone="accent">绑定成功时</Badge>}
                     {r.interval_minutes > 0 && <Badge>按巡检周期 {r.interval_minutes}min</Badge>}
@@ -103,7 +117,7 @@ export default function Rules({
                     )}
                   </div>
                 </Cell>
-                <Cell className="text-xs">
+                <Cell>
                   {r.source_groups.length ? (
                     <div className="flex flex-wrap gap-1">
                       {r.source_groups.map((g) => (
@@ -114,10 +128,10 @@ export default function Rules({
                     <span className="text-muted-foreground">任意</span>
                   )}
                 </Cell>
-                <Cell className="text-xs">
+                <Cell>
                   <Badge tone="info">{r.target_group}</Badge>
                 </Cell>
-                <Cell className="text-xs">
+                <Cell>
                   {r.conditions.length === 0 ? (
                     <span className="text-muted-foreground">无</span>
                   ) : (
@@ -130,7 +144,7 @@ export default function Rules({
                     </div>
                   )}
                 </Cell>
-                <Cell className="text-xs text-muted-foreground">
+                <Cell className="text-muted-foreground">
                   {r.last_run_at ? formatDateTime(r.last_run_at) : '—'}
                   {r.last_error && <div className="text-destructive">{r.last_error}</div>}
                 </Cell>
@@ -431,7 +445,7 @@ function RuleDialog({
             </Button>
           </div>
           {r.conditions.length === 0 ? (
-            <p className="text-[11px] leading-4 text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               无条件：所有匹配源分组的绑定成员都会被转换。
             </p>
           ) : (
