@@ -88,9 +88,9 @@ export function FeatureCard({
         dark, the same surface the muted badge uses.
 
         A card with nothing in its body (进群自动绑定 has only a switch) renders
-        no body at all: an empty `p-4` box measured 56px of blank card under a
-        20px header, which is the "why is there a hole here" the layout audit
-        found. The state it would have shown is already in the header badge.
+        no body at all: an empty `p-4` measured 32px of blank card under a 45px
+        header, which is the "why is there a hole here" the layout audit found.
+        The state it would have shown is already in the header badge.
       */}
       {children && <div className={off ? 'space-y-4 rounded-panel bg-muted' : 'space-y-4'}>{children}</div>}
     </Card>

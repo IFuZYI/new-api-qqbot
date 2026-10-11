@@ -28,9 +28,9 @@
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
 
   /*
-   * Type scale. Three sizes carry the whole panel, and every text node picks
-   * one of them by role — a bare `text-[11px]` in a component is what produced
-   * five sizes (11/12/13/14/20) with no meaning attached:
+   * Type scale. Four sizes carry the whole panel, and every text node picks
+   * one of them by role — a bare `text-[11px]` in a component is what let the
+   * caption size drift, and it was spelled out in fourteen places:
    *   2xs (11px) — captions: a field's hint line, a chip's label
    *   xs  (12px) — chrome: buttons, tabs, table heads, secondary cell values
    *   sm  (14px) — content: body copy, primary table values, card titles
@@ -344,10 +344,11 @@
    * all when the six tabs fit — a permanent fade on a desktop that clips
    * nothing reads as a rendering glitch.
    *
-   * 3rem of fade, not 28px: pixel-sampling the rendered strip showed a 28px
-   * fade only lifted the clipped glyph by 23/255 (253 vs 230 without the mask),
-   * which is under the threshold where an edge reads as "there is more here".
-   * The wider ramp is measured the same way and is what actually signals it.
+   * 3rem of fade, not 28px: a 28px ramp barely dims the clipped glyph it is
+   * supposed to announce. Measuring the last 34px of the strip (where the
+   * ramp sits) shows a 28px fade leaves the glyph's darkest pixel at 96/255,
+   * identical to no fade at all, while 3rem lifts it to 143/255 — the edge
+   * actually reads as "there is more here" only at the wider ramp.
    */
   .tab-strip {
     scrollbar-width: none;
@@ -368,6 +369,14 @@
     mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 3rem), transparent 100%);
   }
 
+  /*
+   * `middle` (scrolled away from both ends) is deliberately absent: the base
+   * rule above fades both edges, which is exactly what middle needs, and the
+   * two single-edge rules override it. Stating it explicitly would duplicate
+   * the base rule; leaving it implicit means the contract lives in App.tsx's
+   * state machine, which is where the four states are defined.
+   */
+
   /* At the right edge only the left side is clipped. */
   .tab-strip[data-scroll='end'] {
     mask-image: linear-gradient(to right, transparent 0, #000 3rem, #000 100%);
@@ -378,11 +387,13 @@
    *
    * The mask multiplies the alpha of everything under it, including a focus
    * ring — and the ring is drawn *outside* the tab box (outline-offset: 2px),
-   * so it lands squarely in the ramp. Pixel-sampling the last tab's ring
-   * (x=356-358) under `data-scroll='start'` measured 180/255 where the unmasked
-   * value is 253, i.e. 2.07:1 against the page instead of 6.48:1 — under WCAG
-   * 1.4.11's 3:1 for a non-text indicator, and it cancels the very fix the
-   * `--ring` colour was chosen for.
+   * so it lands squarely in the ramp. Pixel-sampling the last tab's ring in a
+   * 390px viewport, where the tab really is clipped and the ring sits in the
+   * ramp, gives rgb(160,204,238) at the core of the stroke and rgb(169,209,240)
+   * at its faintest: 1.70:1 and 1.61:1 against the page. The unmasked ring is
+   * rgb(0,119,210), 4.60:1. Both measured values are under WCAG 1.4.11's 3:1
+   * for a non-text indicator, and they cancel the very fix --ring was chosen
+   * for.
    *
    * Turning the fade off while focus is inside is the honest trade: the
    * operator has already found the strip (that is what focusing means), so the

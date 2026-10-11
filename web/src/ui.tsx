@@ -96,7 +96,15 @@ export function Card({
         // card with a description) and squeezed the description into whatever
         // width the buttons left over — 299px inside a 1118px card, so the
         // longer ones wrapped to five lines.
-        <header className="border-b border-border px-4 py-3">
+        //
+        // The separator is drawn only when a body follows it. As the card's
+        // last child the header's `border-b` became the card's own bottom edge:
+        // decoded at DPR2, the corner ran a straight 4px line out to the right
+        // edge instead of closing the radius, so 进群自动绑定 (a switch and
+        // nothing else) read as a clipped card next to its neighbours.
+        <header
+          className={`px-4 py-3 ${children ? 'border-b border-border' : ''}`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <div className="min-w-0">
               {title && (
@@ -112,8 +120,8 @@ export function Card({
       )}
       {/*
         No body when there is nothing to put in it. 进群自动绑定 is a switch and
-        nothing else, and its empty `p-4` measured 56px of blank card under a
-        20px header — a hole the operator reads as a loading failure. The
+        nothing else, and its empty `p-4` measured 32px of blank card under a
+        45px header — a hole the operator reads as a loading failure. The
         feature's state is already in the header badge and its switch.
       */}
       {children ? <div className="p-4">{children}</div> : null}
