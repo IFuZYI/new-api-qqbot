@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Condition, type Rule, type RuleMeta } from './api'
-import { Badge, Button, Card, Cell, Empty, Field, Fieldset, Input, Modal, MultiSelect, Row, Select, Switch, Table, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, CheckboxRow, Empty, Field, Fieldset, Input, Modal, MultiSelect, Row, Select, Switch, Table, WarnNote } from './ui'
 
 /** Group-conversion rules: when a member matches, move their new-api account. */
 export default function Rules({
@@ -197,14 +197,13 @@ function blankRule(): Rule {
 
 /**
  * TriggerKind is the trigger as the operator thinks of it. The stored shape is
- * two independent fields (on_bind + interval_minutes), but the choice is one:
- * "when does this rule run?". Deriving the kind from the stored pair keeps the
- * dropdown and the API in step — there is no third source of truth to drift.
+ * two independent fields (on_bind + interval_minutes), and the two checkboxes
+ * edit exactly those — so there is no derived value to keep in sync.
  */
 type TriggerKind = 'bind' | 'interval' | 'both'
 
-/** triggerKind reads the stored pair back as one choice; '' means no trigger
- * (a rule stored before this was enforced), which the dropdown shows as 请选择. */
+/** triggerKind reads the stored pair back as one label, for the rule table and
+ * for the 未选择 case (a rule stored before a trigger was required). */
 function triggerKind(r: Rule): TriggerKind | '' {
   if (r.on_bind && r.interval_minutes > 0) return 'both'
   if (r.on_bind) return 'bind'
@@ -212,17 +211,17 @@ function triggerKind(r: Rule): TriggerKind | '' {
   return ''
 }
 
-/** TRIGGER_HINT explains what the selected kind actually does, shown only for
- * the chosen kind: the point of picking a type is to learn what it means. */
-const TRIGGER_HINT: Record<TriggerKind, string> = {
+/** TRIGGER_HINT explains what each trigger actually does. It is attached to the
+ * checkbox rather than shown for a selected kind, because both can be on at once
+ * and each needs its own explanation. */
+const TRIGGER_HINT = {
   bind: '成员绑定成功的瞬间执行一次，反应最快；期间没有新的绑定就不会运行。',
   interval: '按周期检查所有成员，不依赖任何事件；即使群里没人说话也会执行。',
-  both: '绑定成功的瞬间执行一次，之后每次巡检再检查一遍，两者取并集。',
-}
+} as const
 
-/** DEFAULT_INTERVAL_MINUTES is the interval a rule starts with when it is
- * switched to a polling kind. It must be positive: 0 would mean "no polling",
- * which contradicts the kind the operator just chose. */
+/** DEFAULT_INTERVAL_MINUTES is the interval a rule starts with when 巡检周期 is
+ * ticked. It must be positive: 0 would mean "no polling", which contradicts the
+ * box the operator just ticked. */
 const DEFAULT_INTERVAL_MINUTES = 60
 
 function label(meta: RuleMeta | null, value: string): string {
@@ -251,6 +250,8 @@ function RuleDialog({
 
   // The trigger is one choice in the UI, two fields in the API; derive it so the
   // dropdown always reflects what would actually be saved.
+  // The table and the "nothing ticked" check read the stored pair; the form
+  // itself edits the two fields directly.
   const kind = triggerKind(r)
 
   const addCondition = () =>
@@ -272,9 +273,8 @@ function RuleDialog({
   const problem = (): string => {
     if (!r.name.trim()) return '请填写规则名称'
     if (!r.target_group.trim()) return '请选择目标分组'
-    if (kind === '') return '请选择触发方式：绑定成功时、按巡检周期，或两者都执行'
-    if (r.interval_minutes <= 0 && (kind === 'interval' || kind === 'both'))
-      return '巡检周期必须大于 0 分钟'
+    if (kind === '') return '至少勾选一种触发方式：绑定成功时，或按巡检周期'
+    if (r.interval_minutes < 0) return '巡检周期不能为负'
     if (r.source_groups.includes(r.target_group)) return '源分组与目标分组不能相同'
     return ''
   }
@@ -329,66 +329,55 @@ function RuleDialog({
           </Field>
         </div>
 
-        <Fieldset legend="触发条件（至少选一个）">
+        <Fieldset
+          legend="触发条件（至少选一个）"
+          hint="两个都可以勾：勾了「绑定成功时」就在绑定那一刻跑，勾了「按巡检周期」就再按周期查一遍，结果取并集。"
+        >
           {/*
-            A dropdown first, then only the fields that kind needs: the old form
-            showed a switch and a number input at once, so neither read as the
-            choice — an operator could not tell what turning the switch off
-            would leave behind. Choosing 巡检周期 reveals the interval; 绑定时 and
-            两者都 reveal nothing extra, because there is nothing else to set.
+            Checkboxes rather than a dropdown: the stored trigger IS two
+            independent switches (on_bind + interval_minutes), so a single-choice
+            control had to invent a combined "both" option and map back and forth
+            — and an operator who wanted both had to discover that option.
+            Ticking 按巡检周期 reveals the interval, which is the only field the
+            choice needs.
           */}
-          <Field
-            label="触发方式"
-            hint={kind ? TRIGGER_HINT[kind] : '先选择这条规则什么时候执行。'}
-          >
-            <Select
-              value={kind}
-              onChange={(v) => {
-                if (v === 'bind') set({ on_bind: true, interval_minutes: 0 })
-                else if (v === 'interval')
-                  set({
-                    on_bind: false,
-                    interval_minutes: r.interval_minutes > 0 ? r.interval_minutes : DEFAULT_INTERVAL_MINUTES,
-                  })
-                else if (v === 'both')
-                  set({
-                    on_bind: true,
-                    interval_minutes: r.interval_minutes > 0 ? r.interval_minutes : DEFAULT_INTERVAL_MINUTES,
-                  })
-                // 请选择 clears the trigger. Leaving the previous choice in place
-                // would make the option inert — the dropdown would snap back and
-                // the operator would think the control was broken.
-                else set({ on_bind: false, interval_minutes: 0 })
-              }}
-              ariaLabel="触发方式"
-              className="w-64"
-            >
-              <option value="">请选择</option>
-              <option value="bind">绑定成功时</option>
-              <option value="interval">按巡检周期</option>
-              <option value="both">两者都执行</option>
-            </Select>
-          </Field>
+          <CheckboxRow
+            checked={r.on_bind}
+            onChange={(v) => set({ on_bind: v })}
+            label="绑定成功时"
+            hint={TRIGGER_HINT.bind}
+          />
 
-          {kind === 'interval' || kind === 'both' ? (
-            <Field
-              label="巡检周期"
-              hint="到点检查所有成员；周期越短，账号转换得越快，网关调用也越多。"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <Input
-                  type="number"
-                  min={1}
-                  value={r.interval_minutes}
-                  onChange={(v) => set({ interval_minutes: Number(v) })}
-                  ariaLabel="巡检周期（分钟）"
-                  className="w-20"
-                  inputMode="numeric"
-                />
-                <span className="text-xs text-muted-foreground">分钟</span>
-              </div>
-            </Field>
-          ) : null}
+          <CheckboxRow
+            checked={r.interval_minutes > 0}
+            onChange={(v) =>
+              set({ interval_minutes: v ? r.interval_minutes || DEFAULT_INTERVAL_MINUTES : 0 })
+            }
+            label="按巡检周期"
+            hint={TRIGGER_HINT.interval}
+          />
+
+          {r.interval_minutes > 0 && (
+            <div className="pl-6.5">
+              <Field
+                label="巡检周期"
+                hint="到点检查所有成员；周期越短，账号转换得越快，网关调用也越多。"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={r.interval_minutes}
+                    onChange={(v) => set({ interval_minutes: Number(v) })}
+                    ariaLabel="巡检周期（分钟）"
+                    className="w-20"
+                    inputMode="numeric"
+                  />
+                  <span className="text-xs text-muted-foreground">分钟</span>
+                </div>
+              </Field>
+            </div>
+          )}
         </Fieldset>
 
         <div className="grid gap-4 sm:grid-cols-2">

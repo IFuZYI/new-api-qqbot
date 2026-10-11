@@ -178,6 +178,48 @@ export function Field({
   )
 }
 
+/**
+ * CheckboxRow is a labelled checkbox for a settings form.
+ *
+ * It is a real <input type="checkbox"> inside its <label>, so the whole row is
+ * the hit area (a bare 14px box is under the 24x24 minimum target size) and the
+ * text is its accessible name without an aria-label to keep in sync.
+ *
+ * `hint` explains what ticking it does — a checkbox whose effect the operator has
+ * to guess is worse than no checkbox, because the state is saved silently.
+ */
+export function CheckboxRow({
+  checked,
+  onChange,
+  label,
+  hint,
+  disabled,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  hint?: string
+  disabled?: boolean
+}) {
+  return (
+    <label
+      className={`flex cursor-pointer items-start gap-2.5 ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
+    >
+      <input
+        type="checkbox"
+        className="mt-0.5 size-4 shrink-0"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="min-w-0">
+        <span className="text-xs font-medium text-foreground/80">{label}</span>
+        {hint && <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{hint}</span>}
+      </span>
+    </label>
+  )
+}
+
 export function Input({
   value,
   onChange,
