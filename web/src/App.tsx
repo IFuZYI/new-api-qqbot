@@ -176,15 +176,10 @@ export default function App() {
         {tab === 'groups' && <Groups onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'rules' && <Rules onDone={flash} onFail={fail} />}
-        {tab === 'settings' && (
-          <SettingsView
-            onDone={flash}
-            onFail={fail}
-            onRefresh={refresh}
-            username={auth.username}
-          />
+        {tab === 'settings' && <SettingsView onDone={flash} onFail={fail} onRefresh={refresh} />}
+        {tab === 'connection' && (
+          <Connection onDone={flash} onFail={fail} onRefresh={refresh} username={auth.username} />
         )}
-        {tab === 'connection' && <Connection onDone={flash} onFail={fail} onRefresh={refresh} />}
       </main>
     </div>
   )
@@ -893,17 +888,13 @@ function SettingsView({
   onDone,
   onFail,
   onRefresh,
-  username,
 }: {
   onDone: (m: string) => void
   onFail: (e: unknown) => void
   onRefresh: () => Promise<void>
-  username: string
 }) {
   const [s, setS] = useState<Settings | null>(null)
   const [busy, setBusy] = useState(false)
-  const [cur, setCur] = useState('')
-  const [next, setNext] = useState('')
 
   useEffect(() => {
     api.settings().then(setS).catch(onFail)
@@ -938,93 +929,74 @@ function SettingsView({
           </Button>
         }
       >
-        <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
-          <Field
-            label="成员列表巡检"
-            hint="兜底功能。新成员进群会立即记录，绑定成功也会立即记录；关闭后只在成员变动时同步昵称等资料。"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <Switch
-                checked={s.member_patrol_enabled}
-                onChange={(v) => setS({ ...s, member_patrol_enabled: v })}
-                label={s.member_patrol_enabled ? '已启用' : '已停用'}
-              />
-              <div className="flex shrink-0 items-center gap-2">
-                <Input
-                  type="number"
-                  min={0}
-                  value={s.member_sync_minutes}
-                  onChange={num('member_sync_minutes')}
-                  ariaLabel="成员列表巡检间隔（分钟）"
-                  className="w-20"
-                />
-                <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-              </div>
-            </div>
-          </Field>
-          <Field
-            label="打卡榜巡检"
-            hint="打卡没有事件通知（NapCat 不提供），只能轮询榜单。关闭后签到不会被记录，也就不会发放奖励。"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <Switch
-                checked={s.checkin_patrol_enabled}
-                onChange={(v) => setS({ ...s, checkin_patrol_enabled: v })}
-                label={s.checkin_patrol_enabled ? '已启用' : '已停用'}
-              />
-              <div className="flex shrink-0 items-center gap-2">
-                <Input
-                  type="number"
-                  min={0}
-                  value={s.checkin_sync_minutes}
-                  onChange={num('checkin_sync_minutes')}
-                  ariaLabel="打卡榜巡检间隔（分钟）"
-                  className="w-20"
-                />
-                <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-              </div>
-            </div>
-          </Field>
-          <Field label="签到奖励下限（quota）">
-            <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
-          </Field>
-          <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
-            <Input type="number" min={0} value={s.reward_max} onChange={num('reward_max')} className="w-40" />
-          </Field>
-          <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
-            <Input value={s.timezone} onChange={str('timezone')} className="w-56" />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="修改密码" description={`当前管理账号：${username}`}>
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="当前密码">
-            <Input type="password" value={cur} onChange={setCur} autoComplete="current-password" />
-          </Field>
-          <Field label="新密码" hint="至少 8 位">
-            <Input type="password" value={next} onChange={setNext} autoComplete="new-password" />
-          </Field>
-          <FieldAction>
-            <Button
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true)
-                try {
-                  await api.changePassword(cur, next)
-                  setCur('')
-                  setNext('')
-                  onDone('密码已修改')
-                } catch (e) {
-                  onFail(e)
-                } finally {
-                  setBusy(false)
-                }
-              }}
+        <div className="space-y-6">
+          {/* The two patrols watch different things and can be switched off
+              independently, so they get their own sections instead of sharing
+              one grid where the pairing is only implied by order. */}
+          <section className="space-y-3.5">
+            <h3 className="text-xs font-semibold tracking-tight text-foreground/80">群成员巡检</h3>
+            <Field
+              label="成员列表巡检"
+              hint="兜底功能。新成员进群会立即记录，绑定成功也会立即记录；关闭后只在成员变动时同步昵称等资料。"
             >
-              修改密码
-            </Button>
-          </FieldAction>
+              <div className="flex items-center justify-between gap-3">
+                <Switch
+                  checked={s.member_patrol_enabled}
+                  onChange={(v) => setS({ ...s, member_patrol_enabled: v })}
+                  label={s.member_patrol_enabled ? '已启用' : '已停用'}
+                />
+                <div className="flex shrink-0 items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={s.member_sync_minutes}
+                    onChange={num('member_sync_minutes')}
+                    ariaLabel="成员列表巡检间隔（分钟）"
+                    className="w-20"
+                  />
+                  <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
+                </div>
+              </div>
+            </Field>
+          </section>
+
+          <section className="space-y-3.5 border-t border-border pt-5">
+            <h3 className="text-xs font-semibold tracking-tight text-foreground/80">签到与奖励</h3>
+            <Field
+              label="打卡榜巡检"
+              hint="打卡没有事件通知（NapCat 不提供），只能轮询榜单。关闭后签到不会被记录，也就不会发放奖励。"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <Switch
+                  checked={s.checkin_patrol_enabled}
+                  onChange={(v) => setS({ ...s, checkin_patrol_enabled: v })}
+                  label={s.checkin_patrol_enabled ? '已启用' : '已停用'}
+                />
+                <div className="flex shrink-0 items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={s.checkin_sync_minutes}
+                    onChange={num('checkin_sync_minutes')}
+                    ariaLabel="打卡榜巡检间隔（分钟）"
+                    className="w-20"
+                  />
+                  <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
+                </div>
+              </div>
+            </Field>
+            <div className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
+              <Field label="签到奖励下限（quota）">
+                <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
+              </Field>
+              <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
+                <Input type="number" min={0} value={s.reward_max} onChange={num('reward_max')} className="w-40" />
+              </Field>
+              <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
+                <Input value={s.timezone} onChange={str('timezone')} className="w-56" />
+              </Field>
+            </div>
+          </section>
         </div>
       </Card>
     </>
@@ -1064,10 +1036,12 @@ function Connection({
   onDone,
   onFail,
   onRefresh,
+  username,
 }: {
   onDone: (m: string) => void
   onFail: (e: unknown) => void
   onRefresh: () => Promise<void>
+  username: string
 }) {
   const [c, setC] = useState<Config | null>(null)
   const [revs, setRevs] = useState<ConfigRevisions>({ newapi: '', napcat: '' })
@@ -1075,6 +1049,8 @@ function Connection({
   const [autoOpen, setAutoOpen] = useState(false)
   const [newapiCheck, setNewapiCheck] = useState<CheckResult[] | null>(null)
   const [napcatCheck, setNapcatCheck] = useState<CheckResult[] | null>(null)
+  const [cur, setCur] = useState('')
+  const [next, setNext] = useState('')
 
   const apply = useCallback((r: { config: Config; revisions: ConfigRevisions }) => {
     setC(r.config)
@@ -1286,6 +1262,40 @@ function Connection({
           }}
         />
       )}
+
+      {/* Lives here rather than under 监测设置: it is the panel's own account,
+          the same subject as the two connection cards above it, and it was the
+          only unrelated card in the settings tab. */}
+      <Card title="修改密码" description={`当前管理账号：${username}`}>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="当前密码">
+            <Input type="password" value={cur} onChange={setCur} autoComplete="current-password" />
+          </Field>
+          <Field label="新密码" hint="至少 8 位">
+            <Input type="password" value={next} onChange={setNext} autoComplete="new-password" />
+          </Field>
+          <FieldAction>
+            <Button
+              disabled={busy !== ''}
+              onClick={async () => {
+                setBusy('password')
+                try {
+                  await api.changePassword(cur, next)
+                  setCur('')
+                  setNext('')
+                  onDone('密码已修改')
+                } catch (e) {
+                  onFail(e)
+                } finally {
+                  setBusy('')
+                }
+              }}
+            >
+              {busy === 'password' ? '修改中…' : '修改密码'}
+            </Button>
+          </FieldAction>
+        </div>
+      </Card>
     </div>
   )
 }
