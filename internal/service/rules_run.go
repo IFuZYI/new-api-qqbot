@@ -102,8 +102,16 @@ func ruleToStore(r Rule) (store.PromotionRule, error) {
 	}, nil
 }
 
-// ruleFromStore decodes the JSON list fields. A malformed blob yields an empty
-// list rather than failing the whole listing.
+// ruleFromStore decodes the JSON list fields, marking the rule unusable when a
+// stored blob cannot be read.
+//
+// Both list fields fail CLOSED, not open. An empty list is meaningful on both
+// sides — source_groups empty means 任意分组 (every group), conditions empty
+// means "no extra restriction" — so letting a corrupt blob decode into one
+// silently widens the rule. That is the dangerous direction: a targeted rule
+// becomes a blanket conversion that moves every bound member's account into the
+// target group. A rule whose stored JSON cannot be read is therefore marked
+// unusable (DecodeError) instead, and Matches refuses it.
 func ruleFromStore(row store.PromotionRule) Rule {
 	r := Rule{
 		ID:              row.ID,
@@ -116,21 +124,29 @@ func ruleFromStore(row store.PromotionRule) Rule {
 		LastError:       row.LastError,
 	}
 	if row.SourceGroups != "" {
-		_ = json.Unmarshal([]byte(row.SourceGroups), &r.SourceGroups)
+		if err := json.Unmarshal([]byte(row.SourceGroups), &r.SourceGroups); err != nil {
+			// Marked unusable below; the slice is reset to empty rather than
+			// left nil so the JSON stays an array. A nil slice marshals to
+			// `null`, and the panel reads `.length` off it — one corrupt row
+			// would take the whole page down with a TypeError instead of
+			// showing the one broken rule. `DecodeError` is what carries
+			// "unusable"; the field itself does not need to be null to say so.
+			r.DecodeError = fmt.Sprintf("source_groups unreadable: %v", err)
+		}
 	}
 	if r.SourceGroups == nil {
 		r.SourceGroups = []string{}
 	}
 	if row.Conditions != "" {
 		if err := json.Unmarshal([]byte(row.Conditions), &r.Conditions); err != nil {
-			// An empty condition list means "match everyone bound", so a
-			// corrupt blob must not be allowed to decode into one. Mark the
-			// rule unusable rather than widening it.
-			r.Conditions = nil
+			// Same reasoning as source_groups: an empty condition list means
+			// "match everyone bound", so a corrupt blob must not be allowed to
+			// decode into one. The rule is refused via DecodeError, and the
+			// slice stays an array for the same wire-format reason.
 			r.DecodeError = fmt.Sprintf("conditions unreadable: %v", err)
 		}
 	}
-	if r.Conditions == nil && r.DecodeError == "" {
+	if r.Conditions == nil {
 		r.Conditions = []Condition{}
 	}
 	return r
