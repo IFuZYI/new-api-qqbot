@@ -62,7 +62,7 @@ export default function Rules({
     <>
       <Card
         title="分组转换规则"
-        description="规则在绑定成功时和/或巡检周期执行；源分组留空表示任意分组。既无触发方式又无条件的规则不会匹配任何人。"
+        description="每条规则选择一种触发方式（绑定成功时 / 按巡检周期 / 两者都执行），并指定源分组与目标分组；源分组留空表示任意分组。未选择触发方式的规则不会匹配任何人。"
         actions={
           <>
             <Button disabled={busy} onClick={run}>
@@ -94,10 +94,10 @@ export default function Rules({
                 <Cell className="font-medium">{r.name}</Cell>
                 <Cell className="text-xs">
                   <div className="flex flex-wrap gap-1">
-                    {r.on_bind && <Badge tone="accent">绑定</Badge>}
-                    {r.interval_minutes > 0 && <Badge>巡检 {r.interval_minutes}min</Badge>}
+                    {r.on_bind && <Badge tone="accent">绑定成功时</Badge>}
+                    {r.interval_minutes > 0 && <Badge>按巡检周期 {r.interval_minutes}min</Badge>}
                     {!r.on_bind && r.interval_minutes <= 0 && (
-                      <span className="text-muted-foreground">无触发</span>
+                      <span className="text-muted-foreground">未选择</span>
                     )}
                   </div>
                 </Cell>
@@ -179,13 +179,14 @@ export default function Rules({
   )
 }
 
-/** blankRule is a new rule: enabled, triggered on bind, nothing selected. */
+/** blankRule is a new rule: enabled, nothing selected — the trigger is a
+ * deliberate choice (see the trigger-type dropdown), not a default. */
 function blankRule(): Rule {
   return {
     id: 0,
     name: '',
     enabled: true,
-    on_bind: true,
+    on_bind: false,
     interval_minutes: 0,
     source_groups: [],
     target_group: '',
@@ -193,6 +194,36 @@ function blankRule(): Rule {
     last_run_at: 0,
   }
 }
+
+/**
+ * TriggerKind is the trigger as the operator thinks of it. The stored shape is
+ * two independent fields (on_bind + interval_minutes), but the choice is one:
+ * "when does this rule run?". Deriving the kind from the stored pair keeps the
+ * dropdown and the API in step — there is no third source of truth to drift.
+ */
+type TriggerKind = 'bind' | 'interval' | 'both'
+
+/** triggerKind reads the stored pair back as one choice; '' means no trigger
+ * (a rule stored before this was enforced), which the dropdown shows as 请选择. */
+function triggerKind(r: Rule): TriggerKind | '' {
+  if (r.on_bind && r.interval_minutes > 0) return 'both'
+  if (r.on_bind) return 'bind'
+  if (r.interval_minutes > 0) return 'interval'
+  return ''
+}
+
+/** TRIGGER_HINT explains what the selected kind actually does, shown only for
+ * the chosen kind: the point of picking a type is to learn what it means. */
+const TRIGGER_HINT: Record<TriggerKind, string> = {
+  bind: '成员绑定成功的瞬间执行一次，反应最快；期间没有新的绑定就不会运行。',
+  interval: '按周期检查所有成员，不依赖任何事件；即使群里没人说话也会执行。',
+  both: '绑定成功的瞬间执行一次，之后每次巡检再检查一遍，两者取并集。',
+}
+
+/** DEFAULT_INTERVAL_MINUTES is the interval a rule starts with when it is
+ * switched to a polling kind. It must be positive: 0 would mean "no polling",
+ * which contradicts the kind the operator just chose. */
+const DEFAULT_INTERVAL_MINUTES = 60
 
 function label(meta: RuleMeta | null, value: string): string {
   return meta?.condition_types.find((c) => c.value === value)?.label ?? value
@@ -218,6 +249,10 @@ function RuleDialog({
 
   const set = (patch: Partial<Rule>) => setR((prev) => ({ ...prev, ...patch }))
 
+  // The trigger is one choice in the UI, two fields in the API; derive it so the
+  // dropdown always reflects what would actually be saved.
+  const kind = triggerKind(r)
+
   const addCondition = () =>
     set({
       conditions: [
@@ -237,7 +272,9 @@ function RuleDialog({
   const problem = (): string => {
     if (!r.name.trim()) return '请填写规则名称'
     if (!r.target_group.trim()) return '请选择目标分组'
-    if (!r.on_bind && r.interval_minutes <= 0) return '至少选择一种触发方式：绑定触发或巡检周期'
+    if (kind === '') return '请选择触发方式：绑定成功时、按巡检周期，或两者都执行'
+    if (r.interval_minutes <= 0 && (kind === 'interval' || kind === 'both'))
+      return '巡检周期必须大于 0 分钟'
     if (r.source_groups.includes(r.target_group)) return '源分组与目标分组不能相同'
     return ''
   }
@@ -293,24 +330,65 @@ function RuleDialog({
         </div>
 
         <Fieldset legend="触发条件（至少选一个）">
-          <Switch
-            checked={r.on_bind}
-            onChange={(v) => set({ on_bind: v })}
-            label="绑定成功时立即执行"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">巡检周期</span>
-            <Input
-              type="number"
-              min={0}
-              value={r.interval_minutes}
-              onChange={(v) => set({ interval_minutes: Number(v) })}
-              ariaLabel="巡检周期（分钟）"
-              className="w-20"
-              inputMode="numeric"
-            />
-            <span className="text-xs text-muted-foreground">分钟（0 = 不巡检）</span>
-          </div>
+          {/*
+            A dropdown first, then only the fields that kind needs: the old form
+            showed a switch and a number input at once, so neither read as the
+            choice — an operator could not tell what turning the switch off
+            would leave behind. Choosing 巡检周期 reveals the interval; 绑定时 and
+            两者都 reveal nothing extra, because there is nothing else to set.
+          */}
+          <Field
+            label="触发方式"
+            hint={kind ? TRIGGER_HINT[kind] : '先选择这条规则什么时候执行。'}
+          >
+            <Select
+              value={kind}
+              onChange={(v) => {
+                if (v === 'bind') set({ on_bind: true, interval_minutes: 0 })
+                else if (v === 'interval')
+                  set({
+                    on_bind: false,
+                    interval_minutes: r.interval_minutes > 0 ? r.interval_minutes : DEFAULT_INTERVAL_MINUTES,
+                  })
+                else if (v === 'both')
+                  set({
+                    on_bind: true,
+                    interval_minutes: r.interval_minutes > 0 ? r.interval_minutes : DEFAULT_INTERVAL_MINUTES,
+                  })
+                // 请选择 clears the trigger. Leaving the previous choice in place
+                // would make the option inert — the dropdown would snap back and
+                // the operator would think the control was broken.
+                else set({ on_bind: false, interval_minutes: 0 })
+              }}
+              ariaLabel="触发方式"
+              className="w-64"
+            >
+              <option value="">请选择</option>
+              <option value="bind">绑定成功时</option>
+              <option value="interval">按巡检周期</option>
+              <option value="both">两者都执行</option>
+            </Select>
+          </Field>
+
+          {kind === 'interval' || kind === 'both' ? (
+            <Field
+              label="巡检周期"
+              hint="到点检查所有成员；周期越短，账号转换得越快，网关调用也越多。"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  value={r.interval_minutes}
+                  onChange={(v) => set({ interval_minutes: Number(v) })}
+                  ariaLabel="巡检周期（分钟）"
+                  className="w-20"
+                  inputMode="numeric"
+                />
+                <span className="text-xs text-muted-foreground">分钟</span>
+              </div>
+            </Field>
+          ) : null}
         </Fieldset>
 
         <div className="grid gap-4 sm:grid-cols-2">
