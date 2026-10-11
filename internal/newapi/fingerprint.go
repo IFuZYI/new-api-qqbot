@@ -26,7 +26,10 @@ import (
 // endpoint) — what stops logins is reusing the stored session and refreshing
 // it, which is what the rest of this package does. The fingerprint is what
 // keeps that identity recognisable across restarts.
-const fingerprintSetting = "newapi.fingerprint"
+// fingerprintSetting is the setting the fingerprint is derived from. The secret
+// itself lives in config (which generates and persists it); this name is here so
+// the two ends of that agreement are greppable together.
+const fingerprintSetting = "newapi.fingerprint_secret"
 
 // fingerprintBytes is how much of the digest is kept. 12 bytes is 24 hex
 // characters: far beyond any collision concern for a handful of clients, and

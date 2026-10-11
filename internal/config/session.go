@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -83,28 +85,42 @@ func (m *Manager) ClearNewAPISession() error {
 	return m.st.PutSetting(newAPISessionKey, "")
 }
 
-// SessionFingerprint returns the stable secret this service derives its gateway
-// fingerprint from.
+// fingerprintSecretSetting holds the secret the gateway fingerprint is derived
+// from, generated on first use.
+const fingerprintSecretSetting = "newapi.fingerprint_secret"
+
+// SessionFingerprint returns the secret this service derives its gateway
+// fingerprint from, generating and persisting one on first use.
 //
-// It is the panel's own signing key, which already lives in the database and
-// survives restarts and container rebuilds, so the fingerprint is stable
-// without storing a second secret. When the key cannot be read (a very early
-// start) an empty secret is returned; the caller then presents the plain
-// User-Agent rather than a fingerprint that would change on the next start.
+// It is its own secret, deliberately NOT the panel's session-cookie signing key:
+// the fingerprint travels in a header to the gateway (and therefore into
+// whatever request logs sit in between), so deriving it from the signing key
+// would put a hash of that key in a third party's log for no benefit. Keeping
+// them separate also means rotating either one cannot silently change the other.
+//
+// It is stored, not computed from the host or the process, so it is identical
+// after a restart and inside a rebuilt container — which is the whole point:
+// the gateway records the fingerprint on the session row, and a value that
+// changed per start would look like a new device every time.
 func (m *Manager) SessionFingerprint() string {
-	// GetSetting, not GetSettingRaw: the stored value is JSON-encoded, and the
-	// api package reads the same key the same way.
 	var secret string
-	if err := m.st.GetSetting(signingKeySetting, &secret); err != nil {
+	if err := m.st.GetSetting(fingerprintSecretSetting, &secret); err != nil {
 		return ""
 	}
+	if secret != "" {
+		return secret
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return ""
+	}
+	secret = hex.EncodeToString(raw)
+	// A failed write still returns the value for this process: an unstable
+	// identity is worse than an unpersisted one, and the next start simply
+	// generates another.
+	_ = m.st.PutSetting(fingerprintSecretSetting, secret)
 	return secret
 }
-
-// signingKeySetting names the panel's HMAC key. It is owned by the api package
-// (which mints it on first use); duplicated here as a constant so config does
-// not import api just to read one string.
-const signingKeySetting = "auth.session_key"
 
 // sessionStore is the narrow slice of store the session helpers need, so they
 // stay testable and the dependency is visible.

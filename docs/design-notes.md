@@ -130,7 +130,7 @@ fail closed，表现成「规则好像不生效」，是最难查的一种。
 白白花掉同一个 20 次/20 分钟的额度，所以 `Reauthenticate` 先看有没有会话 cookie，没有就直接登录。
 由 `internal/newapi` 的 `TestReauthenticateLogsInDirectlyWithoutASession` 钉住。
 
-**请求带一个稳定的设备指纹**（`newapi.fingerprint`，由面板签名密钥派生，随 `User-Agent` 发出）。
+**请求带一个稳定的设备指纹**（`newapi.fingerprint`，由首次使用时生成并落库的独立密钥派生，随 `User-Agent` 发出）。
 上游把 `User-Agent` 记在会话行上，所以指纹让本服务在会话列表里可辨认（运营能挑出该撤销的那一条），
 并让每次重启在网关看来都是同一台设备。它不采集宿主机信息，也不替代上面的会话复用——网关没有
 「按设备复用会话」的接口，能阻止重复登录的只有复用那条会话。
