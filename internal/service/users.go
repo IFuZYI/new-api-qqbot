@@ -35,8 +35,11 @@ type UserRow struct {
 	NewAPIStatus int    `json:"newapi_status,omitempty"`
 	BindSource   string `json:"bind_source,omitempty"`
 	CheckedToday bool   `json:"checked_today"`
-	CheckinDays  int    `json:"checkin_days"`
-	RewardToday  int    `json:"reward_today"`
+	// CheckinSource says how today's check-in was learned: board or message.
+	// Empty when there is no check-in today.
+	CheckinSource string `json:"checkin_source,omitempty"`
+	CheckinDays   int    `json:"checkin_days"`
+	RewardToday   int    `json:"reward_today"`
 }
 
 // UserFilter narrows the directory. Every field is optional; the zero value
@@ -116,6 +119,7 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 		}
 		if c, err := s.st.GetCheckin(m.QQ, date); err == nil {
 			row.CheckedToday = true
+			row.CheckinSource = c.Source
 			row.RewardToday = c.RewardQuota
 		}
 		if n, err := s.st.CountCheckins(m.QQ); err == nil {

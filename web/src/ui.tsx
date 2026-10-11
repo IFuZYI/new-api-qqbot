@@ -70,7 +70,12 @@ export function Card({
   description,
   className = '',
 }: {
-  title?: string
+  /**
+   * A node rather than a string so a card can carry a badge beside its name
+   * (e.g. 已停用). aria-labelledby still names the section from the h2, and the
+   * badge text is part of it, which is what a screen reader should hear.
+   */
+  title?: ReactNode
   children: ReactNode
   actions?: ReactNode
   /** Optional one-line subtitle under the title. */
@@ -225,6 +230,50 @@ export function Input({
       className={`h-8 max-w-full min-w-0 rounded-control border bg-background px-2.5 text-sm text-foreground transition-colors placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 ${
         invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
       } ${FOCUS} ${className}`}
+    />
+  )
+}
+
+/**
+ * Textarea is the multi-line sibling of Input, for the command lists: one
+ * pattern per line is the whole format, so the control has to show several
+ * lines at once and keep the newlines the operator typed.
+ */
+export function Textarea({
+  value,
+  onChange,
+  placeholder,
+  rows = 4,
+  disabled,
+  invalid,
+  className = '',
+  ariaLabel,
+  mono,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  rows?: number
+  disabled?: boolean
+  invalid?: boolean
+  className?: string
+  ariaLabel?: string
+  /** Monospace: for values where each character is significant. */
+  mono?: boolean
+}) {
+  return (
+    <textarea
+      value={value}
+      rows={rows}
+      placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      aria-invalid={invalid || undefined}
+      spellCheck={false}
+      onChange={(e) => onChange(e.target.value)}
+      className={`block max-w-full min-w-0 rounded-control border bg-background px-2.5 py-1.5 text-sm leading-5 text-foreground transition-colors placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 ${
+        invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
+      } ${mono ? 'font-mono text-xs' : ''} ${FOCUS} ${className}`}
     />
   )
 }
@@ -665,6 +714,7 @@ export function Switch({
   label,
   disabled,
   id,
+  ariaLabel,
 }: {
   checked: boolean
   onChange: (v: boolean) => void
@@ -672,6 +722,12 @@ export function Switch({
   label?: string
   disabled?: boolean
   id?: string
+  /**
+   * Overrides the accessible name. Needed where the visible label is only the
+   * state ("已启用"), which would leave several switches on one page sharing an
+   * accessible name.
+   */
+  ariaLabel?: string
 }) {
   return (
     <button
@@ -679,7 +735,7 @@ export function Switch({
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label={label}
+      aria-label={ariaLabel ?? label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`group inline-flex min-h-8 items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS} rounded-control`}

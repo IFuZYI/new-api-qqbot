@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,14 +249,19 @@ func (s *Service) IsCheckinCommand(message string) bool {
 	return s.checkinPatterns().Matches(message)
 }
 
-// CheckinByAnyMessage reports whether "any message counts as a check-in" is on,
-// which is the setting that makes a plain message a check-in.
+// CheckinByAnyMessage reports whether every message counts as a check-in.
+//
+// The master switch enables the path; the pattern list then decides which
+// messages qualify. An empty list is the explicit "any message" mode - there is
+// no message that fails to match - while a configured list means only those
+// commands count. Reading the switch alone as "any message" would silently
+// override a configured command list and check in everyone who speaks.
 func (s *Service) CheckinByAnyMessage() bool {
 	cfg, err := s.Settings()
 	if err != nil {
 		return false
 	}
-	return cfg.CheckinByMessageEnabled
+	return cfg.CheckinByMessageEnabled && strings.TrimSpace(cfg.CheckinPatterns) == ""
 }
 
 // BindOnJoinEnabled reports whether a member is bound the moment they join.

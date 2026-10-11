@@ -49,13 +49,39 @@ export interface CheckResult {
 }
 
 export interface Settings {
+  // Patrols
   member_patrol_enabled: boolean
   member_sync_minutes: number
   checkin_patrol_enabled: boolean
   checkin_sync_minutes: number
+
+  // Binding paths. Only ever touches members with no binding.
+  bind_command_enabled: boolean
+  /** Command list, one pattern per line; /slash-delimited/ lines are regexes. */
+  bind_command_patterns: string
+  bind_on_join_enabled: boolean
+  bind_patrol_enabled: boolean
+  bind_patrol_minutes: number
+
+  // Check-in paths
+  checkin_by_message_enabled: boolean
+  checkin_patterns: string
+
+  // Reward
   reward_min: number
   reward_max: number
   timezone: string
+}
+
+/** One patrol's health, as the scheduler reports it. */
+export interface PatrolState {
+  last_run?: number
+  last_error?: string
+}
+
+export interface StatusResponse {
+  patrols: Record<string, PatrolState>
+  settings: Settings
 }
 
 export interface Group {
@@ -103,6 +129,8 @@ export interface UserRow {
   bind_source?: string
 
   checked_today: boolean
+  /** How today's check-in was learned: board or message. Absent when none. */
+  checkin_source?: 'board' | 'message'
   checkin_days: number
   reward_today: number
 }
@@ -316,6 +344,8 @@ export const api = {
   settings: () => req<Settings>('/api/settings'),
   saveSettings: (s: Settings) =>
     req<Settings>('/api/settings', { method: 'POST', body: JSON.stringify(s) }),
+  /** Patrol health plus the switches, so the UI can tell stopped from broken. */
+  status: () => req<StatusResponse>('/api/status'),
 
   rules: () => req<{ items: Rule[] }>('/api/rules'),
   ruleMeta: () => req<RuleMeta>('/api/rules/meta'),
@@ -328,5 +358,10 @@ export const api = {
   /** new-api group names, for the source/target pickers. */
   newAPIGroups: () => req<Record<string, { desc: string; ratio: number }>>('/api/newapi/groups'),
 
-  action: (name: string) => req<Record<string, unknown>>(`/api/actions/${name}`, { method: 'POST', body: '{}' }),
+  /** Run a named sweep on the server. */
+  action: (name: string, body: Record<string, unknown> = {}) =>
+    req<Record<string, unknown>>(`/api/actions/${name}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 }

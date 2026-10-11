@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type MembersResponse, type Settings, type UserFilter, type UserRow, type UsersResponse } from './api'
+import { api, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type Member, type MembersResponse, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
+import SettingsView from './features/Settings'
 import { ThemeToggle } from './theme'
 import { Badge, Button, Card, Cell, Combobox, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
 
@@ -190,6 +191,7 @@ function Overview({
 }) {
   const [busy, setBusy] = useState('')
   const [members, setMembers] = useState<MembersResponse | null>(null)
+  const [manualOpen, setManualOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -259,9 +261,137 @@ function Overview({
           <Button disabled={!!busy} onClick={() => run('award', '发放奖励')}>
             发放奖励
           </Button>
+          <Button disabled={!!busy} onClick={() => setManualOpen(true)}>
+            手动签到
+          </Button>
         </div>
+        <p className="mt-3 border-t border-border pt-3 text-[11px] leading-4 text-muted-foreground">
+          「手动签到」用于验证「消息即签到」这条路：选一个成员，按当天记录一次签到（同一天只会记一次），随后可以点「发放奖励」看他是否拿到额度。
+        </p>
       </Card>
+
+      {manualOpen && (
+        <ManualCheckin
+          members={members?.items ?? []}
+          onClose={() => setManualOpen(false)}
+          onDone={async (msg) => {
+            setManualOpen(false)
+            onDone(msg)
+            await load()
+            await onRefresh()
+          }}
+          onFail={onFail}
+        />
+      )}
     </>
+  )
+}
+
+/**
+ * ManualCheckin records a message-driven check-in for one member, so the path
+ * can be exercised without waiting for somebody to speak in a group.
+ *
+ * It is the same service call the event listener makes, including the
+ * once-per-day rule, so what the operator sees here is what a real message
+ * would do.
+ */
+function ManualCheckin({
+  members,
+  onClose,
+  onDone,
+  onFail,
+}: {
+  members: Member[]
+  onClose: () => void
+  onDone: (m: string) => void
+  onFail: (e: unknown) => void
+}) {
+  const [qq, setQQ] = useState('')
+  const [groupID, setGroupID] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  // Only members that are actually in a group can check in, and the group has to
+  // be one they are in: a check-in is a message in a specific group.
+  const options = members
+    .filter((m) => m.qq > 0 && (m.group_ids?.length ?? 0) > 0)
+    .map((m) => ({
+      value: String(m.qq),
+      label: `${m.qq}${m.nickname ? `（${m.nickname}）` : ''}`,
+      keywords: m.nickname,
+    }))
+  const selected = members.find((m) => String(m.qq) === qq)
+  const groupOptions = selected?.group_ids ?? []
+  const effectiveGroup = groupID || String(groupOptions[0] ?? '')
+
+  const problem = !qq ? '请选择群成员' : !effectiveGroup ? '该成员不在任何监测群里' : ''
+
+  const run = async () => {
+    if (problem) {
+      onFail(new Error(problem))
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await api.action('checkin-member', {
+        qq: Number(qq),
+        group_id: Number(effectiveGroup),
+      })
+      onDone(
+        res.recorded
+          ? `已为 ${qq} 记录 ${res.date} 的签到`
+          : `${qq} 在 ${res.date} 已经签过到（同一天只记一次）`,
+      )
+    } catch (e) {
+      onFail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      title="手动记录签到"
+      onClose={onClose}
+      actions={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            取消
+          </Button>
+          <Button kind="primary" onClick={run} disabled={busy || problem !== ''}>
+            {busy ? '记录中…' : '记录签到'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field label="群成员" hint="只列出已在监测群里的成员">
+          <Combobox
+            value={qq}
+            onChange={(v) => {
+              setQQ(v)
+              setGroupID('')
+            }}
+            options={options}
+            ariaLabel="选择群成员"
+            placeholder="搜索 QQ 号或昵称"
+            emptyText="没有在群的成员；先到「群管理」同步成员"
+            className="w-full"
+          />
+        </Field>
+        {groupOptions.length > 1 && (
+          <Field label="所在群" hint="该成员在多个监测群里，选择在哪一个群里签到">
+            <Select value={effectiveGroup} onChange={setGroupID} className="w-full">
+              {groupOptions.map((g) => (
+                <option key={g} value={String(g)}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+        {problem && <WarnNote>{problem}</WarnNote>}
+      </div>
+    </Modal>
   )
 }
 
@@ -709,7 +839,18 @@ function Users({
                 </Cell>
                 <Cell className="text-xs text-muted-foreground">{m.bind_source || '—'}</Cell>
                 <Cell>
-                  {m.checked_today ? <Badge tone="ok">已签到</Badge> : <Badge>未签到</Badge>}
+                  {m.checked_today ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Badge tone="ok">已签到</Badge>
+                      {/* Which source recorded it: the board (QQ's own record)
+                          or a message. Worth showing because the two have
+                          different failure modes when a patrol is off. */}
+                      {m.checkin_source === 'message' && <Badge tone="info">消息</Badge>}
+                      {m.checkin_source === 'board' && <Badge>打卡榜</Badge>}
+                    </span>
+                  ) : (
+                    <Badge>未签到</Badge>
+                  )}
                 </Cell>
                 <Cell className="tabular-nums">{m.checkin_days}</Cell>
                 <Cell className="tabular-nums">{m.reward_today || '—'}</Cell>
@@ -869,127 +1010,6 @@ function RebindDialog({
         {problem && <WarnNote>{problem}</WarnNote>}
       </div>
     </Modal>
-  )
-}
-
-/* ---------------- settings ---------------- */
-
-function SettingsView({
-  onDone,
-  onFail,
-  onRefresh,
-}: {
-  onDone: (m: string) => void
-  onFail: (e: unknown) => void
-  onRefresh: () => Promise<void>
-}) {
-  const [s, setS] = useState<Settings | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    api.settings().then(setS).catch(onFail)
-  }, [onFail])
-
-  if (!s) return <Card title="监测设置">载入中…</Card>
-
-  const num = (k: keyof Settings) => (v: string) => setS({ ...s, [k]: Number(v) } as Settings)
-  const str = (k: keyof Settings) => (v: string) => setS({ ...s, [k]: v } as Settings)
-
-  const save = async () => {
-    setBusy(true)
-    try {
-      setS(await api.saveSettings(s))
-      onDone('设置已保存')
-      await onRefresh()
-    } catch (e) {
-      onFail(e)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <>
-      <Card
-        title="监测设置"
-        description="巡检周期与奖励规则；保存后立即生效。"
-        actions={
-          <Button kind="primary" disabled={busy} onClick={save}>
-            {busy ? '保存中…' : '保存'}
-          </Button>
-        }
-      >
-        <div className="space-y-6">
-          {/* The two patrols watch different things and can be switched off
-              independently, so they get their own sections instead of sharing
-              one grid where the pairing is only implied by order. */}
-          <section className="space-y-3.5">
-            <h3 className="text-xs font-semibold tracking-tight text-foreground/80">群成员巡检</h3>
-            <Field
-              label="成员列表巡检"
-              hint="兜底功能。新成员进群会立即记录，绑定成功也会立即记录；关闭后只在成员变动时同步昵称等资料。"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <Switch
-                  checked={s.member_patrol_enabled}
-                  onChange={(v) => setS({ ...s, member_patrol_enabled: v })}
-                  label={s.member_patrol_enabled ? '已启用' : '已停用'}
-                />
-                <div className="flex shrink-0 items-center gap-2">
-                  <Input
-                    type="number"
-                    min={0}
-                    value={s.member_sync_minutes}
-                    onChange={num('member_sync_minutes')}
-                    ariaLabel="成员列表巡检间隔（分钟）"
-                    className="w-20"
-                  />
-                  <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-                </div>
-              </div>
-            </Field>
-          </section>
-
-          <section className="space-y-3.5 border-t border-border pt-5">
-            <h3 className="text-xs font-semibold tracking-tight text-foreground/80">签到与奖励</h3>
-            <Field
-              label="打卡榜巡检"
-              hint="打卡没有事件通知（NapCat 不提供），只能轮询榜单。关闭后签到不会被记录，也就不会发放奖励。"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <Switch
-                  checked={s.checkin_patrol_enabled}
-                  onChange={(v) => setS({ ...s, checkin_patrol_enabled: v })}
-                  label={s.checkin_patrol_enabled ? '已启用' : '已停用'}
-                />
-                <div className="flex shrink-0 items-center gap-2">
-                  <Input
-                    type="number"
-                    min={0}
-                    value={s.checkin_sync_minutes}
-                    onChange={num('checkin_sync_minutes')}
-                    ariaLabel="打卡榜巡检间隔（分钟）"
-                    className="w-20"
-                  />
-                  <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-                </div>
-              </div>
-            </Field>
-            <div className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
-              <Field label="签到奖励下限（quota）">
-                <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
-              </Field>
-              <Field label="签到奖励上限（quota）" hint="每天每人在区间内随机取一个值；上下限相同即固定">
-                <Input type="number" min={0} value={s.reward_max} onChange={num('reward_max')} className="w-40" />
-              </Field>
-              <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
-                <Input value={s.timezone} onChange={str('timezone')} className="w-56" />
-              </Field>
-            </div>
-          </section>
-        </div>
-      </Card>
-    </>
   )
 }
 
