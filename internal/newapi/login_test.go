@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,6 +220,50 @@ func TestReauthenticateDoesNotRetryBadCredentials(t *testing.T) {
 	}
 	if got := logins.Load(); got != 1 {
 		t.Errorf("logins = %d, want 1: a wrong password must not be tried repeatedly", got)
+	}
+}
+
+// The gateway answers a bad credential in English (reference/new-api's
+// controller/user.go: "Username or password is incorrect, or user has been
+// banned"), so matching only the Chinese wording left the real message
+// classified as retryable: a wrong password burned three attempts of the
+// 20-per-20-minutes login budget on every sweep.
+func TestReauthenticateDoesNotRetryBadCredentialsInTheGatewaysWording(t *testing.T) {
+	srv, logins := authStub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false,"message":"Username or password is incorrect, or user has been banned"}`))
+	})
+	defer srv.Close()
+
+	err := New(srv.URL).Reauthenticate("admin", "wrong")
+	if err == nil {
+		t.Fatal("a rejected login must be an error")
+	}
+	// The caller shows this error to the operator; swallowing the gateway's
+	// wording would turn a clear cause into an anonymous failure.
+	if !strings.Contains(err.Error(), "Username or password") {
+		t.Errorf("the error must carry the gateway's wording, got: %v", err)
+	}
+	if got := logins.Load(); got != 1 {
+		t.Errorf("logins = %d, want 1: the gateway's own wording must not be retried", got)
+	}
+}
+
+// A disabled account is refused on the password path too, through
+// setupLoginAtAuthVersion (reference/new-api controller/user.go:166), with the
+// standalone wording "User has been banned" — capital U, no 'password'. It is a
+// decision like a wrong credential, not a blip, so it must not be retried.
+func TestReauthenticateDoesNotRetryABannedAccount(t *testing.T) {
+	srv, logins := authStub(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false,"message":"User has been banned"}`))
+	})
+	defer srv.Close()
+
+	err := New(srv.URL).Reauthenticate("admin", "right")
+	if err == nil {
+		t.Fatal("a banned account must be an error")
+	}
+	if got := logins.Load(); got != 1 {
+		t.Errorf("logins = %d, want 1: a banned account must not be retried", got)
 	}
 }
 

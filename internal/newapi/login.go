@@ -98,8 +98,18 @@ func retryableLoginError(err error) bool {
 	}
 	// A rejected credential is a decision, not a blip. Match on the gateway's
 	// own wording rather than a bare status, because the gateway answers 200
-	// with success:false for this one.
-	if strings.Contains(err.Error(), "密码") || strings.Contains(err.Error(), "credentials") {
+	// with success:false for this one. The gateway ships both wordings
+	// (reference/new-api controller/user.go uses the English one; a localized
+	// deployment answers in Chinese), so both must be recognized — matching
+	// only 密码/credentials left the real English message retryable and burned
+	// three attempts of the login budget per sweep. "has been banned" is
+	// matched case-insensitively because it appears both inside the
+	// bad-credentials sentence and standalone ("User has been banned", from
+	// setupLoginAtAuthVersion when the account itself is disabled).
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if strings.Contains(msg, "密码") || strings.Contains(msg, "credentials") ||
+		strings.Contains(msg, "Username or password") || strings.Contains(lower, "has been banned") {
 		return false
 	}
 	// A response the client could not understand (an HTML error page from a
