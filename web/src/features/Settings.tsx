@@ -2,15 +2,17 @@
  * SettingsView is the 监测设置 tab: every automated path, its switch, and its
  * parameters in one place.
  *
- * The page is organised by what each block does — 绑定, 签到与奖励, 巡检 — rather
- * than by which code path happens to run it, because that is the question the
- * operator is actually answering ("do I want this?"). Each block owns its own
- * switch, so a feature can be turned off without hunting for a second control
- * somewhere else on the page.
+ * The page is split by how a path is triggered, because that is the choice the
+ * operator is making: 事件驱动 paths react to what happens in the group (a
+ * command, a join, a message), while 巡检 paths poll on a timer and are the ones
+ * that must keep running when nobody is talking. Every patrol's configuration —
+ * switch, interval and health — lives in one card, so "what runs on a timer, and
+ * is it healthy?" is answered in one glance instead of three cards scattered
+ * between the event features.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { api, type PatrolState, type Settings } from '../api'
-import { Badge, Button, Card, ErrorNote, Field, Input, Select } from '../ui'
+import { Badge, Button, Card, ErrorNote, Field, Input, Select, Switch } from '../ui'
 import { CommandList, FeatureCard } from '../features/common'
 
 /**
@@ -20,12 +22,49 @@ import { CommandList, FeatureCard } from '../features/common'
  */
 const DEFAULT_CHECKIN_PATTERNS = '/签到\n<签到>\n>>签到<<'
 
-/** Patrol names, in the order the page shows them. */
-const PATROLS: { key: string; label: string; enabled: (s: Settings) => boolean }[] = [
-  { key: 'members', label: '成员列表巡检', enabled: (s) => s.member_patrol_enabled },
-  { key: 'bind', label: '绑定巡检', enabled: (s) => s.bind_patrol_enabled },
-  { key: 'checkins', label: '打卡榜巡检', enabled: (s) => s.checkin_patrol_enabled },
-  { key: 'rules', label: '分组转换巡检', enabled: () => true },
+/** One patrol's row: what it does, how often, and how it is health-reported. */
+type PatrolSpec = {
+  /** Key in the scheduler's status map. */
+  key: string
+  label: string
+  hint: string
+  /**
+   * Settings keys for the switch and the interval. Omitted for a patrol that is
+   * configured elsewhere: 分组转换 runs per rule (see the 分组转换 tab), so this
+   * card only reports its health.
+   */
+  enabledKey?: 'member_patrol_enabled' | 'bind_patrol_enabled' | 'checkin_patrol_enabled'
+  minutesKey?: 'member_sync_minutes' | 'bind_patrol_minutes' | 'checkin_sync_minutes'
+}
+
+/** Patrols in the order the scheduler runs them. */
+const PATROLS: PatrolSpec[] = [
+  {
+    key: 'members',
+    label: '群成员巡检',
+    hint: '定期重读群成员列表，补齐昵称、群等级等资料。新成员进群与绑定成功都会立即记录，关掉只是资料更新变慢。',
+    enabledKey: 'member_patrol_enabled',
+    minutesKey: 'member_sync_minutes',
+  },
+  {
+    key: 'bind',
+    label: '绑定巡检',
+    hint: '周期性重试所有未绑定的成员，补上「先进群、后注册」的账号。只处理未绑定的成员，不会改动已有绑定。',
+    enabledKey: 'bind_patrol_enabled',
+    minutesKey: 'bind_patrol_minutes',
+  },
+  {
+    key: 'checkins',
+    label: '打卡榜巡检',
+    hint: '读取 QQ 群自带的打卡榜，补全排名与打卡时间。打卡没有事件通知，只能轮询；关掉只是不再从打卡榜记录签到，消息签到与奖励发放不受影响。',
+    enabledKey: 'checkin_patrol_enabled',
+    minutesKey: 'checkin_sync_minutes',
+  },
+  {
+    key: 'rules',
+    label: '分组转换巡检',
+    hint: '每条规则按自己的周期运行（在「分组转换」页配置），这里只显示运行状态。',
+  },
 ]
 
 export default function SettingsView({
@@ -110,10 +149,15 @@ export default function SettingsView({
           </Button>
         }
       >
-        <PatrolTable patrols={patrols} settings={s} />
+        <p className="text-xs leading-5 text-muted-foreground">
+          按触发方式分成两组：<strong className="font-medium text-foreground/80">事件驱动</strong>
+          的路径由群里的动静触发（指令、进群、发言），反应最快；
+          <strong className="font-medium text-foreground/80">定期巡检</strong>
+          按周期轮询，是「没人说话时也要继续工作」的那部分。
+        </p>
       </Card>
 
-      {/* ---- 绑定 ---- */}
+      {/* ---- 事件驱动 ---- */}
       <FeatureCard
         title="绑定指令"
         description="成员在群里发送指令，把 QQ 邮箱对应的 new-api 账号绑定到自己。只对未绑定的成员生效。"
@@ -137,30 +181,8 @@ export default function SettingsView({
       />
 
       <FeatureCard
-        title="绑定巡检"
-        description="周期性重试所有未绑定的成员，用于补上「先进群、后注册」的账号。"
-        enabled={s.bind_patrol_enabled}
-        onToggle={bool('bind_patrol_enabled')}
-      >
-        <Field label="巡检间隔" hint="0 表示只保留开关、不按时执行">
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              value={s.bind_patrol_minutes}
-              onChange={num('bind_patrol_minutes')}
-              ariaLabel="绑定巡检间隔（分钟）"
-              className="w-24"
-            />
-            <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-          </div>
-        </Field>
-      </FeatureCard>
-
-      {/* ---- 签到 ---- */}
-      <FeatureCard
         title="消息签到"
-        description="把群里的消息当作当天签到。每天每人只记一次，重复消息不会重复发奖。"
+        description="把群里的消息当作当天签到。每天每人只记一次，重复消息不会重复发奖；未绑定账号的成员先绑定才能签到。"
         enabled={s.checkin_by_message_enabled}
         onToggle={bool('checkin_by_message_enabled')}
         badge={<Badge tone="info">事件驱动</Badge>}
@@ -192,30 +214,63 @@ export default function SettingsView({
         )}
       </FeatureCard>
 
-      <FeatureCard
-        title="打卡榜巡检"
-        description="读取 QQ 群自带的打卡榜，补全排名与打卡时间。打卡没有事件通知，只能轮询；关闭后「用打卡榜签到」这条来源停止（消息签到不受影响）。"
-        enabled={s.checkin_patrol_enabled}
-        onToggle={bool('checkin_patrol_enabled')}
-        badge={<Badge tone="warn">轮询</Badge>}
+      {/* ---- 定期巡检：所有巡检的开关、周期与状态都在一起 ---- */}
+      <Card
+        title="定期巡检"
+        description="轮询是唯一真相来源：事件流只加速反应，不承担正确性。间隔填 0 表示只保留开关、不按时执行。"
       >
-        <Field
-          label="巡检间隔"
-          hint="打卡榜只显示当天，间隔越长越容易漏掉早打卡的成员。"
-        >
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              value={s.checkin_sync_minutes}
-              onChange={num('checkin_sync_minutes')}
-              ariaLabel="打卡榜巡检间隔（分钟）"
-              className="w-24"
-            />
-            <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-          </div>
-        </Field>
-      </FeatureCard>
+        <div className="divide-y divide-border">
+          {PATROLS.map((spec) => {
+            const on = spec.enabledKey ? s[spec.enabledKey] : true
+            const p = patrols[spec.key]
+            return (
+              <div
+                key={spec.key}
+                className="flex flex-wrap items-start gap-x-4 gap-y-3 py-3.5 first:pt-0 last:pb-0"
+              >
+                <div className="min-w-0 flex-1 basis-64">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium">{spec.label}</span>
+                    <PatrolHealth state={p} on={on} />
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    {spec.hint}
+                    {on && p?.last_run && <> · 上次运行 {new Date(p.last_run * 1000).toLocaleString()}</>}
+                  </p>
+                  {on && p?.last_error && (
+                    <p className="mt-1 text-[11px] leading-4 break-all text-destructive">{p.last_error}</p>
+                  )}
+                </div>
+
+                {spec.minutesKey && (
+                  <div className={`flex items-center gap-2 ${on ? '' : 'opacity-60'}`}>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={s[spec.minutesKey]}
+                      onChange={(v) =>
+                        setS({ ...s, [spec.minutesKey as string]: Number(v) } as Settings)
+                      }
+                      ariaLabel={`${spec.label}间隔（分钟）`}
+                      className="w-20"
+                    />
+                    <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
+                  </div>
+                )}
+
+                {spec.enabledKey && (
+                  <Switch
+                    checked={on}
+                    onChange={(v) => setS({ ...s, [spec.enabledKey as string]: v } as Settings)}
+                    label={on ? '已启用' : '已停用'}
+                    ariaLabel={`${spec.label}：${on ? '已启用' : '已停用'}`}
+                  />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </Card>
 
       <FeatureCard
         title="签到奖励"
@@ -234,70 +289,20 @@ export default function SettingsView({
           </Field>
         </div>
       </FeatureCard>
-
-      {/* ---- 成员巡检 ---- */}
-      <FeatureCard
-        title="群成员巡检"
-        description="兜底功能：定期重读群成员列表，补齐昵称、群等级等资料。新成员进群与绑定成功都会立即记录，关闭后只是资料更新变慢。"
-        enabled={s.member_patrol_enabled}
-        onToggle={bool('member_patrol_enabled')}
-        badge={<Badge tone="warn">轮询</Badge>}
-      >
-        <Field label="巡检间隔">
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              value={s.member_sync_minutes}
-              onChange={num('member_sync_minutes')}
-              ariaLabel="成员列表巡检间隔（分钟）"
-              className="w-24"
-            />
-            <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
-          </div>
-        </Field>
-      </FeatureCard>
     </div>
   )
 }
 
 /**
- * PatrolTable shows when each sweep last ran.
+ * PatrolHealth labels one patrol's state.
  *
  * A patrol that is switched off is labelled 停用 rather than showing an empty
  * time: without that distinction "not run yet" and "not running" look identical,
  * and the second one is the state that silently loses data.
  */
-function PatrolTable({ patrols, settings }: { patrols: Record<string, PatrolState>; settings: Settings }) {
-  return (
-    <ul className="space-y-2">
-      {PATROLS.map(({ key, label, enabled }) => {
-        const on = enabled(settings)
-        const p = patrols[key]
-        return (
-          <li key={key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-            <span className="w-32 shrink-0 text-muted-foreground">{label}</span>
-            {!on ? (
-              <Badge>停用</Badge>
-            ) : p?.last_error ? (
-              <Badge tone="err">上次失败</Badge>
-            ) : p?.last_run ? (
-              <Badge tone="ok">正常</Badge>
-            ) : (
-              <Badge tone="warn">尚未运行</Badge>
-            )}
-            <span className="min-w-0 break-all text-muted-foreground">
-              {!on
-                ? '已在下方关闭'
-                : p?.last_error
-                  ? p.last_error
-                  : p?.last_run
-                    ? `上次运行 ${new Date(p.last_run * 1000).toLocaleString()}`
-                    : '进程启动后会在几十秒内首次运行'}
-            </span>
-          </li>
-        )
-      })}
-    </ul>
-  )
+function PatrolHealth({ state, on }: { state?: PatrolState; on: boolean }) {
+  if (!on) return <Badge>停用</Badge>
+  if (state?.last_error) return <Badge tone="err">上次失败</Badge>
+  if (state?.last_run) return <Badge tone="ok">正常</Badge>
+  return <Badge tone="warn">尚未运行</Badge>
 }
