@@ -62,10 +62,11 @@ type Binding struct {
 	UpdatedAt      int64  `json:"updated_at"`
 }
 
-// Check-in sources: how the row was learned. A message is a first-hand
-// statement by the member, the board is QQ's own record of them. Both count as
-// a check-in for the day; the board is the richer row, so it upgrades a
-// message-sourced one (see RecordCheckin).
+// CheckinSourceBoard and CheckinSourceMessage are Checkin.Source's two values:
+// how the row was learned. A message is a first-hand statement by the member,
+// the board is QQ's own record of them. Both count as a check-in for the day;
+// the board is the richer row, so it upgrades a message-sourced one (see
+// RecordCheckin).
 const (
 	CheckinSourceBoard   = "board"
 	CheckinSourceMessage = "message"
@@ -499,6 +500,37 @@ func (s *Store) CountCheckins(qq int64) (int, error) {
 	return int(n), err
 }
 
+// CheckinTotalsByQQ returns every member's lifetime check-in count in one query,
+// keyed by QQ.
+//
+// This exists for the user directory, which used to call CountCheckins once per
+// member. That is an N+1: with 200 members the directory issued 200 extra
+// queries for a number that one GROUP BY already has, and it did so on every
+// filter keystroke (the query is debounced, not cached). One grouped read is
+// O(1) queries regardless of roster size.
+//
+// Members with no check-ins are simply absent from the map; a caller reads a
+// missing key as 0.
+func (s *Store) CheckinTotalsByQQ() (map[int64]int, error) {
+	type row struct {
+		QQ    int64
+		Total int
+	}
+	var rows []row
+	err := s.db.Model(&Checkin{}).
+		Select("qq, COUNT(*) AS total").
+		Group("qq").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]int, len(rows))
+	for _, r := range rows {
+		out[r.QQ] = r.Total
+	}
+	return out, nil
+}
+
 // ClaimReward claims the one-time reward for a (qq, date) and records the amount
 // in the same statement, returning false if it was already claimed. Combining
 // them keeps the recorded amount equal to the amount actually paid even when two
@@ -511,26 +543,6 @@ func (s *Store) ClaimReward(qq int64, date string, amount int, at time.Time) (bo
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
-}
-
-// MarkRewarded claims the one-time reward for a (qq, date), returning false if
-// it was already claimed.
-func (s *Store) MarkRewarded(qq int64, date string, at time.Time) (bool, error) {
-	res := s.db.Model(&Checkin{}).
-		Where("qq = ? AND date = ? AND rewarded_at = 0", qq, date).
-		Update("rewarded_at", at.Unix())
-	if res.Error != nil {
-		return false, res.Error
-	}
-	return res.RowsAffected == 1, nil
-}
-
-// SetRewardAmount records the amount chosen for a (qq, date) without claiming
-// it. Storing the value before the gateway call keeps it stable across a crash.
-func (s *Store) SetRewardAmount(qq int64, date string, amount int) error {
-	return s.db.Model(&Checkin{}).
-		Where("qq = ? AND date = ?", qq, date).
-		Update("reward_quota", amount).Error
 }
 
 // ReleaseReward clears the claim on a (qq, date) so a failed award is retried.
@@ -550,7 +562,6 @@ func (s *Store) CheckinsOn(date string) ([]Checkin, error) {
 
 // ---------- settings ----------
 
-// PutSetting stores a JSON-encoded setting.
 // BumpSettingInt atomically increments an integer setting and returns the new
 // value, creating it at 1 on first use. A read-then-write would let two
 // concurrent callers (a logout racing the first-ever read) both observe the
@@ -587,6 +598,10 @@ func (s *Store) BumpSettingInt(key string) (int64, error) {
 	return out, err
 }
 
+// PutSetting stores a JSON-encoded setting, creating the row when it does not
+// exist yet. The value is replaced wholesale, so a read-modify-write here races
+// two concurrent callers and can lose one of the updates; a counter that must
+// not lose an increment goes through BumpSettingInt instead.
 func (s *Store) PutSetting(key string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {

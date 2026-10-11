@@ -164,26 +164,75 @@ func TestCheckinDaysCountsDistinctDates(t *testing.T) {
 	}
 }
 
-func TestMarkRewardedIsOnceOnly(t *testing.T) {
+// The reward is claimed once per (qq, date): the sign-in board is polled
+// repeatedly, so a second claim (retry, restart, duplicate poll) must not pay
+// again. ClaimReward does the claim and the amount in one statement, so this
+// also pins that the amount survives the losing attempt rather than being
+// overwritten by a second draw.
+func TestClaimRewardIsOnceOnly(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.RecordCheckin(Checkin{QQ: 54321, Date: "2026-10-10", GroupID: 1, RewardQuota: 150}); err != nil {
+	if err := s.RecordCheckin(Checkin{QQ: 54321, Date: "2026-10-10", GroupID: 1}); err != nil {
 		t.Fatal(err)
 	}
 
-	ok, err := s.MarkRewarded(54321, "2026-10-10", time.Now())
+	ok, err := s.ClaimReward(54321, "2026-10-10", 150, time.Now())
 	if err != nil {
-		t.Fatalf("MarkRewarded: %v", err)
+		t.Fatalf("ClaimReward: %v", err)
 	}
 	if !ok {
-		t.Fatal("first MarkRewarded should report the award was claimed")
+		t.Fatal("first ClaimReward should report the award was claimed")
 	}
-	// a second attempt (retry, restart, duplicate poll) must not re-award
-	ok, err = s.MarkRewarded(54321, "2026-10-10", time.Now())
+
+	// A second attempt must lose, and must not touch the recorded amount.
+	ok, err = s.ClaimReward(54321, "2026-10-10", 999, time.Now())
 	if err != nil {
-		t.Fatalf("MarkRewarded 2: %v", err)
+		t.Fatalf("ClaimReward 2: %v", err)
 	}
 	if ok {
-		t.Error("second MarkRewarded must not claim the award again")
+		t.Error("second ClaimReward must not claim the award again")
+	}
+	c, err := s.GetCheckin(54321, "2026-10-10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RewardQuota != 150 {
+		t.Errorf("the losing claim overwrote the amount: got %d, want 150", c.RewardQuota)
+	}
+	if c.RewardedAt == 0 {
+		t.Error("the paid claim should be recorded")
+	}
+}
+
+// A released claim is claimable again, and the release clears the amount so the
+// retry draws afresh — this is the path a failed gateway call takes.
+func TestReleaseRewardMakesItClaimableAgain(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.RecordCheckin(Checkin{QQ: 54321, Date: "2026-10-10", GroupID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ClaimReward(54321, "2026-10-10", 150, time.Now()); err != nil || !ok {
+		t.Fatalf("precondition: ClaimReward = %v, %v", ok, err)
+	}
+	if err := s.ReleaseReward(54321, "2026-10-10"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.GetCheckin(54321, "2026-10-10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RewardedAt != 0 || c.RewardQuota != 0 {
+		t.Errorf("release left the claim in place: %+v", c)
+	}
+	ok, err := s.ClaimReward(54321, "2026-10-10", 200, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("the retry must be able to claim: ok=%v err=%v", ok, err)
+	}
+	c, err = s.GetCheckin(54321, "2026-10-10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RewardQuota != 200 {
+		t.Errorf("the retry did not draw afresh: got %d, want 200", c.RewardQuota)
 	}
 }
 

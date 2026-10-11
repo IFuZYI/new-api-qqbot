@@ -26,10 +26,12 @@ const (
 	// provisioning template that only knows the port does not have to know
 	// Go's address syntax.
 	EnvPort = "QQBOT_PORT"
-	// EnvFilePath points at an env file other than <data>/.env.
+	// EnvFilePath points at an env file other than the searched defaults
+	// (./.env, then <data>/.env).
 	EnvFilePath = "QQBOT_ENV_FILE"
 
-	// EnvFileName is the env file looked for inside the data directory.
+	// EnvFileName is the env file's name, searched for in the working
+	// directory first and the data directory second (EnvFileCandidates).
 	EnvFileName = ".env"
 
 	// DefaultAdminUsername is used when only a password is configured.

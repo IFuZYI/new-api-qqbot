@@ -51,8 +51,9 @@ type NapCat struct {
 	OneBotURL   string `yaml:"onebot_url" json:"onebot_url"`
 	OneBotToken string `yaml:"onebot_token" json:"onebot_token"`
 
-	// EventWSURL receives push events (used for the binding command). Optional:
-	// without it the service still works, only with slower reaction.
+	// EventWSURL receives push events: the bind command, group joins and
+	// message check-ins. Optional: without it the service still works, only
+	// with slower reaction.
 	EventWSURL   string `yaml:"event_ws_url" json:"event_ws_url"`
 	EventWSToken string `yaml:"event_ws_token" json:"event_ws_token"`
 }
@@ -152,17 +153,18 @@ func (m *Manager) syncFromFile() error {
 
 	// Merge over the stored copy rather than adopting the file wholesale: an
 	// operator who adds or fixes a single line must not silently lose the
-	// password and the tokens the file does not mention. A field the file does
-	// carry (even the empty string) wins, which is what makes an intentional
-	// clear possible.
+	// password and the tokens the file does not mention. Only a field the file
+	// carries a non-empty value for is adopted, so a hand edit can add or
+	// correct a value but cannot blank a stored one.
 	merged := c.MergeFields(m.fromStore())
 	return m.saveToStore(merged)
 }
 
-// MergeFields overlays c onto base, but only with the fields c actually
-// carries. Unlike Merge, an empty string here is a deliberate value, not a
-// placeholder to fill in - the distinction is that a file always states what it
-// means, whereas the WebUI form omits secrets it is not resending.
+// MergeFields overlays c onto base, but only with the non-empty fields c
+// carries. It is the file-side counterpart of Merge, which has a redaction
+// placeholder to reason about; here there is none, because a file cannot say
+// "clear this": YAML decodes an empty string and an absent key to the same
+// zero value, and both leave the stored field alone.
 func (c Config) MergeFields(base Config) Config {
 	out := base
 	if c.NewAPI.URL != "" {
@@ -234,10 +236,11 @@ func (m *Manager) Save(c Config) error {
 	return m.writeFile(c)
 }
 
-// Section names identify the two independently-editable halves of the
-// configuration. The WebUI saves them separately so a change to one cannot
-// write the other back from a stale form (which is how a hand edit used to be
-// lost), and so a broken NapCat setting never blocks saving the gateway.
+// SectionNewAPI and SectionNapCat identify the two independently-editable
+// halves of the configuration. The WebUI saves them separately so a change to
+// one cannot write the other back from a stale form (which is how a hand edit
+// used to be lost), and so a broken NapCat setting never blocks saving the
+// gateway.
 const (
 	SectionNewAPI = "newapi"
 	SectionNapCat = "napcat"
@@ -374,19 +377,24 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ValidateNewAPI checks the gateway settings.
+// Validate checks the gateway settings. The URL must parse as http or https,
+// and URL, username and password must all be present, so an incomplete form is
+// refused when it is saved rather than failing later on the first gateway call.
+//
+// The messages are operator-facing (the WebUI shows them in a toast), so they
+// are Simplified Chinese like the rest of the panel's text.
 func (n NewAPI) Validate() error {
 	if strings.TrimSpace(n.URL) == "" {
-		return errors.New("new-api URL is required")
+		return errors.New("请填写 new-api 地址")
 	}
 	if err := validateURL(n.URL, "http", "https"); err != nil {
-		return fmt.Errorf("new-api URL: %w", err)
+		return fmt.Errorf("new-api 地址：%w", err)
 	}
 	if strings.TrimSpace(n.Username) == "" {
-		return errors.New("new-api username is required")
+		return errors.New("请填写 new-api 用户名")
 	}
 	if n.Password == "" {
-		return errors.New("new-api password is required")
+		return errors.New("请填写 new-api 密码")
 	}
 	return nil
 }
@@ -395,29 +403,32 @@ func (n NewAPI) Validate() error {
 // configured, otherwise the service has no way to reach QQ.
 func (n NapCat) Validate() error {
 	if strings.TrimSpace(n.WebUIURL) == "" && strings.TrimSpace(n.OneBotURL) == "" {
-		return errors.New("configure either the NapCat WebUI URL or the OneBot URL")
+		return errors.New("请填写 NapCat 的 WebUI 地址或 OneBot 地址（二选一）")
 	}
 	if n.WebUIURL != "" {
 		if err := validateURL(n.WebUIURL, "http", "https"); err != nil {
-			return fmt.Errorf("NapCat WebUI URL: %w", err)
+			return fmt.Errorf("NapCat WebUI 地址：%w", err)
 		}
 		if n.WebUIToken == "" {
-			return errors.New("NapCat WebUI token is required when the WebUI URL is set")
+			return errors.New("填了 WebUI 地址时必须同时填写 WebUI Token")
 		}
 	}
 	if n.OneBotURL != "" {
 		if err := validateURL(n.OneBotURL, "http", "https"); err != nil {
-			return fmt.Errorf("OneBot URL: %w", err)
+			return fmt.Errorf("OneBot 地址：%w", err)
 		}
 	}
 	if n.EventWSURL != "" {
 		if err := validateURL(n.EventWSURL, "ws", "wss"); err != nil {
-			return fmt.Errorf("event WebSocket URL: %w", err)
+			return fmt.Errorf("事件 WebSocket 地址：%w", err)
 		}
 	}
 	return nil
 }
 
+// validateURL checks that raw parses and uses one of schemes with a non-empty
+// host. Its messages are wrapped by the callers above and reach the operator in
+// a toast, so they are Simplified Chinese too.
 func validateURL(raw string, schemes ...string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -426,12 +437,12 @@ func validateURL(raw string, schemes ...string) error {
 	for _, s := range schemes {
 		if u.Scheme == s {
 			if u.Host == "" {
-				return errors.New("missing host")
+				return errors.New("缺少主机名")
 			}
 			return nil
 		}
 	}
-	return fmt.Errorf("scheme must be one of %s", strings.Join(schemes, ", "))
+	return fmt.Errorf("协议必须是 %s 之一", strings.Join(schemes, "、"))
 }
 
 // RedactedPassword is the placeholder the WebUI sends back unchanged when the
@@ -456,8 +467,10 @@ func (c Config) Redacted() Config {
 	return out
 }
 
-// Merge keeps stored secrets when the incoming value is the redaction
-// placeholder, so saving the form without retyping a password does not wipe it.
+// Merge keeps the stored secret when the incoming value is the redaction
+// placeholder or blank, so saving the form without retyping a password does
+// not wipe it: the WebUI form omits a secret it is not resending, and the two
+// cases are indistinguishable from the value alone.
 func (c Config) Merge(stored Config) Config {
 	out := c
 	if out.NewAPI.Password == RedactedPassword || out.NewAPI.Password == "" {

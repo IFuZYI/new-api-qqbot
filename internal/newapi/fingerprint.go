@@ -32,10 +32,12 @@ const fingerprintBytes = 12
 
 // NewFingerprint derives the device fingerprint from a stable secret.
 //
-// The secret is the panel's own HMAC key, which lives in the database and
-// survives restarts and container rebuilds. Deriving rather than storing a
-// second secret keeps one thing to back up, and hashing keeps the key itself
-// out of a header the gateway (and any proxy log) can see.
+// The secret is the dedicated one config.Manager.SessionFingerprint mints and
+// persists (newapi.fingerprint_secret), deliberately not the panel's
+// session-cookie signing key: the fingerprint travels in a header the gateway
+// and any proxy log can see, so deriving it from the signing key would put a
+// hash of that key in a third party's log for no benefit. Hashing here is what
+// keeps the secret itself out of that header.
 func NewFingerprint(secret string) string {
 	sum := sha256.Sum256([]byte("qqbot-fingerprint\x00" + secret))
 	return hex.EncodeToString(sum[:fingerprintBytes])
