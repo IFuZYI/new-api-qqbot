@@ -286,9 +286,20 @@ func TestIsAuthFailure(t *testing.T) {
 		{"session cap, as rendered", (&SessionLimitError{Method: "POST", Path: "/api/user/login"}), false},
 		{"wrong password", errors.New("POST /api/user/login: 用户名或密码错误 (HTTP 200)"), false},
 		{"permission", errors.New(`PUT /api/user/: No permission to access users of same or higher level (HTTP 200)`), false},
+		// The gateway denies a permission with 403, not a 200 carrying a
+		// message: authHelper answers AUTH_INSUFFICIENT_PRIVILEGE (and some
+		// routes a bare 403) when the role is too low. Classifying that as an
+		// auth failure drops the cached session on a condition a re-login
+		// cannot fix, spending the CriticalRateLimit-protected refresh (and a
+		// login when nothing is stored) on every such call.
+		{"insufficient privilege, 403", errors.New("PUT /api/user/: AUTH_INSUFFICIENT_PRIVILEGE: Unauthorized, insufficient privileges (HTTP 403)"), false},
+		{"bare 403 privilege refusal", errors.New("POST /api/user/manage: Unauthorized, insufficient privileges (HTTP 403)"), false},
 		{"unauthorized", errors.New("GET /api/user/self: AUTH_UNAUTHORIZED (HTTP 401)"), true},
 		{"expired token", errors.New("GET /api/user/self: AUTH_TOKEN_EXPIRED (HTTP 401)"), true},
 		{"revoked session", errors.New("GET /api/user/self: AUTH_SESSION_REVOKED (HTTP 401)"), true},
+		// A session is dead, but the account is disabled — re-logging in cannot
+		// help, so this must not count as an auth failure either.
+		{"user disabled, 401", errors.New("GET /api/user/self: AUTH_USER_DISABLED: User has been banned (HTTP 401)"), false},
 		// A conflict is not an auth failure, however it is worded.
 		{"session limit by code only", errors.New("POST /api/user/login: AUTH_SESSION_LIMIT (HTTP 409)"), false},
 	}

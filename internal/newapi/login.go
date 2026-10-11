@@ -120,9 +120,13 @@ func retryableLoginError(err error) bool {
 // IsAuthFailure reports whether err means the session is no longer usable, which
 // is the only case where throwing away a cached client is right.
 //
-// It keys on the gateway's machine-readable codes and the HTTP status, never on
-// a loose substring: invalidating the client on a rate limit or a permission
-// error forces a re-login, which spends the very budget that just ran out.
+// It keys on the gateway's machine-readable codes for a dead session, never on
+// a bare HTTP status and never on a loose substring: the gateway answers a
+// permission denial (AUTH_INSUFFICIENT_PRIVILEGE) and a disabled account
+// (AUTH_USER_DISABLED) with 403 and 401 respectively, and neither is fixed by
+// logging in again. Invalidating on those forces a re-login that spends the
+// CriticalRateLimit-protected refresh — and, with nothing stored, a login — on
+// a condition the operator's role or account has to change.
 func IsAuthFailure(err error) bool {
 	if err == nil {
 		return false
@@ -131,12 +135,22 @@ func IsAuthFailure(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	// A dead session: the token is gone, expired, revoked or invalid. These are
+	// the only codes a re-login can cure.
 	for _, code := range []string{"AUTH_UNAUTHORIZED", "AUTH_TOKEN_EXPIRED", "AUTH_SESSION_REVOKED", "AUTH_TOKEN_INVALID"} {
 		if strings.Contains(msg, code) {
 			return true
 		}
 	}
-	// A 401/403 with no envelope code is still an auth failure; anything else
-	// (a 200 carrying "No permission", a 409) is not.
-	return strings.Contains(msg, "(HTTP 401)") || strings.Contains(msg, "(HTTP 403)")
+	// A code we know is not curable must win over the status fallback: the
+	// gateway renders some of these alongside 401/403.
+	for _, code := range []string{"AUTH_INSUFFICIENT_PRIVILEGE", "AUTH_USER_DISABLED"} {
+		if strings.Contains(msg, code) {
+			return false
+		}
+	}
+	// A 401 with no envelope code is still a dead session; a 403 with no code is
+	// the privilege refusal above (the gateway's own "Unauthorized, insufficient
+	// privileges" carries no code on some routes), so it is not.
+	return strings.Contains(msg, "(HTTP 401)")
 }
