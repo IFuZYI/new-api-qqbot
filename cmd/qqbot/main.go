@@ -80,7 +80,7 @@ func main() {
 	// The gateway and NapCat clients are rebuilt per call from the stored
 	// configuration, so editing either in the WebUI takes effect immediately
 	// without restarting the service.
-	gw := &lazyGateway{cfg: cfgMgr}
+	gw := &lazyGateway{cfg: cfgMgr, lockout: newapi.NewLockout(nil)}
 	qq := &lazyQQ{cfg: cfgMgr}
 
 	svc := service.New(st, gw, qq)
@@ -149,6 +149,11 @@ func main() {
 type lazyGateway struct {
 	cfg *config.Manager
 
+	// lockout remembers a rate-limited login. Without it every patrol tick and
+	// every UI action retries, each rejection counts against the gateway's
+	// limiter, and the window never closes (see newapi.Lockout).
+	lockout *newapi.Lockout
+
 	mu     sync.Mutex
 	cached *newapi.Client
 	key    string // config fingerprint the cached client was built from
@@ -165,37 +170,62 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.cached != nil && l.key == key && l.cached.Token() != "" {
+	if l.cached != nil && l.key == key && l.cached.TokenFresh() {
+		return l.cached, nil
+	}
+
+	// While the gateway is rate-limiting us, no attempt is made at all: the
+	// operator gets the remaining wait instead of another rejection, and the
+	// gateway's budget stops being spent by our own retries.
+	if l.lockout != nil {
+		if err := l.lockout.Blocked(); err != nil {
+			return nil, err
+		}
+	}
+
+	// A cached client whose token has expired keeps its session: re-logging-in
+	// would create a second one (and spend the login budget) while the first is
+	// still counted against the account's 50-session cap. Reuse it and let the
+	// gateway reject a genuinely dead token, which is the one case that needs a
+	// fresh session.
+	if l.cached != nil && l.key == key && l.cached.Token() != "" && l.cached.TokenValid() {
 		return l.cached, nil
 	}
 
 	c := newapi.New(cfg.NewAPI.URL)
-	if err := loginWithRetry(c, cfg.NewAPI.Username, cfg.NewAPI.Password); err != nil {
+	// Reauthenticate, not Login: it refreshes the existing session when it can,
+	// and only logs in when there is nothing to refresh. The difference matters
+	// — the access token lives 15 minutes while a login session lives 30 days,
+	// so re-logging-in every time the token expires adds a session every 15
+	// minutes until the account hits its cap and nobody can log in.
+	if err := c.Reauthenticate(cfg.NewAPI.Username, cfg.NewAPI.Password); err != nil {
+		if l.lockout != nil {
+			l.lockout.Fail(err)
+		}
 		return nil, err
+	}
+	if l.lockout != nil {
+		l.lockout.Success()
 	}
 	l.cached, l.key = c, key
 	return c, nil
 }
 
-// invalidate drops the cached client, e.g. after a rejected request.
-func (l *lazyGateway) invalidate() {
+// invalidateAfter drops the cached client when a request shows the session is
+// no longer usable.
+//
+// It is deliberately narrow: only an auth failure justifies a re-login. Doing it
+// on every error — as this used to — turns one rate limit or one permission
+// rejection into a fresh login attempt, spending the gateway's login budget
+// until the service is locked out (see newapi.IsAuthFailure).
+func (l *lazyGateway) invalidateAfter(err error) {
+	if !newapi.IsAuthFailure(err) {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.cached = nil
 	l.key = ""
-}
-
-// loginWithRetry retries a rejected login. The gateway rate-limits logins and
-// caps sessions, so a transient 409/429 is expected under load.
-func loginWithRetry(c *newapi.Client, username, password string) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if err = c.Login(username, password); err == nil {
-			return nil
-		}
-		time.Sleep(time.Duration(attempt+1) * time.Second)
-	}
-	return err
 }
 
 func (l *lazyGateway) FindUserByEmail(addr string) (*newapi.User, error) {
@@ -213,7 +243,7 @@ func (l *lazyGateway) GetUser(id int) (*newapi.User, error) {
 	}
 	u, err := c.GetUser(id)
 	if err != nil {
-		l.invalidate()
+		l.invalidateAfter(err)
 	}
 	return u, err
 }
@@ -224,7 +254,7 @@ func (l *lazyGateway) SetGroup(u *newapi.User, group string) error {
 		return err
 	}
 	if err := c.SetGroup(u, group); err != nil {
-		l.invalidate()
+		l.invalidateAfter(err)
 		return err
 	}
 	return nil
@@ -253,7 +283,7 @@ func (l *lazyGateway) AddQuota(userID, value int) error {
 		return err
 	}
 	if err := c.AddQuota(userID, value); err != nil {
-		l.invalidate()
+		l.invalidateAfter(err)
 		return err
 	}
 	return nil

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,72 @@ import (
 // ErrAmbiguousEmail means more than one account matched an email exactly, so
 // binding must not happen automatically.
 var ErrAmbiguousEmail = errors.New("more than one new-api account matches this email")
+
+// RateLimitError is the gateway refusing a request because the client hit a rate
+// limiter. The login endpoint sits behind new-api's critical limiter
+// (CRITICAL_RATE_LIMIT, 20 attempts per 20 minutes per IP by default), which
+// answers with a bare 429 and — when it can — a Retry-After hint.
+//
+// It is a distinct type rather than a plain error because the caller can act on
+// it: the wait is known, so the client backs off for exactly that long instead
+// of burning more attempts and extending its own lockout.
+type RateLimitError struct {
+	// Method and Path identify what was refused.
+	Method, Path string
+	// RetryAfter is the server's hint; zero when it gave none, which means the
+	// caller must choose its own backoff rather than assume "immediately".
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	what := "请求过于频繁"
+	if e.Path == "/api/user/login" {
+		// The one a lost session actually surfaces as, so it is worth naming:
+		// an operator seeing this in the WebUI needs to know the fix is waiting,
+		// not that their credentials are wrong.
+		what = "登录被限流"
+	}
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("%s %s: %s（网关限流，需等待约 %s 后重试）",
+			e.Method, e.Path, what, e.RetryAfter.Round(time.Second))
+	}
+	return fmt.Sprintf("%s %s: %s（网关限流，请稍后重试）", e.Method, e.Path, what)
+}
+
+// IsRateLimited reports whether err is the gateway refusing on rate limits.
+func IsRateLimited(err error) bool {
+	var rl *RateLimitError
+	return errors.As(err, &rl)
+}
+
+// RetryAfterOf returns the server's suggested wait, or 0 when it gave none or
+// the error is not a rate limit.
+func RetryAfterOf(err error) time.Duration {
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		return rl.RetryAfter
+	}
+	return 0
+}
+
+// SessionLimitError is the gateway refusing a login because the account already
+// has its maximum number of active sessions. Retrying cannot fix it — the
+// operator must revoke sessions (or wait for them to expire) — so it is kept
+// distinct from a rate limit, whose fix is simply to wait.
+type SessionLimitError struct {
+	Method, Path string
+}
+
+func (e *SessionLimitError) Error() string {
+	return fmt.Sprintf("%s %s: 会话数已达上限（AUTH_SESSION_LIMIT）：请撤销其他登录会话或等待其过期",
+		e.Method, e.Path)
+}
+
+// IsSessionLimit reports whether err is the gateway's active-session cap.
+func IsSessionLimit(err error) bool {
+	var sl *SessionLimitError
+	return errors.As(err, &sl)
+}
 
 // userAgent identifies this service. The gateway is fronted by Cloudflare,
 // which rejects requests with Go's default User-Agent.
@@ -42,16 +109,39 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 
-	mu    sync.RWMutex
-	token string
+	// now is injectable so token expiry is testable without sleeping.
+	now func() time.Time
+
+	mu        sync.RWMutex
+	token     string
+	expiresAt time.Time // zero means "not announced"
 }
 
 // New builds a client for baseURL (e.g. https://api.fuzy.site).
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			// A cookie jar is required, not a nicety: the gateway hands out its
+			// refresh token as an HttpOnly cookie on login, and the refresh call
+			// carries it. Without a jar every refresh goes out unauthenticated
+			// and the client silently falls back to a full login — a new session
+			// every 15 minutes, which is what walks into the session cap.
+			Jar: newCookieJar(),
+		},
+		now: time.Now,
 	}
+}
+
+// SetClock replaces the time source, for tests.
+func (c *Client) SetClock(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	c.now = now
 }
 
 // SetToken installs a previously obtained access token.
@@ -61,11 +151,67 @@ func (c *Client) SetToken(tok string) {
 	c.token = tok
 }
 
+// SetTokenExpiry records when the current token dies.
+func (c *Client) SetTokenExpiry(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.expiresAt = at
+}
+
 // Token returns the current access token.
 func (c *Client) Token() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.token
+}
+
+// TokenExpiresAt returns the token's expiry, or nil when it was never announced.
+func (c *Client) TokenExpiresAt() *time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.expiresAt.IsZero() {
+		return nil
+	}
+	at := c.expiresAt
+	return &at
+}
+
+// refreshMargin is how long before expiry a token stops being reused for new
+// work. A sweep that starts just before expiry would otherwise send a batch of
+// calls with a token that dies mid-flight, turning one expiry into a burst of
+// failures.
+const refreshMargin = 30 * time.Second
+
+// TokenValid reports whether the token can still be sent. An unannounced expiry
+// counts as valid: discarding a working token on a guess is worse than letting
+// the server reject it.
+func (c *Client) TokenValid() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.validLocked(c.now())
+}
+
+// TokenFresh reports whether the token is far enough from expiry to start new
+// work with it. This is the check a caller makes before a sweep, as opposed to
+// TokenValid, which is about a request already going out.
+func (c *Client) TokenFresh() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	if c.token == "" || c.expiresAt.IsZero() {
+		return c.token != ""
+	}
+	return now.Add(refreshMargin).Before(c.expiresAt)
+}
+
+func (c *Client) validLocked(now time.Time) bool {
+	if c.token == "" {
+		return false
+	}
+	if c.expiresAt.IsZero() {
+		return true
+	}
+	return now.Before(c.expiresAt)
 }
 
 // envelope is the standard new-api response wrapper. Code carries the machine
@@ -110,16 +256,34 @@ func (c *Client) do(method, path string, body any, out any) error {
 		return fmt.Errorf("read response: %w", err)
 	}
 
+	// The rate limiter answers with a bare status and an empty body, so it must
+	// be recognised before the JSON decode: reporting it as "unexpected
+	// response" throws away the one thing the server told us (Retry-After) and
+	// tells the operator nothing about what to do.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimitError{Method: method, Path: path, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	}
+
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("%s %s: unexpected response (HTTP %d): %.200s", method, path, resp.StatusCode, raw)
+		// A non-JSON body is a proxy or an HTML error page, not the gateway's
+		// own envelope. Name the status; do not paste the page into a message
+		// the operator will read in a toast.
+		return fmt.Errorf("%s %s: 网关返回了非 JSON 响应（HTTP %d，%d 字节）", method, path, resp.StatusCode, len(raw))
 	}
 	if !env.Success {
+		// A machine-readable code makes the failure diagnosable, and two of them
+		// are states the caller can act on rather than just report.
+		switch env.Code {
+		case "AUTH_SESSION_LIMIT":
+			return &SessionLimitError{Method: method, Path: path}
+		case "AUTH_SESSION_ISSUANCE_LIMIT":
+			// Too many logins in the issuance window; waiting is the fix, and
+			// the window is what the caller needs to know.
+			return &RateLimitError{Method: method, Path: path}
+		}
 		msg := env.Message
 		if env.Code != "" {
-			// The machine-readable code is what makes a failure diagnosable:
-			// AUTH_SESSION_LIMIT means the account's active-session cap is
-			// full, which no amount of retrying will fix.
 			if msg != "" {
 				msg = env.Code + ": " + msg
 			} else {
@@ -139,21 +303,123 @@ func (c *Client) do(method, path string, body any, out any) error {
 	return nil
 }
 
+// parseRetryAfter reads a Retry-After header in seconds. The header may also be
+// an HTTP date, which this gateway does not send; an unparsable value means "no
+// hint" rather than a guess.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // Login authenticates the admin account and stores the returned access token.
 func (c *Client) Login(username, password string) error {
-	var data struct {
-		AccessToken string `json:"access_token"`
-	}
+	var data loginData
 	err := c.do(http.MethodPost, "/api/user/login",
 		map[string]string{"username": username, "password": password}, &data)
 	if err != nil {
 		return err
 	}
+	return c.installToken(data)
+}
+
+// loginData is what both /api/user/login and /api/user/auth/refresh return.
+type loginData struct {
+	AccessToken string `json:"access_token"`
+	// The gateway announces when the token dies. It must be recorded: the token
+	// lives 15 minutes while the session behind it lives 30 days, so
+	// re-logging-in on expiry creates a new session every time — which is how a
+	// long-running service walks into the 50-session cap.
+	AccessExpiresAt int64 `json:"access_expires_at"`
+}
+
+func (c *Client) installToken(data loginData) error {
 	if data.AccessToken == "" {
-		return errors.New("login succeeded but returned no access token")
+		return errors.New("the gateway returned no access token")
 	}
-	c.SetToken(data.AccessToken)
+	c.mu.Lock()
+	c.token = data.AccessToken
+	if data.AccessExpiresAt > 0 {
+		c.expiresAt = time.Unix(data.AccessExpiresAt, 0)
+	}
+	c.mu.Unlock()
 	return nil
+}
+
+// Refresh exchanges the session cookie for a fresh access token.
+//
+// This is the cheap way to stay authenticated: it reuses the login session
+// instead of creating one. Logging in again would work too, but every login
+// adds a session to the account's 50-session cap while the old ones live on for
+// 30 days, so a service that re-logged in every 15 minutes would eventually lock
+// itself (and the operator) out of the gateway.
+//
+// It fails with an auth failure when the session is gone, which tells the caller
+// a real login is required.
+func (c *Client) Refresh() error {
+	var data loginData
+	if err := c.do(http.MethodPost, "/api/user/auth/refresh", nil, &data); err != nil {
+		return err
+	}
+	return c.installToken(data)
+}
+
+// Reauthenticate gets a usable token, preferring the cheap path: refresh the
+// existing session, and log in only when there is nothing to refresh.
+//
+// This is the policy the service needs rather than a bare Login, because the
+// difference between the two is a session spent per 15 minutes: the access token
+// lives 15 minutes, a login session 30 days, and the account's session cap is
+// what eventually locks everyone out.
+//
+// Retrying is decided per failure, because only some of them are worth another
+// attempt:
+//
+//	429 / AUTH_SESSION_ISSUANCE_LIMIT  -> not retried: the server said when to return
+//	AUTH_SESSION_LIMIT                 -> not retried: waiting does not free a session
+//	bad credentials                    -> not retried: it is a decision, not a blip
+//	5xx / unreadable response          -> retried: those are the blips a retry fixes
+func (c *Client) Reauthenticate(username, password string) error {
+	err := c.Refresh()
+	if err == nil {
+		return nil
+	}
+	// Only a genuinely unusable session justifies a new one. A rate limit or a
+	// transport failure is reported as-is: logging in anyway would spend the
+	// very budget that just ran out, and the caller (with its lockout) decides
+	// when to try again.
+	if !IsAuthFailure(err) {
+		return err
+	}
+	return c.loginWithRetry(username, password)
+}
+
+// loginWithRetry logs in, retrying only the failures another attempt could fix.
+func (c *Client) loginWithRetry(username, password string) error {
+	var err error
+	for attempt := 0; attempt < loginAttempts; attempt++ {
+		if err = c.Login(username, password); err == nil {
+			return nil
+		}
+		if !retryableLoginError(err) {
+			return err
+		}
+		// Only wait when another attempt will actually follow.
+		if attempt < loginAttempts-1 {
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+		}
+	}
+	return err
 }
 
 // searchPageSize is the page size used when scanning the user search. It is the
