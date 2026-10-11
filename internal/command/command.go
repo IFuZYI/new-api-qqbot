@@ -25,14 +25,11 @@ const (
 >>签到<<`
 )
 
-// Pattern is one configured command. Exactly one of Literal and re is set.
+// Pattern is one configured command: a literal, or a compiled expression.
 type Pattern struct {
-	// Raw is the pattern as the operator wrote it.
-	Raw string
-	// Literal is set for a plain-text pattern (the common case).
+	// Literal is the plain-text form, compared for equality against the trimmed
+	// message. Empty for a regex pattern.
 	Literal string
-	// CaseInsensitive records the `i` flag of a regex pattern.
-	CaseInsensitive bool
 
 	re *regexp.Regexp
 }
@@ -79,7 +76,7 @@ func MustParse(text string) Set {
 func parsePattern(line string) (Pattern, error) {
 	body, flags, ok := splitRegex(line)
 	if !ok {
-		return Pattern{Raw: line, Literal: line}, nil
+		return Pattern{Literal: line}, nil
 	}
 	expr := body
 	if strings.Contains(flags, "i") {
@@ -89,7 +86,7 @@ func parsePattern(line string) (Pattern, error) {
 	if err != nil {
 		return Pattern{}, err
 	}
-	return Pattern{Raw: line, CaseInsensitive: strings.Contains(flags, "i"), re: re}, nil
+	return Pattern{re: re}, nil
 }
 
 // splitRegex recognises /expr/ and /expr/flags. It reports false for anything
@@ -138,7 +135,3 @@ func (s Set) Matches(message string) bool {
 	}
 	return false
 }
-
-// Empty reports whether there are no patterns, which is what a switched-off
-// feature looks like.
-func (s Set) Empty() bool { return len(s.patterns) == 0 }

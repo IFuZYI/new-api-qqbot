@@ -235,50 +235,6 @@ export function Input({
 }
 
 /**
- * Textarea is the multi-line sibling of Input, for the command lists: one
- * pattern per line is the whole format, so the control has to show several
- * lines at once and keep the newlines the operator typed.
- */
-export function Textarea({
-  value,
-  onChange,
-  placeholder,
-  rows = 4,
-  disabled,
-  invalid,
-  className = '',
-  ariaLabel,
-  mono,
-}: {
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  rows?: number
-  disabled?: boolean
-  invalid?: boolean
-  className?: string
-  ariaLabel?: string
-  /** Monospace: for values where each character is significant. */
-  mono?: boolean
-}) {
-  return (
-    <textarea
-      value={value}
-      rows={rows}
-      placeholder={placeholder}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      aria-invalid={invalid || undefined}
-      spellCheck={false}
-      onChange={(e) => onChange(e.target.value)}
-      className={`block max-w-full min-w-0 rounded-control border bg-background px-2.5 py-1.5 text-sm leading-5 text-foreground transition-colors placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 ${
-        invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
-      } ${mono ? 'font-mono text-xs' : ''} ${FOCUS} ${className}`}
-    />
-  )
-}
-
-/**
  * Select stays a native <select> — the dropdown is the browser's, so it keeps
  * native keyboard and screen-reader behaviour. The OS arrow is the one part
  * that cannot be themed, so it is removed (appearance-none) and redrawn from

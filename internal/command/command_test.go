@@ -134,9 +134,6 @@ func TestEmptyConfigMatchesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !set.Empty() {
-		t.Error("an empty configuration should report Empty")
-	}
 	if set.Matches("/绑定") {
 		t.Error("an empty configuration must match nothing")
 	}
