@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 
 /**
  * Shared UI kit. Colours come from the token layer in index.css (new-api's
@@ -811,23 +811,167 @@ export function ErrorNote({ children, onClose }: { children: ReactNode; onClose?
   )
 }
 
-export function OkNote({ children }: { children: ReactNode }) {
-  return (
-    <div
-      role="status"
-      className="mb-3 flex items-start gap-2 rounded-control border border-success/40 bg-success/10 px-3 py-2 text-xs text-success"
-    >
-      <span className="min-w-0 break-words">{children}</span>
-    </div>
-  )
-}
-
-/** Inline validation / warning note used inside forms. */
+/**
+ * Inline validation / warning note used inside forms.
+ *
+ * Distinct from a toast on purpose: this marks a field or a form as currently
+ * invalid and must persist while the operator fixes it, whereas a toast reports
+ * something that already happened.
+ */
 export function WarnNote({ children }: { children: ReactNode }) {
   return (
     <p className="rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
       {children}
     </p>
+  )
+}
+
+/* ---------------- toasts ---------------- */
+
+type ToastTone = 'ok' | 'err' | 'info'
+
+type Toast = {
+  id: number
+  tone: ToastTone
+  message: string
+}
+
+type ToastAPI = {
+  /** Report a completed action. Auto-dismisses. */
+  success: (message: string) => void
+  /** Report a failure. Stays longer, and never collapses into the success slot. */
+  error: (message: string) => void
+  info: (message: string) => void
+}
+
+const ToastContext = createContext<ToastAPI>({
+  success: () => {},
+  error: () => {},
+  info: () => {},
+})
+
+/** useToast reports an action's outcome as a transient toast. */
+export function useToast() {
+  return useContext(ToastContext)
+}
+
+// An error is worth more reading time than a success, and a long one (an API
+// error carries the server's message) more still.
+const TOAST_MS: Record<ToastTone, number> = { ok: 4000, info: 5000, err: 9000 }
+
+/**
+ * ToastProvider renders the toast stack and hands the API down. It lives above
+ * the whole panel, so a message survives a tab change — the operator switches
+ * tabs after acting, and the confirmation should follow them rather than
+ * disappear with the unmounted view.
+ */
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const nextID = useRef(1)
+  // Track timers so an unmount does not leave callbacks running, and so closing
+  // a toast by hand cancels its own dismissal.
+  const timers = useRef(new Map<number, number>())
+
+  const dismiss = useCallback((id: number) => {
+    const t = timers.current.get(id)
+    if (t !== undefined) {
+      window.clearTimeout(t)
+      timers.current.delete(id)
+    }
+    setToasts((prev) => prev.filter((x) => x.id !== id))
+  }, [])
+
+  const push = useCallback(
+    (tone: ToastTone) => (message: string) => {
+      const text = message.trim()
+      if (!text) return
+      const id = nextID.current++
+      // Cap the stack: a burst of failures must not cover the page.
+      setToasts((prev) => [...prev.slice(-3), { id, tone, message: text }])
+      timers.current.set(id, window.setTimeout(() => dismiss(id), TOAST_MS[tone]))
+    },
+    [dismiss],
+  )
+
+  const api = useMemo<ToastAPI>(
+    () => ({
+      success: push('ok'),
+      error: push('err'),
+      info: push('info'),
+    }),
+    [push],
+  )
+
+  useEffect(
+    () => () => {
+      for (const t of timers.current.values()) window.clearTimeout(t)
+      timers.current.clear()
+    },
+    [],
+  )
+
+  return (
+    <ToastContext.Provider value={api}>
+      {children}
+      <div
+        // Above the modal overlay (z-40) so a toast raised from a dialog is
+        // still readable, and out of the pointer path except for its own
+        // controls.
+        className="pointer-events-none fixed inset-x-0 top-3 z-50 flex flex-col items-center gap-2 px-3 sm:items-end sm:pr-4"
+        aria-live="polite"
+        aria-atomic="false"
+      >
+        {toasts.map((t) => (
+          <ToastCard key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
+        ))}
+      </div>
+    </ToastContext.Provider>
+  )
+}
+
+function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }) {
+  const tones: Record<ToastTone, { box: string; icon: ReactNode }> = {
+    ok: {
+      box: 'border-success/40 bg-success/10 text-success',
+      icon: (
+        <path d="M3 8.5 6.5 12 13 4.5" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+      ),
+    },
+    err: {
+      box: 'border-destructive/40 bg-destructive/10 text-destructive',
+      icon: (
+        <path d="M8 4.5v4.5M8 11.4v.1" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      ),
+    },
+    info: {
+      box: 'border-info/40 bg-info/10 text-info',
+      icon: (
+        <path d="M8 7v4.5M8 4.6v.1" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      ),
+    },
+  }
+  const t = tones[toast.tone]
+  return (
+    <div
+      // An error interrupts; a success waits its turn in the polite queue.
+      role={toast.tone === 'err' ? 'alert' : 'status'}
+      className={`pointer-events-auto flex w-full max-w-md items-start gap-2 rounded-panel border px-3 py-2 text-xs shadow-lg backdrop-blur-sm sm:w-auto ${t.box}`}
+    >
+      <svg aria-hidden="true" viewBox="0 0 16 16" className="mt-px size-4 shrink-0">
+        {t.icon}
+      </svg>
+      <span className="min-w-0 flex-1 break-words">{toast.message}</span>
+      <button
+        type="button"
+        aria-label="关闭提示"
+        onClick={onDismiss}
+        className={`-mr-1 shrink-0 rounded-sm p-0.5 opacity-70 transition-opacity hover:opacity-100 ${FOCUS}`}
+      >
+        <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3">
+          <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      </button>
+    </div>
   )
 }
 

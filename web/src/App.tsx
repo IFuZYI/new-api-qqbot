@@ -3,7 +3,7 @@ import { api, type AuthState, type Bootstrap, type CheckResult, type Config, typ
 import Login from './Login'
 import Rules from './Rules'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Combobox, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, OkNote, Row, Select, Switch, Table, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Combobox, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -20,8 +20,7 @@ export default function App() {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [tab, setTab] = useState<Tab>('overview')
   const [boot, setBoot] = useState<Bootstrap | null>(null)
-  const [err, setErr] = useState('')
-  const [ok, setOk] = useState('')
+  const toast = useToast()
 
   const [authError, setAuthError] = useState('')
 
@@ -30,9 +29,9 @@ export default function App() {
       setAuth(await api.authState())
       setAuthError('')
     } catch (e) {
-      // Do NOT leave auth null with only the banner set: the banner lives
-      // inside the authenticated branch, so the app would sit on the loading
-      // screen forever with the error unreachable.
+      // The auth error cannot be a toast: this runs before the panel (and its
+      // toast host) is on screen, and the message has to stay put until the
+      // operator retries — a toast would expire while they read it.
       setAuthError(e instanceof Error ? e.message : String(e))
     }
   }, [])
@@ -40,7 +39,6 @@ export default function App() {
   const refresh = useCallback(async () => {
     try {
       setBoot(await api.bootstrap())
-      setErr('')
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       // A 401 means the session expired or was revoked: drop back to the login
@@ -49,9 +47,9 @@ export default function App() {
         setAuth({ needs_setup: false, authenticated: false, username: '' })
         return
       }
-      setErr(msg)
+      toast.error(msg)
     }
-  }, [])
+  }, [toast])
 
   useEffect(() => {
     void checkAuth()
@@ -61,15 +59,10 @@ export default function App() {
     if (auth?.authenticated) void refresh()
   }, [auth, refresh])
 
-  const flash = (msg: string) => {
-    setOk(msg)
-    setErr('')
-    window.setTimeout(() => setOk(''), 4000)
-  }
-  const fail = (e: unknown) => {
-    setErr(e instanceof Error ? e.message : String(e))
-    setOk('')
-  }
+  // Action outcomes are toasts: they follow the operator across a tab change
+  // and do not push the page content around while it is being read.
+  const flash = useCallback((msg: string) => toast.success(msg), [toast])
+  const fail = useCallback((e: unknown) => toast.error(e instanceof Error ? e.message : String(e)), [toast])
 
   if (!auth) {
     return (
@@ -169,9 +162,6 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-4 p-4">
-        {err && <ErrorNote onClose={() => setErr('')}>{err}</ErrorNote>}
-        {ok && <OkNote>{ok}</OkNote>}
-
         {tab === 'overview' && <Overview boot={boot} onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'groups' && <Groups onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
