@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Condition, type Rule, type RuleMeta } from './api'
-import { Badge, Button, Card, Cell, CheckboxRow, Empty, Field, Fieldset, Input, Modal, MultiSelect, Row, Select, Switch, Table, WarnNote } from './ui'
+import { formatDateTime } from './format'
+import { Badge, Button, Card, Cell, CheckboxRow, ConfirmDialog, Empty, Field, Fieldset, Input, Modal, MultiSelect, Row, Select, Switch, Table, WarnNote } from './ui'
 
 /** Group-conversion rules: when a member matches, move their new-api account. */
 export default function Rules({
@@ -15,6 +16,7 @@ export default function Rules({
   const [groups, setGroups] = useState<string[]>([])
   const [groupsErr, setGroupsErr] = useState('')
   const [editing, setEditing] = useState<Rule | null>(null)
+  const [deleting, setDeleting] = useState<Rule | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -62,7 +64,7 @@ export default function Rules({
     <>
       <Card
         title="分组转换规则"
-        description="每条规则选择一种触发方式（绑定成功时 / 按巡检周期 / 两者都执行），并指定源分组与目标分组；源分组留空表示任意分组。未选择触发方式的规则不会匹配任何人。"
+        description="每条规则勾选触发方式（绑定成功时 / 按巡检周期，可同时勾选），并指定源分组与目标分组；源分组留空表示任意分组。未勾选触发方式的规则不会匹配任何人。"
         actions={
           <>
             <Button disabled={busy} onClick={run}>
@@ -97,7 +99,7 @@ export default function Rules({
                     {r.on_bind && <Badge tone="accent">绑定成功时</Badge>}
                     {r.interval_minutes > 0 && <Badge>按巡检周期 {r.interval_minutes}min</Badge>}
                     {!r.on_bind && r.interval_minutes <= 0 && (
-                      <span className="text-muted-foreground">未选择</span>
+                      <span className="text-muted-foreground">未勾选</span>
                     )}
                   </div>
                 </Cell>
@@ -129,7 +131,7 @@ export default function Rules({
                   )}
                 </Cell>
                 <Cell className="text-xs text-muted-foreground">
-                  {r.last_run_at ? new Date(r.last_run_at * 1000).toLocaleString() : '—'}
+                  {r.last_run_at ? formatDateTime(r.last_run_at) : '—'}
                   {r.last_error && <div className="text-destructive">{r.last_error}</div>}
                 </Cell>
                 <Cell sticky>
@@ -141,15 +143,7 @@ export default function Rules({
                       kind="ghost"
                       size="sm"
                       className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                      onClick={async () => {
-                        try {
-                          await api.deleteRule(r.id)
-                          onDone(`已删除规则「${r.name}」`)
-                          await load()
-                        } catch (e) {
-                          onFail(e)
-                        }
-                      }}
+                      onClick={() => setDeleting(r)}
                     >
                       删除
                     </Button>
@@ -175,12 +169,32 @@ export default function Rules({
           onFail={onFail}
         />
       )}
+
+      {deleting && (
+        <ConfirmDialog
+          title="删除规则"
+          confirmLabel="删除规则"
+          message={<>删除规则「{deleting.name}」后无法撤销，该规则将不再执行分组转换。</>}
+          onConfirm={async () => {
+            try {
+              await api.deleteRule(deleting.id)
+              onDone(`已删除规则「${deleting.name}」`)
+              await load()
+            } catch (e) {
+              onFail(e)
+            } finally {
+              setDeleting(null)
+            }
+          }}
+          onCancel={() => setDeleting(null)}
+        />
+      )}
     </>
   )
 }
 
 /** blankRule is a new rule: enabled, nothing selected — the trigger is a
- * deliberate choice (see the trigger-type dropdown), not a default. */
+ * deliberate choice (see the trigger checkboxes), not a default. */
 function blankRule(): Rule {
   return {
     id: 0,
@@ -203,7 +217,7 @@ function blankRule(): Rule {
 type TriggerKind = 'bind' | 'interval' | 'both'
 
 /** triggerKind reads the stored pair back as one label, for the rule table and
- * for the 未选择 case (a rule stored before a trigger was required). */
+ * for the 未勾选 case (a rule stored before a trigger was required). */
 function triggerKind(r: Rule): TriggerKind | '' {
   if (r.on_bind && r.interval_minutes > 0) return 'both'
   if (r.on_bind) return 'bind'
@@ -248,10 +262,9 @@ function RuleDialog({
 
   const set = (patch: Partial<Rule>) => setR((prev) => ({ ...prev, ...patch }))
 
-  // The trigger is one choice in the UI, two fields in the API; derive it so the
-  // dropdown always reflects what would actually be saved.
-  // The table and the "nothing ticked" check read the stored pair; the form
-  // itself edits the two fields directly.
+  // The trigger is two independent fields in the API; the form edits them
+  // directly, while the table and the "nothing ticked" check read the stored
+  // pair back through triggerKind.
   const kind = triggerKind(r)
 
   const addCondition = () =>

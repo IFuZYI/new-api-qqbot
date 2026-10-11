@@ -4,7 +4,7 @@ import Login from './Login'
 import Rules from './Rules'
 import SettingsView from './features/Settings'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Combobox, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
 
@@ -266,7 +266,7 @@ function Overview({
           </Button>
         </div>
         <p className="mt-3 border-t border-border pt-3 text-[11px] leading-4 text-muted-foreground">
-          「手动签到」用于验证「消息即签到」这条路：选一个成员，按当天记录一次签到（同一天只会记一次），随后可以点「发放奖励」看他是否拿到额度。
+          「手动签到」用于验证「消息即签到」这条路：选一个成员，按当天记录一次签到（同一天只会记一次），随后可以点「发放奖励」看他是否拿到 quota。
         </p>
       </Card>
 
@@ -525,6 +525,7 @@ function Users({
 }) {
   const [data, setData] = useState<UsersResponse | null>(null)
   const [editing, setEditing] = useState<UserRow | null>(null)
+  const [unbinding, setUnbinding] = useState<UserRow | null>(null)
   const [groups, setGroups] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
 
@@ -659,9 +660,9 @@ function Users({
           </>
         }
       >
-        {s && (
+        {s && data && (
           <p className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-            <span>共 {s.total} 行</span>
+            <span>共 {data.total} 行{data.total !== s.total && `（全部 ${s.total} 行）`}</span>
             <span aria-hidden="true">·</span>
             <span>在群 {s.in_group}</span>
             <span aria-hidden="true">·</span>
@@ -768,7 +769,7 @@ function Users({
               '绑定方式',
               '今日已签到',
               '累计天数',
-              '今日奖励',
+              '今日奖励（quota）',
               '操作',
             ]}
           >
@@ -866,16 +867,7 @@ function Users({
                         kind="ghost"
                         size="sm"
                         className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        onClick={async () => {
-                          try {
-                            await api.deleteBinding(m.qq)
-                            onDone(`已解绑 ${m.qq}`)
-                            await load()
-                            await onRefresh()
-                          } catch (e) {
-                            onFail(e)
-                          }
-                        }}
+                        onClick={() => setUnbinding(m)}
                       >
                         解绑
                       </Button>
@@ -900,6 +892,31 @@ function Users({
             await onRefresh()
           }}
           onFail={onFail}
+        />
+      )}
+
+      {unbinding && (
+        <ConfirmDialog
+          title="解绑"
+          confirmLabel="解绑"
+          message={
+            <>
+              将删除 QQ {unbinding.qq} 与账号「{unbinding.newapi_username || `#${unbinding.newapi_user_id ?? ''}`}」的绑定记录，且无法撤销；绑定方式也会一并丢失。
+            </>
+          }
+          onConfirm={async () => {
+            try {
+              await api.deleteBinding(unbinding.qq)
+              onDone(`已解绑 ${unbinding.qq}`)
+              await load()
+              await onRefresh()
+            } catch (e) {
+              onFail(e)
+            } finally {
+              setUnbinding(null)
+            }
+          }}
+          onCancel={() => setUnbinding(null)}
         />
       )}
     </>

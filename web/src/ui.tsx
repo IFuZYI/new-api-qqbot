@@ -769,7 +769,7 @@ export function Badge({
     ok: 'text-success border-success/40 bg-success/10',
     warn: 'text-warning border-warning/40 bg-warning/10',
     err: 'text-destructive border-destructive/40 bg-destructive/10',
-    accent: 'text-primary border-primary/40 bg-primary/10',
+    accent: 'text-accent-foreground border-primary/40 bg-primary/10',
     info: 'text-info border-info/40 bg-info/10',
     muted: 'text-muted-foreground border-border bg-muted',
   }
@@ -1242,6 +1242,64 @@ export function Modal({
         </section>
       </div>
     </div>
+  )
+}
+
+/**
+ * Confirmation for a destructive action.
+ *
+ * A destructive action gets its own dialog instead of an inline button, and
+ * the busy lock is the reason this is a shared component: the handler is
+ * async, so until it settles BOTH buttons are disabled and the confirm button
+ * reads 处理中… — a second click while the first delete is still in flight
+ * would otherwise fire the same destructive action twice.
+ */
+export function ConfirmDialog({
+  title,
+  message,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  danger = true,
+}: {
+  title: string
+  message: ReactNode
+  confirmLabel: string
+  onConfirm: () => void | Promise<void>
+  onCancel: () => void
+  danger?: boolean
+}) {
+  const [busy, setBusy] = useState(false)
+  const run = async () => {
+    setBusy(true)
+    try {
+      await onConfirm()
+    } finally {
+      // The call site owns the error; this only guarantees the dialog never
+      // stays stuck in the busy state and re-enables the buttons.
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal
+      title={title}
+      // While the action is in flight, closing is refused: the request is
+      // already sent, so letting Escape dismiss the dialog would read as "I
+      // cancelled" while the delete still lands.
+      onClose={busy ? () => {} : onCancel}
+      actions={
+        <>
+          <Button onClick={onCancel} disabled={busy}>
+            取消
+          </Button>
+          <Button kind={danger ? 'danger' : 'primary'} onClick={run} disabled={busy}>
+            {busy ? '处理中…' : confirmLabel}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-xs leading-5 text-muted-foreground">{message}</p>
+    </Modal>
   )
 }
 
