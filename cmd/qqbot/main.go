@@ -201,7 +201,7 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 		// session to the account's list. It is looked up under this host and
 		// account: a session issued elsewhere is not this client's credential,
 		// and importing it would send it to a host that never issued it.
-		origin := config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username)
+		origin := config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username, cfg.NewAPI.Password)
 		if saved := l.cfg.LoadNewAPISession(origin); saved != "" {
 			if err := c.ImportSession(saved); err != nil {
 				// A malformed value is not worth keeping; a well-formed one that
@@ -233,7 +233,7 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 	// Remember the (possibly rotated) session for the next start, under the
 	// origin it was just issued for.
 	if s := c.ExportSession(); s != "" {
-		_ = l.cfg.SaveNewAPISession(config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username), s)
+		_ = l.cfg.SaveNewAPISession(config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username, cfg.NewAPI.Password), s)
 	}
 	if l.lockout != nil {
 		l.lockout.Success()
@@ -244,9 +244,15 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 
 // matches reports whether these credentials are the ones the live gateway is
 // configured with, i.e. whether its session can answer for them.
+//
+// Both sides are normalised the same way: the stored URL keeps whatever the
+// operator typed (a trailing slash is valid and stored verbatim), so comparing
+// it against a trimmed argument would fail for the identical address and make
+// 测试连接 perform a real login — a new gateway session and a login-budget
+// spend — for a configuration that never changed.
 func (l *lazyGateway) matches(url, username, password string) bool {
 	cfg := l.cfg.MustLoad()
-	return cfg.NewAPI.URL == strings.TrimRight(url, "/") &&
+	return strings.TrimRight(cfg.NewAPI.URL, "/") == strings.TrimRight(url, "/") &&
 		cfg.NewAPI.Username == username &&
 		cfg.NewAPI.Password == password
 }

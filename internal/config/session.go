@@ -14,13 +14,19 @@ const (
 	newAPISessionKey = "newapi.session"
 )
 
-// SessionOrigin is the identity a stored session belongs to: the gateway host
-// and the account it was issued for. A session is a credential for exactly
-// that pair, so it is only ever loaded back under the same origin — changing
-// the URL cannot hand one instance's credential to another host, and changing
-// the account cannot leave the service silently acting as the old one.
-func SessionOrigin(url, username string) string {
-	return strings.TrimRight(url, "/") + "\x00" + username
+// SessionOrigin is the identity a stored session belongs to: the gateway host,
+// the account, and the password it was issued under. A session is a credential
+// for exactly that triple, so it is only ever loaded back under the same origin
+// — changing the URL cannot hand one instance's credential to another host,
+// changing the account cannot leave the service silently acting as the old one,
+// and changing the password cannot mask a typo behind the still-valid session
+// of the old credentials (the operator's 测试连接 would otherwise report success
+// for a password the gateway has never seen).
+//
+// A trailing slash is normalised away on both sides: the operator pastes the
+// address with or without it, and the two are the same origin.
+func SessionOrigin(url, username, password string) string {
+	return strings.TrimRight(url, "/") + "\x00" + username + "\x00" + password
 }
 
 // storedSession is the on-disk shape: the origin a token was issued for, plus

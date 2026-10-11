@@ -213,7 +213,7 @@ func TestStoredSessionIsNotSentToANewHost(t *testing.T) {
 	if err := gw.waitForSession(); err != nil {
 		t.Fatalf("host A: could not establish a session: %v", err)
 	}
-	if got := mgr.LoadNewAPISession(config.SessionOrigin(srvA.URL, "napcat")); got == "" {
+	if got := mgr.LoadNewAPISession(config.SessionOrigin(srvA.URL, "napcat", "pw")); got == "" {
 		t.Fatal("host A: the session must be persisted")
 	}
 
@@ -265,4 +265,36 @@ func newGatewayEnvFor(t *testing.T, stub *deadSessionGateway) (*httptest.Server,
 		t.Fatalf("save config: %v", err)
 	}
 	return srv, st, mgr, &lazyGateway{cfg: mgr, lockout: newapi.NewLockout(nil)}
+}
+
+// A trailing slash is the same gateway address. The operator pastes the URL
+// with or without it and it is stored verbatim, so comparing the raw stored
+// value against a trimmed argument made the identical address fail to match —
+// and 测试连接 then logged in for real (a new session plus a login-budget
+// spend) on a configuration that had not changed.
+func TestMatchesTreatsATrailingSlashAsTheSameAddress(t *testing.T) {
+	_, _, mgr, _ := newGatewayEnvFor(t, &deadSessionGateway{})
+	cfg := mgr.MustLoad()
+
+	withSlash := mgr
+	if err := withSlash.Save(config.Config{NewAPI: config.NewAPI{
+		URL: cfg.NewAPI.URL + "/", Username: "napcat", Password: "pw",
+	}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	gw := &lazyGateway{cfg: withSlash}
+
+	for _, arg := range []string{cfg.NewAPI.URL, cfg.NewAPI.URL + "/"} {
+		if !gw.matches(arg, "napcat", "pw") {
+			t.Errorf("a stored URL with a trailing slash must match %q", arg)
+		}
+	}
+	// A different address must still not match.
+	if gw.matches("http://other.example.test", "napcat", "pw") {
+		t.Error("a different host must not match")
+	}
+	// Nor must a different password.
+	if gw.matches(cfg.NewAPI.URL, "napcat", "other") {
+		t.Error("a different password must not match")
+	}
 }

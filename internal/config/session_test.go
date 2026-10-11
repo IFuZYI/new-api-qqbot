@@ -18,7 +18,7 @@ func TestSessionPersistsAcrossManagers(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	origin := SessionOrigin("https://api.example.test", "napcat")
+	origin := SessionOrigin("https://api.example.test", "napcat", "pw")
 	if err := NewManager(filepath.Join(dir, FileName), st).SaveNewAPISession(origin, raw); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -30,10 +30,12 @@ func TestSessionPersistsAcrossManagers(t *testing.T) {
 	}
 }
 
-// A session is a credential for the host and account that issued it. Importing
-// it into a client pointed at another host would hand one instance's credential
-// to the other; loading it under a different account would silently keep acting
-// as the old one. Both must read as "no session".
+// A session is a credential for the host, account and password that issued it.
+// Importing it into a client pointed at another host would hand one instance's
+// credential to the other; loading it under a different account — or after the
+// password changed — would silently keep acting as the old credentials, so a
+// typo'd new password would go unnoticed until the old session expired. All
+// three must read as "no session".
 func TestSessionIsBoundToItsOrigin(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "s.db"))
@@ -44,7 +46,7 @@ func TestSessionIsBoundToItsOrigin(t *testing.T) {
 
 	m := NewManager(filepath.Join(dir, FileName), st)
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	origin := SessionOrigin("https://api.example.test", "napcat")
+	origin := SessionOrigin("https://api.example.test", "napcat", "pw")
 	if err := m.SaveNewAPISession(origin, raw); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -53,9 +55,19 @@ func TestSessionIsBoundToItsOrigin(t *testing.T) {
 		t.Errorf("the same origin must load its own session, got %q", got)
 	}
 	for name, other := range map[string]string{
-		"a different host":    SessionOrigin("https://other.example.test", "napcat"),
-		"a different account": SessionOrigin("https://api.example.test", "someoneelse"),
+		"a different host":    SessionOrigin("https://other.example.test", "napcat", "pw"),
+		"a different account": SessionOrigin("https://api.example.test", "someoneelse", "pw"),
+		"a changed password":  SessionOrigin("https://api.example.test", "napcat", "pw2"),
+		"a trailing slash":    SessionOrigin("https://api.example.test/", "napcat", "pw"),
 	} {
+		if name == "a trailing slash" {
+			// A trailing slash is the same origin, not a different one: the
+			// operator pastes the address with or without it.
+			if got := m.LoadNewAPISession(other); got != raw {
+				t.Errorf("a trailing slash must still match, got %q", got)
+			}
+			continue
+		}
 		if got := m.LoadNewAPISession(other); got != "" {
 			t.Errorf("%s must not load the stored session, got %q", name, got)
 		}
@@ -71,7 +83,7 @@ func TestSessionAbsentIsEmpty(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	origin := SessionOrigin("https://api.example.test", "napcat")
+	origin := SessionOrigin("https://api.example.test", "napcat", "pw")
 	if got := NewManager(filepath.Join(dir, FileName), st).LoadNewAPISession(origin); got != "" {
 		t.Errorf("a missing session must read as empty, got %q", got)
 	}
@@ -88,7 +100,7 @@ func TestSessionCanBeCleared(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	m := NewManager(filepath.Join(dir, FileName), st)
-	origin := SessionOrigin("https://api.example.test", "napcat")
+	origin := SessionOrigin("https://api.example.test", "napcat", "pw")
 	if err := m.SaveNewAPISession(origin, "a.b"); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +124,7 @@ func TestSavingConfigKeepsTheSession(t *testing.T) {
 
 	m := NewManager(filepath.Join(dir, FileName), st)
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	origin := SessionOrigin("https://api.example.test", "napcat")
+	origin := SessionOrigin("https://api.example.test", "napcat", "pw")
 	if err := m.SaveNewAPISession(origin, raw); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +149,7 @@ func TestSessionNeverAppearsInRenderedConfig(t *testing.T) {
 
 	m := NewManager(filepath.Join(dir, FileName), st)
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	if err := m.SaveNewAPISession(SessionOrigin("https://api.example.test", "napcat"), raw); err != nil {
+	if err := m.SaveNewAPISession(SessionOrigin("https://api.example.test", "napcat", "pw"), raw); err != nil {
 		t.Fatal(err)
 	}
 	rendered := m.MustLoad().Redacted()
