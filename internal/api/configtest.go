@@ -58,7 +58,7 @@ func (r *Router) testNewAPI(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	user, err := r.prober.ProbeGateway(url, in.Username, in.Password)
+	user, reused, err := r.prober.ProbeGateway(url, in.Username, in.Password)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{
 			"results": []checkResult{{
@@ -70,6 +70,8 @@ func (r *Router) testNewAPI(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Say which happened: "reused" means the stored session answered, so the
+	// credentials are known good without spending a session to prove it.
 	detail := fmt.Sprintf("已登录：%s", user.Username)
 	if user.DisplayName != "" {
 		detail += fmt.Sprintf("（%s）", user.DisplayName)
@@ -77,6 +79,11 @@ func (r *Router) testNewAPI(w http.ResponseWriter, req *http.Request) {
 	detail += fmt.Sprintf("，id=%d，role=%d", user.ID, user.Role)
 	if user.Group != "" {
 		detail += fmt.Sprintf("，分组 %s", user.Group)
+	}
+	if reused {
+		detail += "（复用当前会话）"
+	} else {
+		detail += "（新建会话）"
 	}
 	writeJSON(w, 200, map[string]any{
 		"results": []checkResult{{Name: "new-api 登录", OK: true, Detail: detail}},

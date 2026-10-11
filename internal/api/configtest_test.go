@@ -22,11 +22,13 @@ import (
 type fakeProber struct {
 	gatewayUser *newapi.User
 	gatewayErr  error
-	webuiInfo   *napcat.LoginInfo
-	webuiErr    error
-	onebotInfo  *napcat.LoginInfo
-	onebotErr   error
-	eventWSErr  error
+	// gatewayReused models the live session answering the probe.
+	gatewayReused bool
+	webuiInfo     *napcat.LoginInfo
+	webuiErr      error
+	onebotInfo    *napcat.LoginInfo
+	onebotErr     error
+	eventWSErr    error
 
 	gotGatewayURL, gotGatewayUser, gotGatewayPass string
 	gotWebUIURL, gotWebUIToken                    string
@@ -34,9 +36,9 @@ type fakeProber struct {
 	gotEventWSURL, gotEventWSToken                string
 }
 
-func (f *fakeProber) ProbeGateway(url, username, password string) (*newapi.User, error) {
+func (f *fakeProber) ProbeGateway(url, username, password string) (*newapi.User, bool, error) {
 	f.gotGatewayURL, f.gotGatewayUser, f.gotGatewayPass = url, username, password
-	return f.gatewayUser, f.gatewayErr
+	return f.gatewayUser, f.gatewayReused, f.gatewayErr
 }
 
 func (f *fakeProber) ProbeWebUI(url, token string) (*napcat.LoginInfo, error) {

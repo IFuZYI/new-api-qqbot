@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -101,7 +102,7 @@ func main() {
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 	router.SetNapCatAdmin(napcatAdmin{})
-	router.SetProber(prober{})
+	router.SetProber(prober{gw: gw})
 	// The scheduler's health is what the panel's status view reads, so the
 	// patrols it has actually run are visible from the UI.
 	router.SetPatrolStatus(sched)
@@ -160,6 +161,11 @@ type lazyGateway struct {
 }
 
 // client returns a logged-in client, re-authenticating only when needed.
+//
+// The client is built once and then kept, including across access-token expiry.
+// That is not an optimisation: the session cookie lives in the client's jar, so
+// rebuilding it throws the session away and the next call has to log in again —
+// which is exactly what filled new-api's session list with one entry per call.
 func (l *lazyGateway) client() (*newapi.Client, error) {
 	cfg := l.cfg.MustLoad()
 	if cfg.NewAPI.URL == "" {
@@ -170,6 +176,7 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// A usable token needs no work at all.
 	if l.cached != nil && l.key == key && l.cached.TokenFresh() {
 		return l.cached, nil
 	}
@@ -183,16 +190,24 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 		}
 	}
 
-	// A cached client whose token has expired keeps its session: re-logging-in
-	// would create a second one (and spend the login budget) while the first is
-	// still counted against the account's 50-session cap. Reuse it and let the
-	// gateway reject a genuinely dead token, which is the one case that needs a
-	// fresh session.
-	if l.cached != nil && l.key == key && l.cached.Token() != "" && l.cached.TokenValid() {
-		return l.cached, nil
+	// Reuse the existing client when the settings have not changed. Its jar
+	// still holds the session, so reauthentication refreshes that session rather
+	// than creating another one.
+	c := l.cached
+	if c == nil || l.key != key {
+		c = newapi.New(cfg.NewAPI.URL)
+		// A restart has no jar to inherit, so the session from the last run is
+		// restored from storage. Without it every start would log in and add a
+		// session to the account's list.
+		if saved := l.cfg.LoadNewAPISession(); saved != "" {
+			if err := c.ImportSession(saved); err != nil {
+				// A malformed value is not worth keeping; a well-formed one that
+				// is dead fails at the refresh below, which is where we find out.
+				_ = l.cfg.ClearNewAPISession()
+			}
+		}
 	}
 
-	c := newapi.New(cfg.NewAPI.URL)
 	// Reauthenticate, not Login: it refreshes the existing session when it can,
 	// and only logs in when there is nothing to refresh. The difference matters
 	// — the access token lives 15 minutes while a login session lives 30 days,
@@ -202,13 +217,34 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 		if l.lockout != nil {
 			l.lockout.Fail(err)
 		}
+		// A rejected session must be forgotten, or every later attempt would
+		// send the same dead credential instead of logging in.
+		if newapi.IsAuthFailure(err) {
+			_ = l.cfg.ClearNewAPISession()
+			// Drop it from the cache too: the next call must start clean rather
+			// than keep retrying the dead session.
+			l.cached, l.key = nil, ""
+		}
 		return nil, err
+	}
+	// Remember the (possibly rotated) session for the next start.
+	if s := c.ExportSession(); s != "" {
+		_ = l.cfg.SaveNewAPISession(s)
 	}
 	if l.lockout != nil {
 		l.lockout.Success()
 	}
 	l.cached, l.key = c, key
 	return c, nil
+}
+
+// matches reports whether these credentials are the ones the live gateway is
+// configured with, i.e. whether its session can answer for them.
+func (l *lazyGateway) matches(url, username, password string) bool {
+	cfg := l.cfg.MustLoad()
+	return cfg.NewAPI.URL == strings.TrimRight(url, "/") &&
+		cfg.NewAPI.Username == username &&
+		cfg.NewAPI.Password == password
 }
 
 // invalidateAfter drops the cached client when a request shows the session is
@@ -362,19 +398,39 @@ func (napcatAdmin) EnsureAdapters(webuiURL, webuiToken string, opts napcat.Adapt
 	return w.EnsureAdapters(opts)
 }
 
-// prober reaches the two external systems for the connection tests. Every probe
-// builds a throwaway client from the values it is given, so testing a form
-// never disturbs the cached production clients or their sessions.
-type prober struct{}
+// prober reaches the two external systems for the connection tests.
+//
+// The new-api probe goes through the live gateway when the credentials it is
+// given are the ones already in use: a session proves those credentials are
+// valid, so logging in again would only add another entry to the account's
+// session list (and spend the login rate limit) to re-learn something the
+// service already knows. Changed credentials cannot be checked that way — a
+// session belongs to the old account — so those do log in.
+type prober struct {
+	// gw is the live gateway. Optional: without it every probe logs in, which is
+	// what a test env gets.
+	gw *lazyGateway
+}
 
-// ProbeGateway logs in to new-api and returns the account behind the
-// credentials, so the operator sees which account they configured.
-func (prober) ProbeGateway(url, username, password string) (*newapi.User, error) {
+// ProbeGateway reports the account behind the credentials.
+func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool, error) {
+	if p.gw != nil && p.gw.matches(url, username, password) {
+		c, err := p.gw.client()
+		if err == nil {
+			u, err := c.Self()
+			if err == nil {
+				return u, true, nil
+			}
+		}
+		// Fall through to a real login: the live session could not answer, and
+		// the operator asked for a test, so they get one.
+	}
 	c := newapi.New(url)
 	if err := c.Login(username, password); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return c.Self()
+	u, err := c.Self()
+	return u, false, err
 }
 
 // ProbeWebUI logs in to NapCat's panel and asks the debug bridge for the bot

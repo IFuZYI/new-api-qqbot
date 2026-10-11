@@ -25,7 +25,7 @@ func (s *refreshServer) handler() http.Handler {
 	mux.HandleFunc("/api/user/login", func(w http.ResponseWriter, r *http.Request) {
 		s.logins.Add(1)
 		exp := time.Now().Add(s.tokenTTL).Unix()
-		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "sid.secret1", Path: "/api/user/auth", HttpOnly: true})
+		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret1", Path: "/api/user/auth", HttpOnly: true})
 		_, _ = w.Write([]byte(`{"success":true,"data":{"access_token":"tok1","access_expires_at":` + itoa(exp) + `}}`))
 	})
 	mux.HandleFunc("/api/user/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +44,7 @@ func (s *refreshServer) handler() http.Handler {
 			return
 		}
 		exp := time.Now().Add(s.tokenTTL).Unix()
-		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "sid.secret2", Path: "/api/user/auth", HttpOnly: true})
+		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret2", Path: "/api/user/auth", HttpOnly: true})
 		_, _ = w.Write([]byte(`{"success":true,"data":{"access_token":"tok2","access_expires_at":` + itoa(exp) + `}}`))
 	})
 	mux.HandleFunc("/api/user/self", func(w http.ResponseWriter, r *http.Request) {

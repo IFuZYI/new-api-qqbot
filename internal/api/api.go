@@ -61,8 +61,10 @@ type NapCatAdmin interface {
 // the operator can verify what they typed before relying on it. It is separate
 // from NapCatAdmin because a test only needs to read, never to write.
 type Prober interface {
-	// ProbeGateway logs in and reports the account the credentials belong to.
-	ProbeGateway(url, username, password string) (*newapi.User, error)
+	// ProbeGateway reports the account the credentials belong to. The second
+	// result says whether an existing session answered, so the UI can be honest
+	// about what was actually verified.
+	ProbeGateway(url, username, password string) (*newapi.User, bool, error)
 	// ProbeWebUI logs in to NapCat's panel and reports the bot it drives.
 	ProbeWebUI(webuiURL, webuiToken string) (*napcat.LoginInfo, error)
 	// ProbeOneBot asks an OneBot endpoint for the bot identity.
