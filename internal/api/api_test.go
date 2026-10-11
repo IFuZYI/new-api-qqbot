@@ -939,3 +939,65 @@ func TestAutoConfigureNapCatPersistsNothingOnFailure(t *testing.T) {
 		t.Errorf("webui token changed: %q", got.NapCat.WebUIToken)
 	}
 }
+
+// The SPA's index.html must be revalidated while the content-hashed bundle may
+// be cached hard. Without the distinction the browser applies heuristic
+// freshness to index.html, serves it from disk after a deploy, and the operator
+// keeps seeing the previous UI until they hard-refresh — a bug that is
+// invisible until the next release.
+func TestStaticCachingDistinguishesIndexFromHashedAssets(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"),
+		[]byte(`<!doctype html><script src="/assets/index-abc123.js"></script>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "index-abc123.js"), []byte("console.log(1)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(staticHandler(dir))
+	t.Cleanup(srv.Close)
+
+	get := func(path string) (string, string) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		return resp.Header.Get("Cache-Control"), resp.Header.Get("Content-Type")
+	}
+
+	cc, _ := get("/")
+	if cc != indexCacheControl {
+		t.Errorf("index.html Cache-Control = %q, want %q", cc, indexCacheControl)
+	}
+
+	// The SPA fallback (a client-side route) serves index.html too, so it must
+	// carry index.html's rule rather than inheriting the route's own shape.
+	cc, ct := get("/users/42")
+	if cc != indexCacheControl {
+		t.Errorf("SPA fallback Cache-Control = %q, want %q", cc, indexCacheControl)
+	}
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("SPA fallback Content-Type = %q, want html", ct)
+	}
+
+	cc, _ = get("/assets/index-abc123.js")
+	if cc != hashedAssetCacheControl {
+		t.Errorf("hashed asset Cache-Control = %q, want %q", cc, hashedAssetCacheControl)
+	}
+
+	// A file served from the root is not content-hashed, so it must revalidate
+	// like index.html: an operator can replace it under the same name.
+	if err := os.WriteFile(filepath.Join(dir, "favicon.ico"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cc, _ = get("/favicon.ico")
+	if cc != indexCacheControl {
+		t.Errorf("root file Cache-Control = %q, want %q", cc, indexCacheControl)
+	}
+}
