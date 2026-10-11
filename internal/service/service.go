@@ -66,7 +66,10 @@ type Settings struct {
 	CheckinPatterns string `json:"checkin_patterns"`
 
 	// Daily reward, drawn uniformly from [RewardMin, RewardMax] per member per
-	// day. Equal values mean a fixed award.
+	// day, in new-api's own quota unit (the gateway's add_quota adds straight to
+	// the account balance; quota-to-currency conversion is the instance's
+	// 额度显示 setting, so nothing here converts). Equal values mean a fixed
+	// award.
 	RewardMin int `json:"reward_min"`
 	RewardMax int `json:"reward_max"`
 

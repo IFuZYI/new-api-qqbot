@@ -67,7 +67,8 @@ export interface Settings {
   checkin_by_message_enabled: boolean
   checkin_patterns: string
 
-  // Reward
+  // Reward. Values are in new-api's own quota unit (the gateway's add_quota
+  // adds straight to the account balance); the panel never converts them.
   reward_min: number
   reward_max: number
   timezone: string

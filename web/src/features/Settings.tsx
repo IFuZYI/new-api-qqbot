@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, type PatrolState, type Settings } from '../api'
 import { Badge, Button, Card, ErrorNote, Field, Input, Select, Switch } from '../ui'
 import { CommandList, FeatureCard } from '../features/common'
+import { formatDateTime } from '../format'
 
 /**
  * DEFAULT_CHECKIN_PATTERNS mirrors the server's shipped list, so switching from
@@ -35,6 +36,14 @@ type PatrolSpec = {
    */
   enabledKey?: 'member_patrol_enabled' | 'bind_patrol_enabled' | 'checkin_patrol_enabled'
   minutesKey?: 'member_sync_minutes' | 'bind_patrol_minutes' | 'checkin_sync_minutes'
+  /**
+   * zeroPauses marks a patrol whose interval of 0 means "keep the switch, but
+   * do not run on a timer" (the server preserves the 0). Only 绑定巡检 has that
+   * meaning: the other intervals are repaired to their default when 0, and the
+   * check-in loop in particular must keep running while either check-in path is
+   * on — it is what pays the rewards, so a 0 there cannot be allowed to stop it.
+   */
+  zeroPauses?: boolean
 }
 
 /** Patrols in the order the scheduler runs them. */
@@ -49,9 +58,10 @@ const PATROLS: PatrolSpec[] = [
   {
     key: 'bind',
     label: '绑定巡检',
-    hint: '周期性重试所有未绑定的成员，补上「先进群、后注册」的账号。只处理未绑定的成员，不会改动已有绑定。',
+    hint: '周期性重试所有未绑定的成员，补上「先进群、后注册」的账号。只处理未绑定的成员，不会改动已有绑定。间隔填 0 = 暂停定时（保留开关）。',
     enabledKey: 'bind_patrol_enabled',
     minutesKey: 'bind_patrol_minutes',
+    zeroPauses: true,
   },
   {
     key: 'checkins',
@@ -243,7 +253,7 @@ export default function SettingsView({
       {/* ---- 定期巡检：所有巡检的开关、周期与状态都在一起 ---- */}
       <Card
         title="定期巡检"
-        description="轮询是唯一真相来源：事件流只加速反应，不承担正确性。间隔填 0 表示只保留开关、不按时执行。"
+        description="轮询是唯一真相来源：事件流只加速反应，不承担正确性。间隔以分钟为单位，最小 1；只有绑定巡检允许填 0（暂停定时、保留开关）。"
       >
         <div className="divide-y divide-border">
           {PATROLS.map((spec) => {
@@ -261,7 +271,7 @@ export default function SettingsView({
                   </div>
                   <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                     {spec.hint}
-                    {on && p?.last_run && <> · 上次运行 {new Date(p.last_run * 1000).toLocaleString()}</>}
+                    {on && p?.last_run && <> · 上次运行 {formatDateTime(p.last_run)}</>}
                   </p>
                   {on && p?.last_error && (
                     <p className="mt-1 text-[11px] leading-4 break-all text-destructive">{p.last_error}</p>
@@ -277,11 +287,19 @@ export default function SettingsView({
                   <div className={`flex items-center gap-2 ${on ? '' : 'opacity-60'}`}>
                     <Input
                       type="number"
-                      min={0}
+                      min={spec.zeroPauses ? 0 : 1}
                       value={s[spec.minutesKey]}
-                      onChange={(v) =>
-                        setS({ ...s, [spec.minutesKey as string]: Number(v) } as Settings)
-                      }
+                      onChange={(v) => {
+                        // The server repairs a 0 on every patrol except 绑定巡检,
+                        // so letting one be typed here would be silently undone
+                        // on the next read. Clamp at the input instead: a
+                        // near-miss becomes the smallest legal value rather than
+                        // a number the server quietly rewrites.
+                        const n = Number(v)
+                        const floor = spec.zeroPauses ? 0 : 1
+                        const next = Number.isFinite(n) ? Math.max(floor, n) : floor
+                        setS({ ...s, [spec.minutesKey as string]: next } as Settings)
+                      }}
                       ariaLabel={`${spec.label}间隔（分钟）`}
                       className="w-20"
                     />
@@ -314,14 +332,14 @@ export default function SettingsView({
 
       <FeatureCard
         title="签到奖励"
-        description="签到成功后按区间随机发放额度；同一天同一人只发一次。"
+        description="签到成功后按区间随机发放额度，单位是 new-api 的 quota；同一天同一人只发一次。"
         badge={<Badge>始终启用</Badge>}
       >
         <div className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
-          <Field label="奖励下限（quota）">
+          <Field label="奖励下限（quota）" hint="单位是 new-api 的 quota，不做货币换算">
             <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
           </Field>
-          <Field label="奖励上限（quota）" hint="上下限相同即固定金额">
+          <Field label="奖励上限（quota）" hint="上下限相同即固定额度">
             <Input type="number" min={0} value={s.reward_max} onChange={num('reward_max')} className="w-40" />
           </Field>
           <Field label="时区" hint="决定「今天」的边界，例如 Asia/Shanghai">
