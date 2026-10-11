@@ -108,6 +108,19 @@ export default function SettingsView({
     }
   }, [onFail])
 
+  // refreshHealth re-reads only the patrol health, leaving the staged form
+  // alone. 测试一次 must not call load(): the button exists so the operator can
+  // try a patrol *before* saving the switch they just toggled, and load()'s
+  // setS(server copy) would silently throw those unsaved edits away.
+  const refreshHealth = useCallback(async () => {
+    try {
+      const r = await api.status()
+      setPatrols(r.patrols ?? {})
+    } catch (e) {
+      onFail(e)
+    }
+  }, [onFail])
+
   useEffect(() => {
     void load()
   }, [load])
@@ -164,11 +177,13 @@ export default function SettingsView({
       const r = await api.runPatrol(spec.key)
       setTested((t) => ({ ...t, [spec.key]: summarise(spec, r.result) }))
       onDone(`${spec.label}：测试完成`)
-      await load()
+      // Health only: the operator may be mid-edit, and the test is the one
+      // thing they do before saving.
+      await refreshHealth()
     } catch (e) {
       setTested((t) => ({ ...t, [spec.key]: e instanceof Error ? e.message : String(e) }))
       onFail(e)
-      await load()
+      await refreshHealth()
     } finally {
       setTesting('')
     }
@@ -204,7 +219,6 @@ export default function SettingsView({
         <CommandList
           value={s.bind_command_patterns}
           onChange={str('bind_command_patterns')}
-          hint="一行一个指令，整条消息完全匹配才生效（前后空格会被忽略）。用 /表达式/ 表示正则，例如 /^绑定\s*\d*$/；/表达式/i 忽略大小写。"
         />
       </FeatureCard>
 
@@ -245,7 +259,6 @@ export default function SettingsView({
           <CommandList
             value={s.checkin_patterns}
             onChange={str('checkin_patterns')}
-            hint="一行一个指令，整条消息完全匹配才生效（前后空格会被忽略）。用 /表达式/ 表示正则，例如 /^签到/；/表达式/i 忽略大小写。"
           />
         )}
       </FeatureCard>

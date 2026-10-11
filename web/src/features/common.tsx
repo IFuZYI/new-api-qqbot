@@ -1,5 +1,5 @@
 /**
- * SettingsCard is the shell every feature's settings section uses.
+ * FeatureCard is the shell every feature's settings section uses.
  *
  * A feature's switch and its parameters belong together: an operator turning
  * "进群自动绑定" on needs to see, in the same block, what it will do and what it
@@ -9,7 +9,7 @@
  * The switch lives in the card's header (via `actions`) rather than beside each
  * field, so "this whole module is off" is one glance.
  */
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 import { Badge, Card, Switch } from '../ui'
 
 export function FeatureCard({
@@ -89,6 +89,7 @@ export function CommandList({
   hint?: string
   invalid?: boolean
 }) {
+  const uid = useId()
   return (
     <div className="space-y-1.5">
       <textarea
@@ -97,13 +98,14 @@ export function CommandList({
         spellCheck={false}
         aria-label="指令列表，一行一个"
         aria-invalid={invalid || undefined}
+        aria-describedby={uid}
         onChange={(e) => onChange(e.target.value)}
         className={`block w-full rounded-control border bg-background px-2.5 py-1.5 font-mono text-xs leading-5 text-foreground transition-colors placeholder:text-muted-foreground ${
           invalid ? 'border-destructive' : 'border-input hover:border-ring/60'
         } focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]`}
       />
-      <p className="text-[11px] leading-4 text-muted-foreground">
-        {hint ?? '一行一个指令，整条消息完全匹配才生效（前后空格会被忽略）。用 /表达式/ 表示正则，例如 /^签到\\s*\\d*$/；/表达式/i 表示忽略大小写。'}
+      <p id={uid} className="text-[11px] leading-4 text-muted-foreground">
+        {hint ?? '一行一个指令。字面量需整条消息完全匹配（前后空格忽略）；/表达式/ 是正则，未加 ^$ 时在消息里任意位置命中即可，例如 /^签到\\s*\\d*$/；/表达式/i 表示忽略大小写。'}
       </p>
     </div>
   )

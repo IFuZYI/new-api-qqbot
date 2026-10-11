@@ -203,7 +203,7 @@ export function CheckboxRow({
 }) {
   return (
     <label
-      className={`flex cursor-pointer items-start gap-2.5 ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
+      className={`flex items-start gap-2.5 ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
     >
       <input
         type="checkbox"

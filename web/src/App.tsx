@@ -366,7 +366,10 @@ function ManualCheckin({
       }
     >
       <div className="space-y-4">
-        <Field label="群成员" hint="只列出已在监测群里的成员">
+        <Field
+          label="群成员"
+          hint="只列出有群成员记录的成员；列表按「群管理」同步到的成员，含已关闭的群"
+        >
           <Combobox
             value={qq}
             onChange={(v) => {
@@ -381,7 +384,7 @@ function ManualCheckin({
           />
         </Field>
         {groupOptions.length > 1 && (
-          <Field label="所在群" hint="该成员在多个监测群里，选择在哪一个群里签到">
+          <Field label="所在群" hint="该成员在多个群里，选择在哪一个群里签到（含已关闭的群）">
             <Select value={effectiveGroup} onChange={setGroupID} className="w-full">
               {groupOptions.map((g) => (
                 <option key={g} value={String(g)}>
