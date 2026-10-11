@@ -666,6 +666,33 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"date": date, "checked": len(cs)})
 
+	case "checkin-member":
+		// Record a message-driven check-in for one member, so an operator can
+		// verify that path (and pay its reward) without waiting for someone to
+		// chat. It is the same code the event listener runs, including the
+		// once-per-day rule.
+		var in struct {
+			QQ      int64 `json:"qq"`
+			GroupID int64 `json:"group_id"`
+		}
+		if err := decode(req, &in); err != nil {
+			writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
+			return
+		}
+		if in.QQ == 0 || in.GroupID == 0 {
+			writeErr(w, 400, errors.New("需要同时提供 qq 与 group_id"))
+			return
+		}
+		res, err := r.svc.CheckinByMessage(in.GroupID, in.QQ)
+		if err != nil {
+			writeErr(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"date": date, "qq": in.QQ,
+			"recorded": res.Recorded, "already_checked_in": res.AlreadyCheckedIn,
+		})
+
 	case "award":
 		res, err := r.svc.Award(date)
 		if err != nil {
