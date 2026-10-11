@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
 	"qqbot/internal/store"
 )
@@ -255,7 +256,13 @@ func (s *Service) RunScheduledRules() ([]RuleRunResult, error) {
 // ApplyOnBindRules runs the rules triggered by a binding, for one member. It is
 // called right after a bind so the new member's group changes immediately
 // instead of waiting for the next sweep.
-func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
+//
+// cache carries rosters already read by the caller's sweep (see qqDataCache).
+// AutoBind binds member after member, and the roster of a monitored group is the
+// same for all of them, so passing the sweep's cache is what keeps this at one
+// read per group instead of one per member. A nil cache reads its own, which is
+// what a one-off caller (the in-group command) wants.
+func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResult, error) {
 	rows, err := s.st.OnBindRules()
 	if err != nil {
 		return nil, err
@@ -284,7 +291,18 @@ func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
 		}
 	}
 
-	ctx, err := s.memberContext(qq, u, needQQData)
+	if needQQData && cache == nil {
+		groups, err := s.st.EnabledGroups()
+		if err != nil {
+			return nil, err
+		}
+		cache = newQQDataCache(s.st, s.qq)
+		if err := cache.load(groups); err != nil {
+			return nil, err
+		}
+	}
+
+	ctx, err := s.memberContext(qq, u, needQQData, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +338,10 @@ func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
 // costs no QQ request at all. When it is not needed, HasQQData stays false, and
 // a QQ-side condition would fail closed rather than read a zero level as a real
 // one - which is why the flag, not just the values, is what callers rely on.
-func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool) (*MemberContext, error) {
+//
+// It resolves through the same cache as the sweep (see qqDataCache), so the bind
+// trigger and the patrol cannot disagree about a member in several groups.
+func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool, cache *qqDataCache) (*MemberContext, error) {
 	ctx := MemberContext{QQ: qq, Bound: u != nil, User: u}
 	if days, err := s.st.CountCheckins(qq); err == nil {
 		ctx.CheckinDays = days
@@ -329,37 +350,125 @@ func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool) (*Mem
 		return &ctx, nil
 	}
 
-	groups, err := s.st.EnabledGroups()
+	qqCtx, err := cache.contextFor(qq)
 	if err != nil {
 		return nil, err
 	}
-	// Use the same resolution as the sweep (the highest level seen across the
-	// monitored groups), so a rule cannot evaluate differently depending on
-	// whether the bind trigger or the patrol fired it.
-	now := time.Now().Unix()
-	for _, g := range groups {
-		ms, err := s.qq.GetGroupMemberList(g.GroupID)
+	ctx.HasQQData = qqCtx.HasQQData
+	ctx.Level = qqCtx.Level
+	ctx.QQLevel = qqCtx.QQLevel
+	ctx.JoinDays = qqCtx.JoinDays
+	return &ctx, nil
+}
+
+// qqDataCache reads each monitored group's roster at most once, and resolves
+// members from it.
+//
+// One roster read covers every member of that group, so a sweep that binds N
+// members must not read the same roster N times: that is the difference between
+// one request per group and one per member, and it is the whole reason this
+// exists. The cache lives for a single sweep; a long-lived one would serve stale
+// levels to the next run.
+//
+// A cache that was never loaded resolves nothing, which would make every QQ-side
+// condition fail closed - a silent "no rule matches" that looks like a rules
+// problem. contextFor therefore loads on demand, so the only way to get an empty
+// answer is for the rosters to genuinely be empty.
+type qqDataCache struct {
+	qq QQ
+	// st reads the monitored-group list when the caller did not supply it.
+	st *store.Store
+
+	// loaded records that the group list has been read, so an empty result is
+	// not re-fetched on every lookup.
+	loaded  bool
+	byGroup map[int64][]napcat.GroupMember
+	// merged is the per-member context, resolved on first use.
+	merged map[int64]MemberContext
+}
+
+// newQQDataCache builds a cache over the monitored groups.
+func newQQDataCache(st *store.Store, qq QQ) *qqDataCache {
+	return &qqDataCache{st: st, qq: qq, byGroup: map[int64][]napcat.GroupMember{}}
+}
+
+// load reads every monitored group's roster once. Calling it with the groups the
+// caller already has avoids a second lookup; passing nil reads them here.
+func (c *qqDataCache) load(enabled []store.MonitoredGroup) error {
+	if c.loaded {
+		return nil
+	}
+	if enabled == nil {
+		var err error
+		enabled, err = c.st.EnabledGroups()
 		if err != nil {
-			continue
-		}
-		for _, m := range ms {
-			if m.QQ != qq {
-				continue
-			}
-			c := ContextFromMember(m, now)
-			if !ctx.HasQQData || c.Level > ctx.Level {
-				ctx.Level = c.Level
-			}
-			if !ctx.HasQQData || c.QQLevel > ctx.QQLevel {
-				ctx.QQLevel = c.QQLevel
-			}
-			if !ctx.HasQQData || c.JoinDays > ctx.JoinDays {
-				ctx.JoinDays = c.JoinDays
-			}
-			ctx.HasQQData = true
+			return err
 		}
 	}
-	return &ctx, nil
+	c.loaded = true
+	for _, g := range enabled {
+		ms, err := c.qq.GetGroupMemberList(g.GroupID)
+		if err != nil {
+			// A group that cannot be read is skipped; the rest still apply.
+			continue
+		}
+		c.byGroup[g.GroupID] = ms
+	}
+	return nil
+}
+
+// contextFor resolves one member's QQ-side context from the cached rosters. It
+// loads on first use, so a caller that forgot to load gets the rosters rather
+// than an empty (fail-closed) answer.
+func (c *qqDataCache) contextFor(qq int64) (MemberContext, error) {
+	if err := c.load(nil); err != nil {
+		return MemberContext{}, err
+	}
+	if c.merged == nil {
+		merged := map[int64]MemberContext{}
+		now := time.Now().Unix()
+		for _, ms := range c.byGroup {
+			for _, m := range ms {
+				ctx := ContextFromMember(m, now)
+				merged[m.QQ] = mergeContext(merged[m.QQ], ctx)
+			}
+		}
+		c.merged = merged
+	}
+	return c.merged[qq], nil
+}
+
+// all returns the resolved context for every member seen in the rosters.
+func (c *qqDataCache) all() (map[int64]MemberContext, error) {
+	if _, err := c.contextFor(0); err != nil {
+		return nil, err
+	}
+	return c.merged, nil
+}
+
+// mergeContext folds one group's view of a member into the accumulated one.
+//
+// Every field takes the highest value seen, so the result does not depend on the
+// order the groups happen to be read in. Only merging some fields (as this did)
+// makes a member's context depend on which group was read last, and lets the
+// bind trigger and the patrol disagree about the same member.
+func mergeContext(acc, add MemberContext) MemberContext {
+	if !add.HasQQData {
+		return acc
+	}
+	if !acc.HasQQData {
+		return add
+	}
+	if add.Level > acc.Level {
+		acc.Level = add.Level
+	}
+	if add.QQLevel > acc.QQLevel {
+		acc.QQLevel = add.QQLevel
+	}
+	if add.JoinDays > acc.JoinDays {
+		acc.JoinDays = add.JoinDays
+	}
+	return acc
 }
 
 // rosterByQQ builds per-member QQ-side context for every monitored group.
@@ -368,23 +477,9 @@ func (s *Service) rosterByQQ() (map[int64]MemberContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[int64]MemberContext{}
-	now := time.Now().Unix()
-	for _, g := range groups {
-		ms, err := s.qq.GetGroupMemberList(g.GroupID)
-		if err != nil {
-			// A group that cannot be read is skipped; the rest still apply.
-			continue
-		}
-		for _, m := range ms {
-			c := ContextFromMember(m, now)
-			// Keep the highest level seen, in case a member is in several
-			// monitored groups.
-			if prev, ok := out[m.QQ]; ok && prev.Level > c.Level {
-				c.Level = prev.Level
-			}
-			out[m.QQ] = c
-		}
+	cache := newQQDataCache(s.st, s.qq)
+	if err := cache.load(groups); err != nil {
+		return nil, err
 	}
-	return out, nil
+	return cache.all()
 }

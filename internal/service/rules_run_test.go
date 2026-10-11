@@ -261,7 +261,7 @@ func TestApplyOnBindRulesPromotesImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := svc.ApplyOnBindRules(111)
+	res, err := svc.ApplyOnBindRules(111, nil)
 	if err != nil {
 		t.Fatalf("ApplyOnBindRules: %v", err)
 	}

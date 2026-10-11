@@ -554,7 +554,7 @@ func (r *Router) createBinding(w http.ResponseWriter, req *http.Request) {
 	// the automatic match, the in-group command or the operator: "on bind"
 	// means on bind. A rule failure must not fail the binding itself, so the
 	// result is reported alongside it.
-	rules, ruleErr := r.svc.ApplyOnBindRules(in.QQ)
+	rules, ruleErr := r.svc.ApplyOnBindRules(in.QQ, nil)
 	resp := map[string]any{"binding": b, "rules": rules}
 	if ruleErr != nil {
 		resp["rule_error"] = ruleErr.Error()

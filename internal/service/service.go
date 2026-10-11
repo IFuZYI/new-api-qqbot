@@ -414,7 +414,10 @@ const (
 // A member who already has a binding is left exactly as they are: that is what
 // makes all three paths safe to switch on, since none of them can re-point a
 // binding the operator made by hand.
-func (s *Service) bindQQ(qq int64, source string) (*store.Binding, bindOutcome, error) {
+//
+// cache is the caller's sweep-scoped roster cache (nil for a one-off bind), so a
+// patrol that binds many members reads each monitored group's roster once.
+func (s *Service) bindQQ(qq int64, source string, cache *qqDataCache) (*store.Binding, bindOutcome, error) {
 	existing, err := s.st.GetBinding(qq)
 	switch {
 	case err == nil:
@@ -440,7 +443,7 @@ func (s *Service) bindQQ(qq int64, source string) (*store.Binding, bindOutcome, 
 	// Apply the binding-triggered rules now, so the member's group changes
 	// immediately instead of at the next sweep. A rule failure must not fail
 	// the binding that already succeeded, so it is reported alongside it.
-	if _, err := s.ApplyOnBindRules(qq); err != nil {
+	if _, err := s.ApplyOnBindRules(qq, cache); err != nil {
 		return &b, bindBound, err
 	}
 	return &b, bindBound, nil
@@ -454,8 +457,12 @@ func (s *Service) AutoBind() (BindResult, error) {
 	if err != nil {
 		return res, err
 	}
+	// One roster cache for the whole sweep: the bind-triggered rules need
+	// QQ-side values, and re-reading every group's roster per member is the
+	// traffic this sweep would otherwise cost.
+	cache := newQQDataCache(s.st, s.qq)
 	for _, m := range ms {
-		_, outcome, err := s.bindQQ(m.QQ, "auto")
+		_, outcome, err := s.bindQQ(m.QQ, "auto", cache)
 		switch {
 		case errors.Is(err, newapi.ErrAmbiguousEmail):
 			res.Ambiguous++
@@ -487,7 +494,8 @@ func (s *Service) BindMember(groupID, qq int64) error {
 	if err := s.EnsureMember(groupID, qq, ""); err != nil {
 		return err
 	}
-	_, _, err := s.bindQQ(qq, "join")
+	// A single bind, so it reads its own rosters if a rule needs them.
+	_, _, err := s.bindQQ(qq, "join", nil)
 	return err
 }
 
@@ -512,7 +520,7 @@ func (s *Service) BindByCommand(groupID, qq int64) (*store.Binding, error) {
 			return nil, err
 		}
 	}
-	b, outcome, err := s.bindQQ(qq, "command")
+	b, outcome, err := s.bindQQ(qq, "command", nil)
 	if err != nil {
 		return nil, err
 	}
