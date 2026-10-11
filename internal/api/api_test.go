@@ -44,6 +44,17 @@ func (fakeQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
 	return []napcat.SignedMember{{QQ: 54321, Nick: "爱丽丝", Rank: 1, Time: 1791630000}}, nil
 }
 
+// stubPatrols is the scheduler's status shape, without a scheduler.
+type stubPatrols struct{}
+
+func (stubPatrols) Status() map[string]any {
+	out := map[string]any{}
+	for _, name := range []string{"members", "bind", "checkins", "rules"} {
+		out[name] = map[string]any{}
+	}
+	return out
+}
+
 // testEnv is an authenticated test server: the cookie jar carries the session
 // created by first-run setup.
 type testEnv struct {
@@ -77,7 +88,11 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	svc := service.New(st, fakeGateway{}, fakeQQ{})
 	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
-	srv := httptest.NewServer(NewRouter(st, svc, cfgMgr, t.TempDir()).Handler())
+	router := NewRouter(st, svc, cfgMgr, t.TempDir())
+	// The scheduler is not started in tests, so its status is injected: the
+	// endpoint must work without one, and must report the patrol names.
+	router.SetPatrolStatus(stubPatrols{})
+	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 
 	jar, err := cookiejar.New(nil)

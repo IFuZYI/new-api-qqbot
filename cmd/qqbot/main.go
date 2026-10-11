@@ -102,6 +102,9 @@ func main() {
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 	router.SetNapCatAdmin(napcatAdmin{})
 	router.SetProber(prober{})
+	// The scheduler's health is what the panel's status view reads, so the
+	// patrols it has actually run are visible from the UI.
+	router.SetPatrolStatus(sched)
 
 	// The admin credential was read from the environment above. Provisioning it
 	// before the server accepts requests means a fresh instance is never

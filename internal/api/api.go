@@ -35,6 +35,11 @@ type Router struct {
 	// report that testing is unavailable.
 	prober Prober
 
+	// patrols reports the periodic sweeps' health. Optional: when unset the
+	// status endpoint reports no runs, which is what a process with the
+	// scheduler not started looks like.
+	patrols PatrolStatus
+
 	// setupMu serialises first-run setup (see auth.go).
 	setupMu sync.Mutex
 }
@@ -60,6 +65,12 @@ type Prober interface {
 	ProbeEventWS(wsURL, token string) error
 }
 
+// PatrolStatus reports when each periodic sweep last ran and whether it failed.
+// It is an interface so the API can be tested without a running scheduler.
+type PatrolStatus interface {
+	Status() map[string]any
+}
+
 // NewRouter builds the API router. The WebUI is served from webDist and
 // connection settings are read and written through cfg.
 func NewRouter(st *store.Store, svc *service.Service, cfg *config.Manager, webDist string) *Router {
@@ -75,6 +86,9 @@ func (r *Router) SetNapCatAdmin(a NapCatAdmin) { r.napcatAdmin = a }
 
 // SetProber installs the connection-test dependency.
 func (r *Router) SetProber(p Prober) { r.prober = p }
+
+// SetPatrolStatus installs the scheduler-status dependency.
+func (r *Router) SetPatrolStatus(p PatrolStatus) { r.patrols = p }
 
 // Handler returns the root handler.
 func (r *Router) Handler() http.Handler { return r.mux }
@@ -124,6 +138,7 @@ func (r *Router) routes() {
 
 	r.mux.HandleFunc("GET /api/settings", r.requireAuth(r.getSettings))
 	r.mux.HandleFunc("POST /api/settings", r.requireAuth(r.saveSettings))
+	r.mux.HandleFunc("GET /api/status", r.requireAuth(r.status))
 
 	r.mux.HandleFunc("GET /api/checkins", r.requireAuth(r.listCheckins))
 
@@ -567,6 +582,27 @@ func (r *Router) getSettings(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, 200, s)
+}
+
+// status reports each patrol's last run and error alongside the switches.
+//
+// Both halves are needed to read it: an empty last-run time means "not run yet"
+// or "switched off", and only the switch tells the two apart. Without the
+// settings the panel would show a stopped patrol as a broken one.
+func (r *Router) status(w http.ResponseWriter, _ *http.Request) {
+	s, err := r.svc.Settings()
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	patrols := map[string]any{}
+	if r.patrols != nil {
+		patrols = r.patrols.Status()
+	}
+	writeJSON(w, 200, map[string]any{
+		"patrols":  patrols,
+		"settings": s,
+	})
 }
 
 func (r *Router) saveSettings(w http.ResponseWriter, req *http.Request) {
