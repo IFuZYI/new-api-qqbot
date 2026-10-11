@@ -267,6 +267,44 @@ func TestReauthenticateDoesNotRetryABannedAccount(t *testing.T) {
 	}
 }
 
+// Other decisions the gateway can answer a login with, all of which a retry
+// cannot fix: login disabled instance-wide, a Turnstile challenge the service
+// does not solve, and a 2FA challenge (success:true carrying no token). Each
+// otherwise burns three attempts of the 20-per-20-minutes login budget on every
+// reauthentication.
+func TestReauthenticateDoesNotRetryLoginBlockedByGatewayPolicy(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"password login disabled", `{"success":false,"message":"Password login has been disabled by administrator"}`},
+		{"turnstile required", `{"success":false,"message":"Turnstile token is empty"}`},
+		{"turnstile rejected", `{"success":false,"message":"Turnstile verification failed, please refresh and try again!"}`},
+		// A 2FA challenge answers success with no token, which surfaces as the
+		// client's own wording.
+		{"two-factor challenge", `{"success":true,"data":{"challenge":{"id":"c1"}}}`},
+		// The banned wording is matched case-insensitively; pin that, since the
+		// gateway's own two forms both happen to use a lowercase 'has' and a
+		// case-sensitive match would therefore still pass the cases above.
+		{"banned, title-cased", `{"success":false,"message":"User Has Been Banned"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, logins := authStub(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			})
+			defer srv.Close()
+
+			if err := New(srv.URL).Reauthenticate("admin", "pw"); err == nil {
+				t.Fatal("a blocked login must be an error")
+			}
+			if got := logins.Load(); got != 1 {
+				t.Errorf("logins = %d, want 1: %s must not be retried", got, tc.name)
+			}
+		})
+	}
+}
+
 // IsAuthFailure separates "the token is no longer good" from every other
 // failure. Only the first should throw away a cached session: invalidating on
 // a rate limit or a permission error forces a re-login that burns the very

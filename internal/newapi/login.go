@@ -106,11 +106,24 @@ func retryableLoginError(err error) bool {
 	// matched case-insensitively because it appears both inside the
 	// bad-credentials sentence and standalone ("User has been banned", from
 	// setupLoginAtAuthVersion when the account itself is disabled).
+	//
+	// The other decisions the gateway can answer a login with are equally
+	// uncurable by retrying: login disabled instance-wide, a Turnstile
+	// challenge this service does not solve, and a 2FA challenge (success:true
+	// carrying no token). Each would otherwise burn three attempts of the
+	// 20-per-20-minutes budget on every reauthentication.
 	msg := err.Error()
 	lower := strings.ToLower(msg)
-	if strings.Contains(msg, "密码") || strings.Contains(msg, "credentials") ||
-		strings.Contains(msg, "Username or password") || strings.Contains(lower, "has been banned") {
-		return false
+	for _, decision := range []string{
+		"密码", "credentials", "Username or password",
+		"has been banned", // case-folded, see above
+		"Password login has been disabled",
+		"Turnstile",
+		"the gateway returned no access token", // 2FA challenge
+	} {
+		if strings.Contains(msg, decision) || strings.Contains(lower, decision) {
+			return false
+		}
 	}
 	// A response the client could not understand (an HTML error page from a
 	// proxy, a truncated body) may well work on the next attempt.
