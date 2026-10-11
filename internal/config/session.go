@@ -83,6 +83,29 @@ func (m *Manager) ClearNewAPISession() error {
 	return m.st.PutSetting(newAPISessionKey, "")
 }
 
+// SessionFingerprint returns the stable secret this service derives its gateway
+// fingerprint from.
+//
+// It is the panel's own signing key, which already lives in the database and
+// survives restarts and container rebuilds, so the fingerprint is stable
+// without storing a second secret. When the key cannot be read (a very early
+// start) an empty secret is returned; the caller then presents the plain
+// User-Agent rather than a fingerprint that would change on the next start.
+func (m *Manager) SessionFingerprint() string {
+	// GetSetting, not GetSettingRaw: the stored value is JSON-encoded, and the
+	// api package reads the same key the same way.
+	var secret string
+	if err := m.st.GetSetting(signingKeySetting, &secret); err != nil {
+		return ""
+	}
+	return secret
+}
+
+// signingKeySetting names the panel's HMAC key. It is owned by the api package
+// (which mints it on first use); duplicated here as a constant so config does
+// not import api just to read one string.
+const signingKeySetting = "auth.session_key"
+
 // sessionStore is the narrow slice of store the session helpers need, so they
 // stay testable and the dependency is visible.
 type sessionStore interface {

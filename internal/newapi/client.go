@@ -115,6 +115,9 @@ type Client struct {
 	mu        sync.RWMutex
 	token     string
 	expiresAt time.Time // zero means "not announced"
+	// fingerprint identifies this service to the gateway as one device across
+	// restarts, so its session entry stays recognisable. See fingerprint.go.
+	fingerprint string
 }
 
 // New builds a client for baseURL (e.g. https://api.fuzy.site).
@@ -225,6 +228,12 @@ type envelope struct {
 }
 
 func (c *Client) do(method, path string, body any, out any) error {
+	return c.doWithOrigin(method, path, body, out, "")
+}
+
+// doWithOrigin is do plus an explicit Origin header, for the one route that
+// needs it (the refresh; see Client.Refresh).
+func (c *Client) doWithOrigin(method, path string, body any, out any, origin string) error {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -240,7 +249,10 @@ func (c *Client) do(method, path string, body any, out any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", c.userAgentWith())
+	if origin != "" {
+		req.Header.Set("Origin", strings.TrimRight(origin, "/"))
+	}
 	if tok := c.Token(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -366,9 +378,21 @@ func (c *Client) installToken(data loginData) error {
 //
 // It fails with an auth failure when the session is gone, which tells the caller
 // a real login is required.
+//
+// The Origin header is not decoration: new-api installs SessionCookieOriginGuard
+// on this route, and once SESSION_COOKIE_SECURE is on — which its own startup
+// warning tells operators to set in production — the guard refuses any request
+// without a same-origin Origin or Referer. Omitting it therefore breaks refresh
+// entirely against such a gateway: measured, every refresh answers 403
+// AUTH_ORIGIN_FORBIDDEN and every call fails. (It does not fall back to logging
+// in — a 403 is not a dead session — so the service is simply unusable there,
+// which is why the header is sent rather than left to the caller's error
+// handling.) The Origin is the gateway's own origin: the guard accepts a
+// request whose Origin equals the host it arrived at, which for a
+// non-browser client is the gateway itself.
 func (c *Client) Refresh() error {
 	var data loginData
-	if err := c.do(http.MethodPost, "/api/user/auth/refresh", nil, &data); err != nil {
+	if err := c.doWithOrigin(http.MethodPost, "/api/user/auth/refresh", nil, &data, c.baseURL); err != nil {
 		return err
 	}
 	return c.installToken(data)
@@ -390,6 +414,13 @@ func (c *Client) Refresh() error {
 //	bad credentials                    -> not retried: it is a decision, not a blip
 //	5xx / unreadable response          -> retried: those are the blips a retry fixes
 func (c *Client) Reauthenticate(username, password string) error {
+	// With no session there is nothing to refresh, and the refresh endpoint is
+	// behind the same CriticalRateLimit as login: the guaranteed failure would
+	// spend one slot of the budget this service is trying to conserve. Go
+	// straight to the login it is going to need anyway.
+	if _, ok := c.refreshCookie(); !ok {
+		return c.loginWithRetry(username, password)
+	}
 	err := c.Refresh()
 	if err == nil {
 		return nil

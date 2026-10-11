@@ -6,6 +6,8 @@
 #   3. 打开 http://<主机>:4096/ ，在「连接配置」里填 new-api 与 NapCat
 #
 # 数据（SQLite 库 + config.yaml）保存在命名卷 qqbot-data 里，容器重建不丢。
+# 库里同时保存着 new-api 的登录会话与设备指纹密钥，所以**保留这个卷**就意味着重启/重建后
+# 不必重新登录 new-api（省下一个 30 天有效的会话名额，默认上限 50）；备份它即备份了这两样。
 # 备份：docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar czf /b/qqbot-data.tgz -C /d .
 #
 # NapCat 在宿主机上时，容器内填的地址要用 host.docker.internal（见 README

@@ -118,6 +118,38 @@ fail closed，表现成「规则好像不生效」，是最难查的一种。
 **奖励由签到循环发放**，所以该循环在「打卡榜巡检」或「消息签到」任一开启时都会运行；
 关掉打卡榜只跳过读榜，不会停止发奖（否则只开消息签到的人永远拿不到额度）。
 
+**服务整个生命周期只登录一次。** 登录会新建一个会话，而 new-api 从不按设备去重（上游
+`createLoginSession` 每次登录都新发一个 SID，User-Agent 只被记录在会话行上），账号的活跃会话
+上限（默认 50）就是被重复登录用满的。所以除了「拿到第一条会话」，其余一切都走
+`POST /api/user/auth/refresh`：访问令牌只活 15 分钟，会话活 30 天，刷新用登录下发的
+`new_api_refresh` cookie 换新令牌并**轮换刷新密钥**，轮换后的值会立刻回写存储（否则重启会用
+旧密钥，被网关判为 reuse 而作废该会话，反而逼出一次登录）。已实测：冷启动 1 次登录，之后跨令牌
+过期与多次重启都是 0 次登录。
+
+**没有会话时不去试刷新。** 刷新接口与登录同在 `CriticalRateLimit` 之下，一次注定失败的刷新会
+白白花掉同一个 20 次/20 分钟的额度，所以 `Reauthenticate` 先看有没有会话 cookie，没有就直接登录。
+由 `internal/newapi` 的 `TestReauthenticateLogsInDirectlyWithoutASession` 钉住。
+
+**请求带一个稳定的设备指纹**（`newapi.fingerprint`，由面板签名密钥派生，随 `User-Agent` 发出）。
+上游把 `User-Agent` 记在会话行上，所以指纹让本服务在会话列表里可辨认（运营能挑出该撤销的那一条），
+并让每次重启在网关看来都是同一台设备。它不采集宿主机信息，也不替代上面的会话复用——网关没有
+「按设备复用会话」的接口，能阻止重复登录的只有复用那条会话。
+
+**刷新请求必须带同源 `Origin`。** new-api 在刷新路由上装了 `SessionCookieOriginGuard`：当
+`SESSION_COOKIE_SECURE=true`（它自己的启动警告就让生产环境这么设）时，缺 `Origin`/`Referer`
+的请求一律 403。登录路由**没有**这道守卫，而刷新有——所以不带 Origin 的客户端在那种实例上
+**刷新完全不可用**：已实测，每次刷新都被 403 `AUTH_ORIGIN_FORBIDDEN` 拒绝、每次调用都失败
+（403 不被当作会话已死，所以不会退化成「每次重新登录」，是直接不可用）。客户端因此发送与网关
+同源的 `Origin`（即配置里的网关地址），并把 `AUTH_ORIGIN_FORBIDDEN` 明确列为不可重登的一类——
+它在 401 上出现时尤其要紧，否则裸 401 规则会把它当会话已死而触发登录。由
+`TestRefreshSendsASameOriginHeader` 与 `TestOriginRefusalIsNotADeadSession`（403 与 401 两种形态）钉住。
+
+> 守卫**不信任** `X-Forwarded-Proto`（它看的是本进程是否真的终止了 TLS，见上游
+> `auth_origin_test.go` 的 `...DoesNotTrustForwardedProtoFromClient`）。所以网关若在
+> **终止 TLS 的反向代理**后面，new-api 看到的 scheme 是 `http`，运营必须把对外地址填进
+> `SESSION_COOKIE_TRUSTED_URL`——否则连它自己的网页面板也过不了这道守卫。本服务发的 Origin
+> 就是配置里的网关地址，与该可信地址一致。
+
 **落库的网关会话绑定「网关地址 + 账号 + 密码」，不跨主机复用。** 刷新令牌是**签发它的那台网关**给
 这个账号的凭据：把服务指向另一台实例时若照旧导入，就会把 A 实例的凭据原样发给 B（跨主机
 凭据泄漏，且服务会继续以旧账号身份行事）；只改账号或只改密码时若照旧导入，服务会继续以

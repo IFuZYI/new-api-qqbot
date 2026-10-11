@@ -196,6 +196,13 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 	c := l.cached
 	if c == nil || l.key != key {
 		c = newapi.New(cfg.NewAPI.URL)
+		// Present one stable identity across restarts. The gateway records the
+		// User-Agent on the session row, so this is what makes this service's
+		// entry recognisable in the account's session list — and what keeps a
+		// restart looking like the same device rather than a new one.
+		if secret := l.cfg.SessionFingerprint(); secret != "" {
+			c.SetFingerprint(newapi.NewFingerprint(secret))
+		}
 		// A restart has no jar to inherit, so the session from the last run is
 		// restored from storage. Without it every start would log in and add a
 		// session to the account's list. It is looked up under this host and

@@ -156,8 +156,12 @@ func IsAuthFailure(err error) bool {
 		}
 	}
 	// A code we know is not curable must win over the status fallback: the
-	// gateway renders some of these alongside 401/403.
-	for _, code := range []string{"AUTH_INSUFFICIENT_PRIVILEGE", "AUTH_USER_DISABLED"} {
+	// gateway renders some of these alongside 401/403. AUTH_ORIGIN_FORBIDDEN is
+	// the refresh guard refusing the request itself, so the credential may be
+	// perfectly good. The guard answers 403, which the status fallback below
+	// already excludes; the entry is defence for a 401 rendering, where the
+	// bare-401 rule would otherwise call the session dead and force a login.
+	for _, code := range []string{"AUTH_INSUFFICIENT_PRIVILEGE", "AUTH_USER_DISABLED", "AUTH_ORIGIN_FORBIDDEN"} {
 		if strings.Contains(msg, code) {
 			return false
 		}
