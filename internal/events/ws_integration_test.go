@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,16 +141,25 @@ func TestHandleMatchesNapCatWireFormat(t *testing.T) {
 // so the connection test can verify the event socket without leaving a second
 // consumer attached (a second connection would receive its own copy of events).
 func TestProbeConnectsAndCloses(t *testing.T) {
+	// The handler runs on the server's goroutine and the assertions on the test's,
+	// so both the recorded header and the counter need a lock: without it the race
+	// detector flags this test (and a flaky read can see 0 upgrades for a dial
+	// that succeeded).
+	var mu sync.Mutex
 	var gotAuth string
 	var upgraded int
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
+		mu.Lock()
 		upgraded++
+		mu.Unlock()
 		defer conn.Close()
 		// Hold it open long enough for Probe to consider the dial a success.
 		time.Sleep(500 * time.Millisecond)
@@ -160,6 +170,8 @@ func TestProbeConnectsAndCloses(t *testing.T) {
 	if err := Probe(url, "probe-tok"); err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotAuth != "Bearer probe-tok" {
 		t.Errorf("Probe must send the token, got %q", gotAuth)
 	}

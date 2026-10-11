@@ -4,7 +4,12 @@ A QQ group monitor that links QQ group members to new-api accounts. It mirrors
 group rosters and the daily sign-in board, binds each member to the new-api
 account registered under their QQ email (`qq@qq.com`), promotes accounts out of
 a source group into a target group, and pays a daily check-in reward. It reads
-QQ and does not speak in groups, except to act on the `>>绑定<<` command.
+QQ and does not speak in groups, except to act on the operator's configured bind
+and check-in commands.
+
+Binding and check-ins are each several independent paths (a command, a join
+event, a patrol; the sign-in board, a message), every one of them switchable and
+configured from the WebUI — see `docs/adr/0009-bind-and-checkin-paths-are-modular.md`.
 
 `reference/` holds two upstream checkouts (`NapCatQQ`, `new-api`) used as
 documentation for the protocols this service drives. They are **not** part of
@@ -17,11 +22,14 @@ has its own binding `AGENTS.md`.
 cmd/qqbot/          entry point, flags, lazy clients
 internal/store/     SQLite schema, migrations, queries
 internal/service/   business logic (sync, bind, promote, award) against interfaces
+internal/command/   command-pattern parsing and matching (literal + regex)
 internal/newapi/    new-api admin API client
 internal/napcat/    OneBot HTTP client + NapCat WebUI bridge
-internal/events/    OneBot WebSocket listener (binding command)
+internal/events/    OneBot WebSocket listener (commands, joins, message check-ins)
+internal/scheduler/ periodic sweeps, one loop per path
 internal/api/       HTTP API + static file serving
 internal/config/    connection settings stored in the database, plus the env file
+web/src/features/   one module per feature area of the panel
 web/                React + Vite + Tailwind WebUI
 docs/adr/           decision records; docs/design-notes.md has the verified facts
 ```
@@ -86,10 +94,27 @@ below) and never as part of `go test`.
 - **Auto-binding requires an exact, unique match.** `FindUserByEmail` narrows the
   gateway's LIKE search to a case-insensitive exact match; ambiguous matches are
   reported and left unbound rather than guessed at.
+- **Every binding path goes through `Service.bindQQ`, and none of them may touch
+  a member who already has a binding.** The patrol, the join event and the
+  command differ only in their trigger and in what "no account yet" means. This
+  is what makes all three switches safe to turn on: enabling one cannot re-point
+  a binding the operator made by hand.
 - **A check-in is idempotent per `(qq, date)`.** The sign-in board is today-only
   and polled repeatedly, so re-recording must never re-randomise the reward or
   re-award it. The reward amount is persisted *before* the gateway call, and the
-  claim is released only when that call fails.
+  claim is released only when that call fails. A message-driven check-in writes
+  the same row through `RecordMessageCheckin`, which only ever inserts: a day
+  already recorded (by the board or by an earlier message) is left exactly as it
+  is, and the board upgrades a message-sourced row because it knows the rank and
+  the sign-in time. Neither path touches `reward_quota` / `rewarded_at`, so
+  "any message counts as a check-in" cannot turn into multiple rewards a day.
+- **An empty check-in command list means "any message"; a non-empty one means
+  "only these".** The master switch enables the path, the list decides which
+  messages qualify. Reading the switch alone as "any message" would silently
+  override a configured command list and check in everyone who speaks.
+- **An invalid command pattern is refused at save time** (`command.Parse`), with
+  a 400 naming the problem. A pattern that can never match is the hardest failure
+  of this feature to notice, so it must not be storable.
 - **Group conversion is rules-driven, with one decision point.** Each rule
   picks its trigger (on bind and/or a patrol interval), source groups, target
   group and optional conditions; a rule with no trigger and no conditions is
@@ -178,7 +203,17 @@ below) and never as part of `go test`.
 
 Config is stored in the database and edited in the WebUI (连接配置). For a local
 check, the pieces to confirm by hand are: `POST /api/groups/refresh` (reads real
-groups), `POST /api/actions/sync`, `.../bind`, `.../promote`, `.../award`.
+groups), `POST /api/actions/sync`, `.../bind`, `.../promote`, `.../award`, and
+`.../checkin-member` (records a message-driven check-in for one member, which is
+how the message path is verified without waiting for someone to chat).
 Promotion and awarding spend real state on the gateway — exercise them on a
 throwaway account and revert (group back to the source group, quota subtracted)
 when done.
+
+Two of the new paths are driven by push events, so verifying them needs an event
+stream. The service re-reads the event URL on every reconnect, so a stand-in
+WebSocket server that replays NapCat's event JSON (a `group_increase` notice, a
+message with `raw_message`) exercises the listener without a live QQ session —
+which matters, because NapCat's QQ login expiring is common and it takes the
+OneBot adapters down with it. `GET /api/status` then shows whether each patrol
+ran, and the check-in's `source` column says which path recorded it.
