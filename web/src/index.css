@@ -10,12 +10,15 @@
  * Two deliberate deviations from upstream:
  *  - The font: new-api ships 'Public Sans Variable', which this service does
  *    not bundle, so the system stack with CJK fallbacks stands in for it.
- *  - Contrast: the light --primary/--success/--warning/--info and the dark
- *    --info carry a lower (or, for dark --info, higher) lightness than
- *    upstream's. Upstream's values measured below WCAG AA 4.5:1 for this
- *    panel's 11px chips and for white text on --primary, so they are tuned
- *    until every chip and button clears 4.5:1 in both themes. Re-copying
- *    upstream verbatim would reintroduce the failures.
+ *  - Contrast: every status tone (--primary/--success/--warning/--info/
+ *    --destructive) carries a different lightness than upstream's in both
+ *    themes. Upstream's values measured below WCAG AA 4.5:1 for this panel's
+ *    11px chips and for white text on --primary, so each is tuned until the
+ *    resting state of every chip and button clears 4.5:1 in both themes —
+ *    measured by compositing the /10 tint onto the card it actually renders
+ *    on, not onto the page background (compositing onto the page understates
+ *    the dark tones by ~0.2 and is how a failing value once passed).
+ *    Re-copying upstream verbatim would reintroduce the failures.
  */
 @custom-variant dark (&:is(.dark *));
 
@@ -127,7 +130,7 @@
   --muted-foreground: oklch(0.78 0 0);
   --accent: color-mix(in oklch, var(--primary) 20%, var(--background));
   --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
+  --destructive: oklch(0.74 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
   --success: oklch(0.696 0.17 162.48);
   --success-foreground: oklch(0.145 0 0);
