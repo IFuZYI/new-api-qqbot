@@ -1,7 +1,7 @@
 // Command qqbot is a QQ group monitor that links group members to new-api
-// accounts: it mirrors rosters, binds members by their QQ email, promotes
-// accounts into an authorised group, and pays a daily check-in reward for
-// members seen speaking in a monitored group.
+// accounts: it mirrors rosters and sign-in boards, binds members by their QQ
+// email, promotes accounts into an authorised group, and pays a daily
+// check-in reward.
 package main
 
 import (
@@ -91,11 +91,9 @@ func main() {
 
 	go sched.Run(ctx)
 
-	// The event listener is a required dependency for check-ins: a member's
-	// message in a monitored group IS the check-in (ADR-0009), so while the
-	// stream is down none are recorded. It also carries the bind command and
-	// the group-increase notice. It blocks until shutdown, so it runs in its
-	// own goroutine.
+	// The event listener only shortens reaction time (binding commands); the
+	// sweeps above remain the source of truth, so a missing event stream is
+	// harmless. It blocks until shutdown, so it must run in its own goroutine.
 	go events.New(func() (string, string) {
 		c := cfgMgr.MustLoad()
 		return c.NapCat.EventWSURL, c.NapCat.EventWSToken
@@ -301,6 +299,17 @@ func (l *lazyQQ) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error)
 	return w.GetGroupMemberList(groupID)
 }
 
+func (l *lazyQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
+	if c, err := l.onebot(); err == nil {
+		return c.GetGroupSignedList(groupID)
+	}
+	w, err := l.webui()
+	if err != nil {
+		return nil, err
+	}
+	return w.GetGroupSignedList(groupID)
+}
+
 // napcatAdmin logs in to a NapCat WebUI and writes its OneBot adapters, which
 // is what the connection page's "auto-configure" button drives.
 type napcatAdmin struct{}
@@ -374,10 +383,6 @@ func (b bindAdapter) BindByCommand(groupID, qq int64) error {
 
 func (b bindAdapter) EnsureMember(groupID, qq int64, nickname string) error {
 	return b.svc.EnsureMember(groupID, qq, nickname)
-}
-
-func (b bindAdapter) RecordCheckinByMessage(groupID, qq int64, at time.Time) error {
-	return b.svc.RecordCheckinByMessage(groupID, qq, at)
 }
 
 var errNotConfigured = &notConfiguredError{}

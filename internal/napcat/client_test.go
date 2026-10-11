@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,6 +119,43 @@ func TestGetGroupMemberListPrefersCard(t *testing.T) {
 	}
 	if ms[1].DisplayName() != "bob" {
 		t.Errorf("nickname fallback broken: %+v", ms[1])
+	}
+}
+
+// get_group_signed_list throws when the group has no board; that must surface
+// as an error rather than a silent empty result, or a group that simply has
+// check-in disabled would look like "nobody signed in".
+func TestGetGroupSignedListSurfacesBoardError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(onebotResp(1200, nil, "无法获取该群组打卡列表")))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "").GetGroupSignedList(1129535731)
+	if err == nil {
+		t.Fatal("expected an error when the board cannot be read")
+	}
+	// A boardless group is normal, so it is reported as a distinct sentinel the
+	// caller can recognise and ignore - not as a generic failure.
+	if !errors.Is(err, ErrNoSigninBoard) {
+		t.Errorf("want ErrNoSigninBoard, got %v", err)
+	}
+}
+
+func TestGetGroupSignedListParsesBoard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(onebotResp(0, []map[string]any{
+			{"user_id": 54321, "nick": "爱丽丝", "time": 1791630000, "rank": 1},
+		}, "")))
+	}))
+	defer srv.Close()
+
+	ss, err := New(srv.URL, "").GetGroupSignedList(1129535731)
+	if err != nil {
+		t.Fatalf("GetGroupSignedList: %v", err)
+	}
+	if len(ss) != 1 || ss[0].QQ != 54321 || ss[0].Rank != 1 || ss[0].Time != 1791630000 {
+		t.Errorf("unexpected: %+v", ss)
 	}
 }
 

@@ -268,6 +268,9 @@ function Overview({
           <Button disabled={!!busy} onClick={() => run('promote', '分组提升')}>
             分组提升
           </Button>
+          <Button disabled={!!busy} onClick={() => run('checkin', '同步打卡')}>
+            同步打卡
+          </Button>
           <Button disabled={!!busy} onClick={() => run('award', '发放奖励')}>
             发放奖励
           </Button>
@@ -959,6 +962,29 @@ function SettingsView({
               </div>
             </div>
           </Field>
+          <Field
+            label="打卡榜巡检"
+            hint="打卡没有事件通知（NapCat 不提供），只能轮询榜单。关闭后签到不会被记录，也就不会发放奖励。"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <Switch
+                checked={s.checkin_patrol_enabled}
+                onChange={(v) => setS({ ...s, checkin_patrol_enabled: v })}
+                label={s.checkin_patrol_enabled ? '已启用' : '已停用'}
+              />
+              <div className="flex shrink-0 items-center gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  value={s.checkin_sync_minutes}
+                  onChange={num('checkin_sync_minutes')}
+                  ariaLabel="打卡榜巡检间隔（分钟）"
+                  className="w-20"
+                />
+                <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
+              </div>
+            </div>
+          </Field>
           <Field label="签到奖励下限（quota）">
             <Input type="number" min={0} value={s.reward_min} onChange={num('reward_min')} className="w-40" />
           </Field>
@@ -1175,7 +1201,7 @@ function Connection({
 
       <Card
         title="NapCat"
-        description="服务通过 NapCat 读取群成员、接收群消息（发言即打卡）与进群事件。"
+        description="服务通过 NapCat 读取群成员与打卡榜、接收进群事件。"
         actions={
           <>
             <Button onClick={() => setAutoOpen(true)} disabled={busy !== ''}>

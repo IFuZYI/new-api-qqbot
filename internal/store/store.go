@@ -62,19 +62,16 @@ type Binding struct {
 	UpdatedAt      int64  `json:"updated_at"`
 }
 
-// Checkin is one member's check-in on one day. A check-in is defined as the
-// member sending a message in a monitored group (see ADR-0009). (QQ, Date) is
-// the identity: a repeat message the same day is an upsert, not a new row.
+// Checkin is one member's sign-in on one day, as read from the group's
+// sign-in board. (QQ, Date) is the identity: re-polling the same day is a no-op.
 type Checkin struct {
-	QQ       int64  `gorm:"primaryKey;autoIncrement:false" json:"qq"`
-	Date     string `gorm:"primaryKey;autoIncrement:false;type:varchar(10)" json:"date"`
-	GroupID  int64  `json:"group_id"`
-	SignedAt int64  `json:"signed_at"`
-	// Rank is no longer recorded (the sign-in board is gone); the column stays
-	// so rows written before ADR-0009 keep their value.
-	Rank        int   `json:"rank"`
-	RewardQuota int   `json:"reward_quota"`
-	RewardedAt  int64 `json:"rewarded_at"`
+	QQ          int64  `gorm:"primaryKey;autoIncrement:false" json:"qq"`
+	Date        string `gorm:"primaryKey;autoIncrement:false;type:varchar(10)" json:"date"`
+	GroupID     int64  `json:"group_id"`
+	SignedAt    int64  `json:"signed_at"`
+	Rank        int    `json:"rank"`
+	RewardQuota int    `json:"reward_quota"`
+	RewardedAt  int64  `json:"rewarded_at"`
 }
 
 // Setting is a key/value configuration row; Value holds JSON.
@@ -422,20 +419,20 @@ func (s *Store) UnboundMembers() ([]Member, error) {
 
 // ---------- check-ins ----------
 
-// RecordCheckin stores a check-in. Re-recording the same (qq, date) updates the
-// observed time (and group) but never touches RewardQuota or RewardedAt, so a
-// member's repeated messages cannot re-randomise or re-award the day's reward.
+// RecordCheckin stores a sign-in seen on the board. Re-recording the same
+// (qq, date) updates the observed rank/time but never touches RewardQuota or
+// RewardedAt, so a repeated poll cannot re-randomise or re-award.
 func (s *Store) RecordCheckin(c Checkin) error {
-	// Upsert on the (qq, date) primary key: two concurrent messages from the
-	// same member must not race between a read and an insert and trip the
-	// unique index, which would abort the rest of that event's handling.
+	// Upsert on the (qq, date) primary key: two concurrent polls of the same
+	// board must not race between a read and an insert and trip the unique
+	// index, which would abort the rest of that group's sync.
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "qq"}, {Name: "date"}},
 		DoUpdates: clause.AssignmentColumns([]string{"signed_at", "rank", "group_id"}),
 	}).Create(&c).Error
 }
 
-// GetCheckin loads one member's check-in for a date.
+// GetCheckin loads one member's sign-in for a date.
 func (s *Store) GetCheckin(qq int64, date string) (*Checkin, error) {
 	var c Checkin
 	if err := s.db.First(&c, "qq = ? AND date = ?", qq, date).Error; err != nil {

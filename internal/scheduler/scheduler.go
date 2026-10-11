@@ -1,6 +1,6 @@
 // Package scheduler runs the periodic sweeps. Each sweep has its own interval,
-// because their needs differ: the award loop pays check-ins that arrived as
-// messages and must run often, while the roster changes slowly.
+// because their needs differ: the sign-in board is today-only and must be read
+// often, while the roster changes slowly.
 package scheduler
 
 import (
@@ -16,12 +16,6 @@ import (
 
 // patrolDisabledCheck is how often a switched-off patrol re-reads its setting.
 const patrolDisabledCheck = 30 * time.Second
-
-// awardInterval is how often awards are paid. It is deliberately fixed and
-// short: check-ins arrive instantly as messages, so anything slower than a
-// minute reads as "I checked in but got nothing" (see ADR-0009). It does not
-// depend on any setting.
-const awardInterval = time.Minute
 
 // Scheduler drives the sweeps on independent timers.
 type Scheduler struct {
@@ -59,16 +53,19 @@ func (s *Scheduler) Run(ctx context.Context) {
 		return err
 	})
 
-	// Awards are paid on their own fixed loop: check-ins are no longer polled
-	// (they arrive as messages), but a check-in must be rewarded promptly or it
-	// looks broken to the member who just spoke.
-	go s.loop(ctx, "awards", func() time.Duration { return awardInterval }, func() error {
+	go s.loop(ctx, "checkins", s.checkinInterval, func() error {
 		date, err := s.svc.Today()
 		if err != nil {
 			return err
 		}
-		_, err = s.svc.Award(date)
-		return err
+		// Remember a sync failure: the award step usually succeeds, and its nil
+		// return would otherwise erase the error before the UI could read it,
+		// making a dead board look like a healthy patrol.
+		syncErr := s.svc.SyncAllCheckins(date)
+		if _, err := s.svc.Award(date); err != nil {
+			return err
+		}
+		return syncErr
 	})
 
 	<-ctx.Done()
@@ -109,6 +106,18 @@ func (s *Scheduler) ruleInterval() time.Duration {
 		return 30 * time.Minute
 	}
 	return time.Duration(best) * time.Minute
+}
+
+// checkinInterval returns 0 when the check-in patrol is switched off.
+func (s *Scheduler) checkinInterval() time.Duration {
+	cfg, err := s.svc.Settings()
+	if err != nil {
+		return 30 * time.Minute
+	}
+	if !cfg.CheckinPatrolEnabled {
+		return 0
+	}
+	return time.Duration(cfg.CheckinSyncMinutes) * time.Minute
 }
 
 // loop runs fn every interval, re-reading the interval each tick so a settings
@@ -175,7 +184,7 @@ func (s *Scheduler) Status() map[string]any {
 	defer s.mu.Unlock()
 
 	out := map[string]any{}
-	for _, name := range []string{"members", "awards", "rules"} {
+	for _, name := range []string{"members", "checkins", "rules"} {
 		entry := map[string]any{}
 		if t, ok := s.lastRun[name]; ok {
 			entry["last_run"] = t.Unix()

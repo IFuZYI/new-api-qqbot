@@ -169,15 +169,14 @@ func (r *Router) checkOneBot(n config.NapCat) checkResult {
 	return res
 }
 
-// checkEventWS opens the event stream. It is the only source of check-ins (a
-// member's message IS the check-in, ADR-0009), so a failure here is not
-// cosmetic: while the stream is down nothing is recorded or paid. The UI copy
-// says so rather than calling it optional.
+// checkEventWS opens the event stream. Without it the service still works, only
+// with slower reaction (see ADR-0003), so a failure here is informative rather
+// than fatal - the UI says so.
 func (r *Router) checkEventWS(n config.NapCat) checkResult {
 	res := checkResult{Name: "事件 WebSocket"}
 	if n.EventWSURL == "" {
 		res.Skipped = true
-		res.Detail = "未配置（打卡依赖此通道，未配置则不会记录打卡）"
+		res.Detail = "未配置（仅靠轮询，功能不受影响）"
 		return res
 	}
 	if err := r.prober.ProbeEventWS(n.EventWSURL, n.EventWSToken); err != nil {

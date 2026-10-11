@@ -1,12 +1,11 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"testing"
-	"time"
 
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
@@ -124,15 +123,19 @@ func (f *fakeNewAPI) AddQuota(userID, value int) error {
 	return nil
 }
 
-// fakeNapCat serves canned rosters and group lists.
+// fakeNapCat serves canned rosters, boards and group lists.
 type fakeNapCat struct {
-	groups  []napcat.Group
-	members map[int64][]napcat.GroupMember
+	groups   []napcat.Group
+	members  map[int64][]napcat.GroupMember
+	board    map[int64][]napcat.SignedMember
+	boardErr map[int64]error
 }
 
 func newFakeNapCat() *fakeNapCat {
 	return &fakeNapCat{
-		members: map[int64][]napcat.GroupMember{},
+		members:  map[int64][]napcat.GroupMember{},
+		board:    map[int64][]napcat.SignedMember{},
+		boardErr: map[int64]error{},
 	}
 }
 
@@ -140,6 +143,13 @@ func (f *fakeNapCat) GetGroupList() ([]napcat.Group, error) { return f.groups, n
 
 func (f *fakeNapCat) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error) {
 	return f.members[groupID], nil
+}
+
+func (f *fakeNapCat) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
+	if err := f.boardErr[groupID]; err != nil {
+		return nil, err
+	}
+	return f.board[groupID], nil
 }
 
 func newTestService(t *testing.T) (*Service, *store.Store, *fakeNewAPI, *fakeNapCat) {
@@ -166,8 +176,8 @@ func TestSettingsDefaultsAndRoundTrip(t *testing.T) {
 	if s.RewardMin != 100 || s.RewardMax != 200 {
 		t.Errorf("unexpected default reward range: %d-%d", s.RewardMin, s.RewardMax)
 	}
-	if s.MemberSyncMinutes <= 0 {
-		t.Errorf("sync interval must default to a positive value: %+v", s)
+	if s.MemberSyncMinutes <= 0 || s.CheckinSyncMinutes <= 0 {
+		t.Errorf("sync intervals must default to positive values: %+v", s)
 	}
 
 	s.RewardMax = 500
@@ -285,56 +295,39 @@ func TestAutoBindRefusesAmbiguousMatch(t *testing.T) {
 	}
 }
 
-// A check-in is recorded under the date the message arrived on *in the
-// configured timezone*, not the UTC date: 2026-10-09T20:00Z is already the
-// 10th in Asia/Shanghai, and the day boundary must match Today().
-func TestRecordCheckinByMessageUsesConfiguredTimezone(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
-	at := time.Date(2026, 10, 9, 20, 0, 0, 0, time.UTC)
+func TestSyncCheckinsRecordsBoard(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	nc.board[1] = []napcat.SignedMember{
+		{QQ: 54321, Nick: "爱丽丝", Time: 1791630000, Rank: 1},
+		{QQ: 99999, Nick: "bob", Time: 1791630600, Rank: 2},
+	}
 
-	if err := svc.RecordCheckinByMessage(1129535731, 54321, at); err != nil {
-		t.Fatalf("RecordCheckinByMessage: %v", err)
+	n, err := svc.SyncCheckins(1, "2026-10-10")
+	if err != nil {
+		t.Fatalf("SyncCheckins: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("want 2 recorded, got %d", n)
 	}
 	c, err := st.GetCheckin(54321, "2026-10-10")
 	if err != nil {
 		t.Fatalf("GetCheckin: %v", err)
 	}
-	if c.GroupID != 1129535731 || c.SignedAt != at.Unix() {
+	if c.Rank != 1 || c.SignedAt != 1791630000 {
 		t.Errorf("unexpected checkin: %+v", c)
-	}
-
-	// Change the timezone: the same instant must now land on the 9th. The
-	// stored date follows the configuration, so the boundary is operator-set.
-	s, _ := svc.Settings()
-	s.Timezone = "UTC"
-	if err := svc.SaveSettings(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.RecordCheckinByMessage(1129535731, 99999, at); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.GetCheckin(99999, "2026-10-09"); err != nil {
-		t.Errorf("the configured timezone must decide the date: %v", err)
 	}
 }
 
-// Repeat messages on the same day collapse into one row. The store's upsert
-// refreshes the observed time (signed_at/group_id follow the latest message)
-// but never touches the reward fields, so a day's chatter cannot re-randomise
-// or re-award what was already paid.
-func TestRecordCheckinByMessageIsIdempotentPerDay(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
-	first := time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC)
-	second := time.Date(2026, 10, 10, 9, 30, 0, 0, time.UTC)
-
-	if err := svc.RecordCheckinByMessage(1, 54321, first); err != nil {
+// The board is today-only and polled repeatedly; a later poll must merge, not
+// replace, so members who signed in earlier are not dropped.
+func TestSyncCheckinsIsAUnionAcrossPolls(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate the award having been paid for the day's first message.
-	if _, err := st.ClaimReward(54321, "2026-10-10", 150, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.RecordCheckinByMessage(1, 54321, second); err != nil {
+	nc.board[1] = []napcat.SignedMember{{QQ: 99999, Nick: "b", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -342,35 +335,18 @@ func TestRecordCheckinByMessageIsIdempotentPerDay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("a second message the same day must not add a row, got %d", len(all))
-	}
-	if all[0].SignedAt != second.Unix() {
-		t.Errorf("the upsert refreshes the observed time: signed_at = %d, want %d",
-			all[0].SignedAt, second.Unix())
-	}
-	if all[0].RewardQuota != 150 || all[0].RewardedAt == 0 {
-		t.Errorf("re-recording must not touch the reward: %+v", all[0])
+	if len(all) != 2 {
+		t.Errorf("want both members retained, got %d", len(all))
 	}
 }
 
-// A message on another day is a new check-in.
-func TestRecordCheckinByMessageAcrossDays(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
-
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatal(err)
-	}
-
-	days, err := st.CountCheckins(54321)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if days != 2 {
-		t.Errorf("a message on a new day must record a second row, got %d", days)
+// A group with no sign-in board must not be reported as a hard failure for the
+// whole sweep.
+func TestSyncCheckinsToleratesBoardError(t *testing.T) {
+	svc, _, _, nc := newTestService(t)
+	nc.boardErr[1] = errors.New("无法获取该群组打卡列表")
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err == nil {
+		t.Error("a board error should be reported so the caller can log it")
 	}
 }
 
@@ -384,7 +360,8 @@ func TestAwardPaysOnceWithinRange(t *testing.T) {
 	if _, err := svc.AutoBind(); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)); err != nil {
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -422,7 +399,8 @@ func TestAwardDoesNotPayTwice(t *testing.T) {
 	if _, err := svc.AutoBind(); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)); err != nil {
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Award("2026-10-10"); err != nil {
@@ -442,8 +420,9 @@ func TestAwardDoesNotPayTwice(t *testing.T) {
 }
 
 func TestAwardSkipsUnboundMembers(t *testing.T) {
-	svc, _, na, _ := newTestService(t)
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)); err != nil {
+	svc, _, na, nc := newTestService(t)
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -470,7 +449,8 @@ func TestAwardLeavesRewardUnclaimedOnGatewayFailure(t *testing.T) {
 	if _, err := svc.AutoBind(); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)); err != nil {
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 	na.failQuota = errors.New("gateway down")
@@ -506,7 +486,8 @@ func TestAwardFixedRangePaysExactly(t *testing.T) {
 	if _, err := svc.AutoBind(); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.RecordCheckinByMessage(1, 54321, time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)); err != nil {
+	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
+	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Award("2026-10-10"); err != nil {
@@ -585,29 +566,42 @@ func TestSettingsDefaultPatrolsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.MemberPatrolEnabled {
-		t.Errorf("the member patrol must default to on: %+v", s)
+	if !s.MemberPatrolEnabled || !s.CheckinPatrolEnabled {
+		t.Errorf("both patrols must default to on: %+v", s)
 	}
 }
 
-// A stored settings blob from before check-ins became message-driven still
-// carries checkin_patrol_enabled/checkin_sync_minutes. Go's json.Unmarshal
-// ignores unknown fields, so loading it must not fail and must not resurrect
-// any check-in setting: the struct has none.
-func TestLegacySettingsBlobLoadsWithoutCheckinFields(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
-	legacy := json.RawMessage(`{"member_patrol_enabled":true,"member_sync_minutes":90,` +
-		`"checkin_patrol_enabled":true,"checkin_sync_minutes":30,` +
-		`"reward_min":10,"reward_max":20,"timezone":"Asia/Shanghai"}`)
-	if err := st.PutSetting("settings", legacy); err != nil {
+// A group with no sign-in board is a normal condition, not a failure: the
+// check-in patrol must not show a permanent error just because a monitored
+// group lacks a board.
+func TestBoardlessGroupIsNotAFailure(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
 		t.Fatal(err)
 	}
-
-	s, err := svc.Settings()
-	if err != nil {
-		t.Fatalf("an old blob must still load: %v", err)
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
 	}
-	if s.MemberSyncMinutes != 90 || s.RewardMin != 10 || s.RewardMax != 20 {
-		t.Errorf("known fields must survive: %+v", s)
+	nc.boardErr[1] = fmt.Errorf("get_group_signed_list: %w", napcat.ErrNoSigninBoard)
+
+	if err := svc.SyncAllCheckins("2026-10-10"); err != nil {
+		t.Errorf("a boardless group must not be reported as a failure: %v", err)
+	}
+}
+
+// A real failure must still surface, or the patrol would look healthy while
+// silently recording nothing.
+func TestRealCheckinFailureStillSurfaces(t *testing.T) {
+	svc, st, _, nc := newTestService(t)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	nc.boardErr[1] = errors.New("connection refused")
+
+	if err := svc.SyncAllCheckins("2026-10-10"); err == nil {
+		t.Error("a genuine failure must be reported")
 	}
 }

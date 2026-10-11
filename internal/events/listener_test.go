@@ -15,7 +15,6 @@ type fakeSvc struct {
 	monitored map[int64]bool
 	bound     []int64
 	ensured   []ensureCall
-	checkins  []checkinCall
 	bindErr   error
 	bindPanic bool
 }
@@ -34,35 +33,15 @@ func (f *fakeSvc) ensuredCalls() []ensureCall {
 	return append([]ensureCall(nil), f.ensured...)
 }
 
-// checkinCalls returns a copy of the recorded check-in calls.
-func (f *fakeSvc) checkinCalls() []checkinCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]checkinCall(nil), f.checkins...)
-}
-
 type ensureCall struct {
 	groupID int64
 	qq      int64
-}
-
-type checkinCall struct {
-	groupID int64
-	qq      int64
-	at      time.Time
 }
 
 func (f *fakeSvc) EnsureMember(groupID, qq int64, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensured = append(f.ensured, ensureCall{groupID: groupID, qq: qq})
-	return nil
-}
-
-func (f *fakeSvc) RecordCheckinByMessage(groupID, qq int64, at time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.checkins = append(f.checkins, checkinCall{groupID: groupID, qq: qq, at: at})
 	return nil
 }
 
@@ -156,62 +135,6 @@ func TestNonMessageAndPrivateEventsIgnored(t *testing.T) {
 
 	if len(svc.bound) != 0 {
 		t.Errorf("unexpected binds: %v", svc.bound)
-	}
-	if cs := svc.checkinCalls(); len(cs) != 0 {
-		t.Errorf("a private message must not be a check-in: %+v", cs)
-	}
-}
-
-// A member sending ANY message in a monitored group is a check-in: text,
-// images, emoji, and even the bind command. Nothing is filtered.
-func TestPlainMessageRecordsCheckin(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
-	l := New(func() (string, string) { return "", "" }, svc)
-
-	for _, raw := range []string{"大家好", "[CQ:image,file=x.jpg]", "👍", ""} {
-		l.Handle(msgEvent(1129535731, 54321, raw))
-	}
-
-	cs := svc.checkinCalls()
-	if len(cs) != 4 {
-		t.Fatalf("every message must record a check-in, got %d: %+v", len(cs), cs)
-	}
-	for _, c := range cs {
-		if c.groupID != 1129535731 || c.qq != 54321 {
-			t.Errorf("wrong check-in recorded: %+v", c)
-		}
-		if c.at.IsZero() {
-			t.Error("the check-in must carry the message's arrival time")
-		}
-	}
-}
-
-// A message in a group this service does not monitor is not a check-in.
-func TestMessageOutsideMonitoredGroupsIsNotACheckin(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
-	l := New(func() (string, string) { return "", "" }, svc)
-
-	l.Handle(msgEvent(999999999, 54321, "大家好"))
-
-	if cs := svc.checkinCalls(); len(cs) != 0 {
-		t.Errorf("must not record a check-in outside monitored groups: %+v", cs)
-	}
-}
-
-// The bind command counts as a check-in as well as a bind: it is a message
-// like any other, and the owner confirmed it must not be special-cased out.
-func TestBindCommandAlsoRecordsCheckin(t *testing.T) {
-	svc := &fakeSvc{monitored: map[int64]bool{1129535731: true}}
-	l := New(func() (string, string) { return "", "" }, svc)
-
-	l.Handle(msgEvent(1129535731, 54321, BindCommand))
-
-	if b := svc.boundQQs(); len(b) != 1 || b[0] != 54321 {
-		t.Fatalf("expected 54321 to be bound, got %v", b)
-	}
-	cs := svc.checkinCalls()
-	if len(cs) != 1 || cs[0].qq != 54321 || cs[0].groupID != 1129535731 {
-		t.Errorf("the bind command must also record a check-in, got %+v", cs)
 	}
 }
 

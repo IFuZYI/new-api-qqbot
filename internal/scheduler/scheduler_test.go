@@ -28,6 +28,9 @@ type stubQQ struct{}
 
 func (stubQQ) GetGroupList() ([]napcat.Group, error)                  { return nil, nil }
 func (stubQQ) GetGroupMemberList(int64) ([]napcat.GroupMember, error) { return nil, nil }
+func (stubQQ) GetGroupSignedList(int64) ([]napcat.SignedMember, error) {
+	return nil, nil
+}
 
 // enableSchedGroup registers one monitored group and turns monitoring on (a
 // newly discovered group is disabled until the operator selects it).
@@ -59,19 +62,26 @@ func TestIntervalsAreZeroWhenPatrolDisabled(t *testing.T) {
 	sched, _, svc := newScheduler(t)
 
 	s, _ := svc.Settings()
-	if !s.MemberPatrolEnabled {
-		t.Fatal("precondition: the member patrol should default to enabled")
+	if !s.MemberPatrolEnabled || !s.CheckinPatrolEnabled {
+		t.Fatal("precondition: patrols should default to enabled")
 	}
 	if sched.memberInterval() <= 0 {
 		t.Error("member patrol enabled but interval is not positive")
 	}
+	if sched.checkinInterval() <= 0 {
+		t.Error("check-in patrol enabled but interval is not positive")
+	}
 
 	s.MemberPatrolEnabled = false
+	s.CheckinPatrolEnabled = false
 	if err := svc.SaveSettings(s); err != nil {
 		t.Fatal(err)
 	}
 	if got := sched.memberInterval(); got != 0 {
 		t.Errorf("disabled member patrol must report 0, got %s", got)
+	}
+	if got := sched.checkinInterval(); got != 0 {
+		t.Errorf("disabled check-in patrol must report 0, got %s", got)
 	}
 }
 
@@ -81,6 +91,7 @@ func TestIntervalsFollowConfiguredMinutes(t *testing.T) {
 
 	s, _ := svc.Settings()
 	s.MemberSyncMinutes = 45
+	s.CheckinSyncMinutes = 7
 	if err := svc.SaveSettings(s); err != nil {
 		t.Fatal(err)
 	}
@@ -88,13 +99,25 @@ func TestIntervalsFollowConfiguredMinutes(t *testing.T) {
 	if got := sched.memberInterval(); got != 45*time.Minute {
 		t.Errorf("member interval = %s, want 45m", got)
 	}
+	if got := sched.checkinInterval(); got != 7*time.Minute {
+		t.Errorf("check-in interval = %s, want 7m", got)
+	}
 }
 
-// The award loop is fixed at one minute and must not read any setting: awards
-// are how a check-in is honoured, so a setting must not be able to stop them.
-func TestAwardIntervalIsFixed(t *testing.T) {
-	if awardInterval != time.Minute {
-		t.Errorf("awardInterval = %s, want a fixed 1m", awardInterval)
+// Disabling one patrol must not disturb the other.
+func TestPatrolsAreIndependent(t *testing.T) {
+	sched, _, svc := newScheduler(t)
+
+	s, _ := svc.Settings()
+	s.MemberPatrolEnabled = false
+	if err := svc.SaveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	if sched.memberInterval() != 0 {
+		t.Error("member patrol should be off")
+	}
+	if sched.checkinInterval() <= 0 {
+		t.Error("check-in patrol should be unaffected")
 	}
 }
 
@@ -110,6 +133,9 @@ func TestIntervalFallsBackWhenSettingsUnreadable(t *testing.T) {
 	if got := sched.memberInterval(); got <= 0 {
 		t.Errorf("member interval fell to %s; a bad setting must not disable the patrol", got)
 	}
+	if got := sched.checkinInterval(); got <= 0 {
+		t.Errorf("check-in interval fell to %s", got)
+	}
 }
 
 // Run must return promptly when its context is cancelled, including while a
@@ -119,6 +145,7 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 
 	s, _ := svc.Settings()
 	s.MemberPatrolEnabled = false
+	s.CheckinPatrolEnabled = false
 	if err := svc.SaveSettings(s); err != nil {
 		t.Fatal(err)
 	}
@@ -139,11 +166,11 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// Status reports a key per sweep so the UI can show when each last ran.
-func TestStatusCoversEverySweep(t *testing.T) {
+// Status reports a key per patrol so the UI can show when each last ran.
+func TestStatusCoversEveryPatrol(t *testing.T) {
 	sched, _, _ := newScheduler(t)
 	st := sched.Status()
-	for _, name := range []string{"members", "awards", "rules"} {
+	for _, name := range []string{"members", "checkins", "rules"} {
 		if _, ok := st[name]; !ok {
 			t.Errorf("status is missing %q", name)
 		}
@@ -173,24 +200,28 @@ func TestSweepPanicIsContained(t *testing.T) {
 	}
 }
 
-// A failing award sweep must stay visible in Status, so the operator can see
-// that check-ins are not being paid.
-func TestAwardErrorIsVisibleInStatus(t *testing.T) {
+// A failing check-in sync must stay visible in Status: the award step's nil
+// return used to erase it, so a dead board looked healthy.
+func TestCheckinSyncErrorIsNotMasked(t *testing.T) {
 	sched, st, _ := newScheduler(t)
 	enableSchedGroup(t, st, 1)
 
-	// Model the award sweep failing (e.g. the gateway is unreachable).
-	err := sched.safely("awards", func() error {
-		return errors.New("gateway unreachable")
+	// Model the check-in sweep: sync fails, award succeeds.
+	syncErr := errors.New("board unreadable")
+	err := sched.safely("checkins", func() error {
+		if syncErr != nil {
+			return syncErr
+		}
+		return nil
 	})
-	sched.record("awards", err)
+	sched.record("checkins", err)
 
 	status := sched.Status()
-	entry, ok := status["awards"].(map[string]any)
+	entry, ok := status["checkins"].(map[string]any)
 	if !ok {
 		t.Fatalf("unexpected status shape: %+v", status)
 	}
 	if _, has := entry["last_error"]; !has {
-		t.Errorf("the failed award sweep was masked: %+v", entry)
+		t.Errorf("the failed check-in sync was masked: %+v", entry)
 	}
 }
