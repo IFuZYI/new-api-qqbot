@@ -80,6 +80,11 @@ export default function SettingsView({
   const [patrols, setPatrols] = useState<Record<string, PatrolState>>({})
   const [busy, setBusy] = useState(false)
   const [loadErr, setLoadErr] = useState('')
+  // Which patrol is being tested right now, so only its own button spins.
+  const [testing, setTesting] = useState('')
+  // The last manual test's outcome per patrol, kept until the next test: the
+  // health badge says when it last ran, but not what the run found.
+  const [tested, setTested] = useState<Record<string, string>>({})
 
   const load = useCallback(async () => {
     try {
@@ -135,6 +140,27 @@ export default function SettingsView({
       await load()
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * Run one patrol now. The outcome is summarised in the row rather than only
+   * toasted: the operator is testing this specific patrol, and a toast that
+   * scrolls away leaves them guessing which run it belonged to.
+   */
+  const test = async (spec: PatrolSpec) => {
+    setTesting(spec.key)
+    try {
+      const r = await api.runPatrol(spec.key)
+      setTested((t) => ({ ...t, [spec.key]: summarise(spec, r.result) }))
+      onDone(`${spec.label}：测试完成`)
+      await load()
+    } catch (e) {
+      setTested((t) => ({ ...t, [spec.key]: e instanceof Error ? e.message : String(e) }))
+      onFail(e)
+      await load()
+    } finally {
+      setTesting('')
     }
   }
 
@@ -240,6 +266,11 @@ export default function SettingsView({
                   {on && p?.last_error && (
                     <p className="mt-1 text-[11px] leading-4 break-all text-destructive">{p.last_error}</p>
                   )}
+                  {tested[spec.key] && (
+                    <p className="mt-1 text-[11px] leading-4 break-all text-foreground/80">
+                      测试结果：{tested[spec.key]}
+                    </p>
+                  )}
                 </div>
 
                 {spec.minutesKey && (
@@ -257,6 +288,15 @@ export default function SettingsView({
                     <span className="text-xs whitespace-nowrap text-muted-foreground">分钟</span>
                   </div>
                 )}
+
+                <Button
+                  size="sm"
+                  disabled={testing !== ''}
+                  title={`立即执行一次${spec.label}，用于在打开开关前先试一次`}
+                  onClick={() => void test(spec)}
+                >
+                  {testing === spec.key ? '测试中…' : '测试一次'}
+                </Button>
 
                 {spec.enabledKey && (
                   <Switch
@@ -305,4 +345,38 @@ function PatrolHealth({ state, on }: { state?: PatrolState; on: boolean }) {
   if (state?.last_error) return <Badge tone="err">上次失败</Badge>
   if (state?.last_run) return <Badge tone="ok">正常</Badge>
   return <Badge tone="warn">尚未运行</Badge>
+}
+
+/**
+ * summarise turns a sweep's own result into one line.
+ *
+ * Each patrol reports different counters, and "完成" alone would hide the case
+ * the operator is looking for: a run that succeeded but found nothing to do
+ * (every member already bound, no rule matched) is not the same as one that did
+ * work, and only the numbers tell them apart.
+ */
+function summarise(spec: PatrolSpec, result: unknown): string {
+  const r = (result ?? {}) as Record<string, number | string | undefined>
+  const n = (k: string) => (typeof r[k] === 'number' ? (r[k] as number) : 0)
+
+  switch (spec.key) {
+    case 'members':
+      // The roster sweep returns nothing; its effect is the member table.
+      return '已重读全部监测群的成员列表'
+    case 'bind':
+      return `新绑定 ${n('bound')} 人，待注册 ${n('pending')} 人，无法匹配 ${n('ambiguous')} 人，失败 ${n('failed')} 次，已有绑定跳过 ${n('skipped')} 人`
+    case 'checkins':
+      return `发放奖励 ${n('awarded')} 人，未绑定跳过 ${n('unbound')} 人，发放失败 ${n('failed')} 次`
+    case 'rules': {
+      const rules = Array.isArray(result) ? (result as Record<string, number | string>[]) : []
+      if (rules.length === 0) return '没有到期的分组转换规则'
+      const moved = rules.reduce((a, r) => a + (typeof r.promoted === 'number' ? r.promoted : 0), 0)
+      const failed = rules.reduce((a, r) => a + (typeof r.failed === 'number' ? r.failed : 0), 0)
+      const errs = rules.filter((r) => r.error).map((r) => `${r.rule_name}：${r.error}`)
+      const head = `${rules.length} 条规则，转换 ${moved} 个账号，失败 ${failed} 次`
+      return errs.length ? `${head}（${errs.join('；')}）` : head
+    }
+    default:
+      return '完成'
+  }
 }

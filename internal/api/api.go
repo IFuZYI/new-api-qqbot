@@ -14,6 +14,7 @@ import (
 	"qqbot/internal/config"
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
+	"qqbot/internal/scheduler"
 	"qqbot/internal/service"
 	"qqbot/internal/store"
 )
@@ -39,6 +40,11 @@ type Router struct {
 	// status endpoint reports no runs, which is what a process with the
 	// scheduler not started looks like.
 	patrols PatrolStatus
+
+	// patrolRunner runs one patrol on demand (the 测试一次 button). Optional for
+	// the same reason as patrols: without a scheduler there is nothing to run,
+	// and the endpoint says so instead of pretending.
+	patrolRunner PatrolRunner
 
 	// setupMu serialises first-run setup (see auth.go).
 	setupMu sync.Mutex
@@ -71,6 +77,13 @@ type PatrolStatus interface {
 	Status() map[string]any
 }
 
+// PatrolRunner runs one patrol immediately, for the 测试一次 button. The result is
+// the sweep's own (e.g. service.BindResult), so the UI can report what the run
+// did rather than just "ok".
+type PatrolRunner interface {
+	RunNow(name string) (any, error)
+}
+
 // NewRouter builds the API router. The WebUI is served from webDist and
 // connection settings are read and written through cfg.
 func NewRouter(st *store.Store, svc *service.Service, cfg *config.Manager, webDist string) *Router {
@@ -89,6 +102,9 @@ func (r *Router) SetProber(p Prober) { r.prober = p }
 
 // SetPatrolStatus installs the scheduler-status dependency.
 func (r *Router) SetPatrolStatus(p PatrolStatus) { r.patrols = p }
+
+// SetPatrolRunner installs the on-demand patrol runner.
+func (r *Router) SetPatrolRunner(p PatrolRunner) { r.patrolRunner = p }
 
 // Handler returns the root handler.
 func (r *Router) Handler() http.Handler { return r.mux }
@@ -139,6 +155,10 @@ func (r *Router) routes() {
 	r.mux.HandleFunc("GET /api/settings", r.requireAuth(r.getSettings))
 	r.mux.HandleFunc("POST /api/settings", r.requireAuth(r.saveSettings))
 	r.mux.HandleFunc("GET /api/status", r.requireAuth(r.status))
+	// Run one patrol now, for the 测试一次 button on the patrol card. It is the
+	// same sweep the timer runs, and it is recorded, so the row's health badge
+	// updates instead of still claiming 尚未运行.
+	r.mux.HandleFunc("POST /api/patrols/{name}/run", r.requireAuth(r.runPatrol))
 
 	r.mux.HandleFunc("GET /api/checkins", r.requireAuth(r.listCheckins))
 
@@ -603,6 +623,31 @@ func (r *Router) status(w http.ResponseWriter, _ *http.Request) {
 		"patrols":  patrols,
 		"settings": s,
 	})
+}
+
+// runPatrol runs one patrol immediately, for the 测试一次 button.
+//
+// The name is validated against the scheduler's own table rather than a list
+// kept here: a second list would drift, and a name this endpoint accepts but the
+// scheduler does not know would be reported as success.
+func (r *Router) runPatrol(w http.ResponseWriter, req *http.Request) {
+	name := req.PathValue("name")
+	if r.patrolRunner == nil {
+		writeErr(w, 503, errors.New("巡检尚未启动，无法手动执行"))
+		return
+	}
+	res, err := r.patrolRunner.RunNow(name)
+	if err != nil {
+		// An unknown name is the caller's mistake (404); a sweep that failed is
+		// an upstream problem (502). They read differently to the operator.
+		if errors.Is(err, scheduler.ErrUnknownPatrol) {
+			writeErr(w, 404, err)
+			return
+		}
+		writeErr(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"patrol": name, "result": res})
 }
 
 func (r *Router) saveSettings(w http.ResponseWriter, req *http.Request) {

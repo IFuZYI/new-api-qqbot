@@ -5,6 +5,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -16,6 +17,12 @@ import (
 
 // patrolDisabledCheck is how often a switched-off patrol re-reads its setting.
 const patrolDisabledCheck = 30 * time.Second
+
+// ErrUnknownPatrol is returned by RunNow for a name that is not a patrol. It is
+// a sentinel so a caller can tell "you asked for something that does not exist"
+// (a bad request) from "the sweep ran and failed" (an upstream problem) without
+// matching on the message text.
+var ErrUnknownPatrol = errors.New("未知的巡检")
 
 // Scheduler drives the sweeps on independent timers.
 type Scheduler struct {
@@ -35,29 +42,107 @@ func New(svc *service.Service) *Scheduler {
 	}
 }
 
+// sweep is one patrol: what it does, how often it should run, and the name the
+// WebUI and the status map use for it.
+//
+// The loops and the manual "test once" button both run through this table, so a
+// patrol cannot have one behaviour on its timer and a different one when the
+// operator clicks it.
+type sweep struct {
+	name string
+	// every returns the interval to wait after this sweep, or 0 when the patrol
+	// is switched off (which makes the loop idle).
+	every func() time.Duration
+	// body is the sweep itself. Its value is reported to a manual caller; the
+	// loops ignore it.
+	body func() (any, error)
+}
+
+// sweeps returns the patrol table. It is built per call because the interval
+// functions read live settings.
+func (s *Scheduler) sweeps() []sweep {
+	return []sweep{
+		{
+			name:  "members",
+			every: s.memberInterval,
+			body: func() (any, error) {
+				if err := s.svc.SyncAllMembers(); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			},
+		},
+		{
+			// The bind patrol is separate from the roster patrol on purpose:
+			// binding is cheap (one account lookup per unbound member) while
+			// reading a roster is not, so an operator can retry bindings far
+			// more often than they re-read the rosters. It only ever touches
+			// members with no binding.
+			name:  "bind",
+			every: s.bindInterval,
+			body: func() (any, error) {
+				return s.svc.AutoBind()
+			},
+		},
+		{
+			name:  "rules",
+			every: s.ruleInterval,
+			body: func() (any, error) {
+				return s.svc.RunScheduledRules()
+			},
+		},
+		{
+			name:  "checkins",
+			every: s.checkinInterval,
+			body:  s.runCheckinSweep,
+		},
+	}
+}
+
 // Run starts the loops and blocks until ctx is cancelled.
 func (s *Scheduler) Run(ctx context.Context) {
-	go s.loop(ctx, "members", s.memberInterval, func() error {
-		return s.svc.SyncAllMembers()
-	})
-
-	// The bind patrol is separate from the roster patrol on purpose: binding is
-	// cheap (one account lookup per unbound member) while reading a roster is
-	// not, so an operator can retry bindings far more often than they re-read
-	// the rosters. It only ever touches members with no binding.
-	go s.loop(ctx, "bind", s.bindInterval, func() error {
-		_, err := s.svc.AutoBind()
-		return err
-	})
-
-	go s.loop(ctx, "rules", s.ruleInterval, func() error {
-		_, err := s.svc.RunScheduledRules()
-		return err
-	})
-
-	go s.loop(ctx, "checkins", s.checkinInterval, s.runCheckinSweep)
-
+	for _, sw := range s.sweeps() {
+		go s.loop(ctx, sw.name, sw.every, func() error {
+			_, err := sw.body()
+			return err
+		})
+	}
 	<-ctx.Done()
+}
+
+// RunNow runs one patrol's sweep immediately and records the outcome, so the
+// WebUI can offer a "test once" button per patrol.
+//
+// It runs the same body the loop runs, and through the same recording, because
+// the two must not diverge: a test that reports success while the timer would
+// fail (or the reverse) is worse than no test at all. Recording it is also what
+// stops the row saying 尚未运行 afterwards, which would otherwise leave the
+// operator unsure the click did anything.
+//
+// A switched-off patrol is runnable on purpose: "a disabled feature makes no
+// request" is a rule about the automatic loops, and clicking 测试一次 is an
+// explicit request for one run — it is how an operator decides whether to turn
+// the feature on. The timer is untouched either way.
+func (s *Scheduler) RunNow(name string) (any, error) {
+	for _, sw := range s.sweeps() {
+		if sw.name != name {
+			continue
+		}
+		var res any
+		// A panic must not take the process down (see safely), and it must be
+		// recorded as a failure rather than reported as a success.
+		err := s.safely(name, func() error {
+			var runErr error
+			res, runErr = sw.body()
+			return runErr
+		})
+		s.record(name, err)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+	return nil, fmt.Errorf("%w：%s", ErrUnknownPatrol, name)
 }
 
 // runCheckinSweep is the check-in patrol's body: read the sign-in board when that
@@ -69,14 +154,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 // still be paid, because a check-in that is never paid is the failure where
 // people sign in and get nothing. The loop therefore runs while either path is
 // on, and only the board read is skipped.
-func (s *Scheduler) runCheckinSweep() error {
+func (s *Scheduler) runCheckinSweep() (any, error) {
 	cfg, err := s.svc.Settings()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	date, err := s.svc.Today()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Remember a sync failure: the award step usually succeeds, and its nil
@@ -86,10 +171,11 @@ func (s *Scheduler) runCheckinSweep() error {
 	if cfg.CheckinPatrolEnabled {
 		syncErr = s.svc.SyncAllCheckins(date)
 	}
-	if _, err := s.svc.Award(date); err != nil {
-		return err
+	res, err := s.svc.Award(date)
+	if err != nil {
+		return nil, err
 	}
-	return syncErr
+	return res, syncErr
 }
 
 // bindInterval returns 0 when the bind patrol is switched off or its interval

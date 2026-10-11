@@ -105,6 +105,9 @@ func main() {
 	// The scheduler's health is what the panel's status view reads, so the
 	// patrols it has actually run are visible from the UI.
 	router.SetPatrolStatus(sched)
+	// The patrol card's 测试一次 button runs a sweep through the same scheduler,
+	// so a manual run and a timed run cannot behave differently.
+	router.SetPatrolRunner(sched)
 
 	// The admin credential was read from the environment above. Provisioning it
 	// before the server accepts requests means a fresh instance is never

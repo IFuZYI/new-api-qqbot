@@ -364,4 +364,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /**
+   * Run one patrol now, from the 测试一次 button. It is the same sweep the timer
+   * runs (and it is recorded), so the row's health badge updates afterwards.
+   */
+  runPatrol: (name: string) =>
+    req<{ patrol: string; result: unknown }>(`/api/patrols/${name}/run`, {
+      method: 'POST',
+      body: '{}',
+    }),
 }

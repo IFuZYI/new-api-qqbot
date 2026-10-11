@@ -71,7 +71,7 @@ func TestBoardReadIsSkippedWhenThePatrolIsOff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := sched.runCheckinSweep(); err != nil {
+	if _, err := sched.runCheckinSweep(); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	// The stub QQ would have answered, so a call here is a real board request.
@@ -97,7 +97,7 @@ func TestBoardIsReadWhenThePatrolIsOn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := sched.runCheckinSweep(); err != nil {
+	if _, err := sched.runCheckinSweep(); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if got := stubBoardCalls(); got == 0 {
@@ -127,7 +127,7 @@ func TestAwardRunsEvenWhenTheBoardFails(t *testing.T) {
 	}
 	setStubBoardErr(errString("board unreachable"))
 
-	err := sched.runCheckinSweep()
+	_, err := sched.runCheckinSweep()
 	if err == nil {
 		t.Error("the board failure must still be reported")
 	}
