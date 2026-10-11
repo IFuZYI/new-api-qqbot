@@ -89,6 +89,22 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 	for _, a := range accounts {
 		byID[a.ID] = a
 	}
+	// One read for today's sign-ins and one grouped read for lifetime totals,
+	// rather than a GetCheckin + CountCheckins pair per member. At 200 members
+	// the per-member form issued 400 queries to answer two questions that these
+	// two set-wise reads already answer, and this runs on every filter change.
+	todayCheckins, err := s.st.CheckinsOn(date)
+	if err != nil {
+		return nil, err
+	}
+	checkinByQQ := make(map[int64]store.Checkin, len(todayCheckins))
+	for _, c := range todayCheckins {
+		checkinByQQ[c.QQ] = c
+	}
+	totals, err := s.st.CheckinTotalsByQQ()
+	if err != nil {
+		return nil, err
+	}
 
 	rows := make([]UserRow, 0, len(members)+len(accounts))
 	// Accounts a member row already represents, so the account loop below does
@@ -117,14 +133,12 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 				row.NewAPIStatus = a.Status
 			}
 		}
-		if c, err := s.st.GetCheckin(m.QQ, date); err == nil {
+		if c, ok := checkinByQQ[m.QQ]; ok {
 			row.CheckedToday = true
 			row.CheckinSource = c.Source
 			row.RewardToday = c.RewardQuota
 		}
-		if n, err := s.st.CountCheckins(m.QQ); err == nil {
-			row.CheckinDays = n
-		}
+		row.CheckinDays = totals[m.QQ]
 		rows = append(rows, row)
 	}
 
