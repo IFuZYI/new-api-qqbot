@@ -80,6 +80,71 @@ func New(baseURL, token string) *Client {
 	}
 }
 
+// maxResponseBody bounds how much of an upstream response is read into memory.
+//
+// A NapCat answer is a few tens of kilobytes, so 8 MiB is far above any real
+// payload while still bounding a runaway one: a misdirected URL or a hijacked
+// response (a proxy's error page, the SPA's HTML, an endless stream) would
+// otherwise be buffered whole by io.ReadAll, which grows until the process dies.
+const maxResponseBody = 8 << 20
+
+// ErrResponseTooLarge means the upstream sent more than maxResponseBody. The
+// read is abandoned at the limit rather than truncated, so a caller gets a
+// named cause instead of a decode failure on half a JSON document.
+var ErrResponseTooLarge = errors.New("response body is too large")
+
+// readBody reads a response body up to maxResponseBody and refuses anything
+// larger.
+//
+// The limit is enforced by reading one byte past it: io.LimitReader reports EOF
+// at the cap either way, so a body cut off mid-JSON would surface as an
+// unexplained decode error. The extra byte makes "the body ended" and "the cap
+// was hit" distinguishable.
+func readBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxResponseBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxResponseBody {
+		return nil, fmt.Errorf("%w: more than %d bytes", ErrResponseTooLarge, maxResponseBody)
+	}
+	return body, nil
+}
+
+// Failover runs primary and, only when it fails, runs fallback; both must do
+// the same thing, and the first success is returned.
+//
+// A QQ client can be built and still be useless. Building one only composes a
+// URL, so the failure this service actually meets is a *call* failure: NapCat's
+// QQ login expires ("登录态已失效，请重新登录", docs/implementation.md), and
+// every QQ-side read then fails while the OneBot port is still listening and
+// answering — an error envelope, not a refused connection. A caller that falls
+// back only when the client cannot be *built* never reaches the WebUI bridge in
+// that state, even though the bridge is exactly what still works: NapCat starts
+// the WebUI before login so the operator can drive the login through it
+// ("提前启动 WebUI，使其在登录前可用", reference/NapCatQQ napcat.ts), and the
+// debug bridge drives the same actions without any network adapter being
+// enabled. Falling back on the error is what keeps both paths usable.
+//
+// When both sides fail, the returned error carries both causes (errors.Join):
+// an operator has to learn that the OneBot path and the WebUI path are both
+// broken, not just the one that happened to be tried last. The join keeps
+// errors.Is working for sentinels, so a caller can still recognise a condition
+// that is normal rather than a failure (napcat.ErrNoSigninBoard). The value is
+// unspecified when an error is returned.
+func Failover[T any](primary, fallback func() (T, error)) (T, error) {
+	v, err := primary()
+	if err == nil {
+		return v, nil
+	}
+	primaryErr := err
+	if v, err = fallback(); err == nil {
+		return v, nil
+	}
+	var zero T
+	return zero, errors.Join(primaryErr, err)
+}
+
 // obEnvelope is NapCat's OneBot response envelope.
 type obEnvelope struct {
 	Status  string          `json:"status"`
@@ -115,9 +180,9 @@ func (c *Client) Call(action string, params map[string]any, out any) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp.Body)
 	if err != nil {
-		return fmt.Errorf("%s: read response: %w", action, err)
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	return decodeAction(action, body, out)
 }
@@ -326,9 +391,9 @@ func (w *WebUI) do(path string, body any, out any) error {
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readBody(resp.Body)
 	if err != nil {
-		return fmt.Errorf("%s: read response: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 
 	var env webuiEnvelope

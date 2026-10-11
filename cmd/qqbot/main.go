@@ -348,7 +348,27 @@ func (l *lazyGateway) AddQuota(userID, value int) error {
 
 // lazyQQ prefers the OneBot HTTP endpoint and falls back to the WebUI bridge,
 // which needs no network adapter to be enabled.
-type lazyQQ struct{ cfg *config.Manager }
+//
+// The fallback is driven by napcat.Failover, so it triggers on a *call* failure
+// and not only on a construction failure: NapCat's most common fault is an
+// expired QQ login, where the OneBot port still listens and answers with an
+// error envelope. Building a client for it succeeds every time, so a
+// build-time-only fallback would never reach the bridge that still works.
+//
+// The bridge is cached for the same reason the gateway client is: logging in on
+// every call turns a fallback into a fresh problem. A roster read is one call
+// per group, so a degraded sweep over 200 groups would perform 200 WebUI logins
+// and trip NapCat's own login rate limit — leaving the service with no working
+// path at all, which is the opposite of what a fallback is for. The credential
+// is also long-lived (signed with the process secret, docs/implementation.md),
+// so a single login serves the whole sweep.
+type lazyQQ struct {
+	cfg *config.Manager
+
+	mu     sync.Mutex
+	webui  *napcat.WebUI
+	webuiK string // config fingerprint the cached bridge was built from
+}
 
 func (l *lazyQQ) onebot() (*napcat.Client, error) {
 	cfg := l.cfg.MustLoad()
@@ -358,49 +378,84 @@ func (l *lazyQQ) onebot() (*napcat.Client, error) {
 	return napcat.New(cfg.NapCat.OneBotURL, cfg.NapCat.OneBotToken), nil
 }
 
-func (l *lazyQQ) webui() (*napcat.WebUI, error) {
+// webuiClient returns a logged-in bridge, re-authenticating only when the
+// stored address or token changes.
+func (l *lazyQQ) webuiClient() (*napcat.WebUI, error) {
 	cfg := l.cfg.MustLoad()
 	if cfg.NapCat.WebUIURL == "" {
 		return nil, errNotConfigured
+	}
+	key := cfg.NapCat.WebUIURL + "\x00" + cfg.NapCat.WebUIToken
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.webui != nil && l.webuiK == key && l.webui.Credential() != "" {
+		return l.webui, nil
 	}
 	w := napcat.NewWebUI(cfg.NapCat.WebUIURL, cfg.NapCat.WebUIToken)
 	if err := w.Login(); err != nil {
 		return nil, err
 	}
+	l.webui, l.webuiK = w, key
 	return w, nil
 }
 
 func (l *lazyQQ) GetGroupList() ([]napcat.Group, error) {
-	if c, err := l.onebot(); err == nil {
-		return c.GetGroupList()
-	}
-	w, err := l.webui()
-	if err != nil {
-		return nil, err
-	}
-	return w.GetGroupList()
+	return napcat.Failover(
+		func() ([]napcat.Group, error) {
+			c, err := l.onebot()
+			if err != nil {
+				return nil, err
+			}
+			return c.GetGroupList()
+		},
+		func() ([]napcat.Group, error) {
+			w, err := l.webuiClient()
+			if err != nil {
+				return nil, err
+			}
+			return w.GetGroupList()
+		},
+	)
 }
 
 func (l *lazyQQ) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error) {
-	if c, err := l.onebot(); err == nil {
-		return c.GetGroupMemberList(groupID)
-	}
-	w, err := l.webui()
-	if err != nil {
-		return nil, err
-	}
-	return w.GetGroupMemberList(groupID)
+	return napcat.Failover(
+		func() ([]napcat.GroupMember, error) {
+			c, err := l.onebot()
+			if err != nil {
+				return nil, err
+			}
+			return c.GetGroupMemberList(groupID)
+		},
+		func() ([]napcat.GroupMember, error) {
+			w, err := l.webuiClient()
+			if err != nil {
+				return nil, err
+			}
+			return w.GetGroupMemberList(groupID)
+		},
+	)
 }
 
 func (l *lazyQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error) {
-	if c, err := l.onebot(); err == nil {
-		return c.GetGroupSignedList(groupID)
-	}
-	w, err := l.webui()
-	if err != nil {
-		return nil, err
-	}
-	return w.GetGroupSignedList(groupID)
+	return napcat.Failover(
+		func() ([]napcat.SignedMember, error) {
+			c, err := l.onebot()
+			if err != nil {
+				return nil, err
+			}
+			return c.GetGroupSignedList(groupID)
+		},
+		func() ([]napcat.SignedMember, error) {
+			w, err := l.webuiClient()
+			if err != nil {
+				return nil, err
+			}
+			return w.GetGroupSignedList(groupID)
+		},
+	)
 }
 
 // napcatAdmin logs in to a NapCat WebUI and writes its OneBot adapters, which
@@ -555,8 +610,12 @@ func (b bindAdapter) EnsureMember(groupID, qq int64, nickname string) error {
 
 var errNotConfigured = &notConfiguredError{}
 
+// notConfiguredError is returned when a stored connection setting is missing.
+// Its message is shown to the operator (it reaches a toast through the API's
+// error passthrough), so it is Simplified Chinese like the rest of the panel's
+// UI text — the English form this replaced was the only such string left.
 type notConfiguredError struct{}
 
 func (*notConfiguredError) Error() string {
-	return "not configured yet: set the new-api and NapCat connection details in the WebUI"
+	return "尚未配置：请先在「连接配置」里填写 new-api 与 NapCat 的连接信息"
 }

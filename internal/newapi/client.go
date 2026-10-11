@@ -227,6 +227,39 @@ type envelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// maxResponseBody bounds how much of a gateway response is read into memory.
+//
+// A new-api answer is a few tens of kilobytes, so 8 MiB is far above any real
+// payload while still bounding a runaway one: the gateway is fronted by
+// Cloudflare and a proxy's error page, a login-wall HTML document or a hijacked
+// response would otherwise be buffered whole by io.ReadAll, growing the process
+// until it dies.
+const maxResponseBody = 8 << 20
+
+// ErrResponseTooLarge means the gateway sent more than maxResponseBody. The read
+// is abandoned at the limit rather than truncated, so the caller gets a named
+// cause instead of a decode failure on half a JSON document.
+var ErrResponseTooLarge = errors.New("response body is too large")
+
+// readBody reads a response body up to maxResponseBody and refuses anything
+// larger.
+//
+// The limit is enforced by reading one byte past it: io.LimitReader reports EOF
+// at the cap either way, so a body cut off mid-JSON would surface as an
+// unexplained decode error ("unexpected response (HTTP 200): {\"success\":tru…"),
+// which reads like a gateway bug. The extra byte makes "the body ended" and "the
+// cap was hit" distinguishable.
+func readBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxResponseBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxResponseBody {
+		return nil, fmt.Errorf("%w: more than %d bytes", ErrResponseTooLarge, maxResponseBody)
+	}
+	return body, nil
+}
+
 func (c *Client) do(method, path string, body any, out any) error {
 	return c.doWithOrigin(method, path, body, out, "")
 }
@@ -263,9 +296,11 @@ func (c *Client) doWithOrigin(method, path string, body any, out any, origin str
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readBody(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		// Name the call: "response body is too large" alone leaves the operator
+		// guessing which of the sweep's many requests hit it.
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 
 	// The rate limiter answers with a bare status and an empty body, so it must
