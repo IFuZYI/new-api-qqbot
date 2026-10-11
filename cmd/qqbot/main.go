@@ -269,7 +269,9 @@ func (l *lazyGateway) FindUserByEmail(addr string) (*newapi.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.FindUserByEmail(addr)
+	u, err := c.FindUserByEmail(addr)
+	l.invalidateAfter(err)
+	return u, err
 }
 
 func (l *lazyGateway) GetUser(id int) (*newapi.User, error) {
@@ -278,9 +280,7 @@ func (l *lazyGateway) GetUser(id int) (*newapi.User, error) {
 		return nil, err
 	}
 	u, err := c.GetUser(id)
-	if err != nil {
-		l.invalidateAfter(err)
-	}
+	l.invalidateAfter(err)
 	return u, err
 }
 
@@ -301,7 +301,9 @@ func (l *lazyGateway) Groups() (map[string]struct{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.Groups()
+	g, err := c.Groups()
+	l.invalidateAfter(err)
+	return g, err
 }
 
 // ListUsers returns every account on the instance, for the user directory.
@@ -310,7 +312,9 @@ func (l *lazyGateway) ListUsers() ([]newapi.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.ListUsers()
+	us, err := c.ListUsers()
+	l.invalidateAfter(err)
+	return us, err
 }
 
 func (l *lazyGateway) AddQuota(userID, value int) error {
