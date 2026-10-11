@@ -23,6 +23,46 @@ import { createContext, useCallback, useContext, useEffect, useId, useMemo, useR
  */
 const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]'
 
+/**
+ * The closed dropdown control, shared by Select, Combobox and MultiSelect so
+ * the three cannot drift apart (they had already grown two left paddings).
+ *
+ * `pr-7` reserves the chevron's lane: the chevron is absolutely positioned by
+ * Chevron below, so the text would otherwise run underneath it.
+ */
+const CONTROL =
+  'h-8 w-full max-w-full min-w-0 rounded-control border border-input bg-background pl-2.5 pr-7 text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60'
+
+/** The dropdown panel chrome, shared by Combobox and MultiSelect. */
+const PANEL =
+  'scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg'
+
+/** One selectable row inside a dropdown panel. */
+const OPTION = 'cursor-pointer rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent'
+
+/**
+ * The dropdown chevron, drawn from the tokens rather than the OS glyph.
+ *
+ * Absolutely positioned at the right edge of its (relatively positioned)
+ * control, so all three dropdowns place it identically. It is
+ * pointer-events-none: the control underneath must stay clickable. When the
+ * control is disabled the chevron dims with it, because the control's own
+ * disabled:opacity-60 cannot reach a sibling.
+ */
+function Chevron({ open, disabled }: { open?: boolean; disabled?: boolean }) {
+  return (
+    <span className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2">
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 12 12"
+        className={`size-3 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''} ${disabled ? 'opacity-60' : ''}`}
+      >
+        <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </span>
+  )
+}
+
 export function Card({
   title,
   children,
@@ -113,21 +153,23 @@ export function Field({
   label,
   hint,
   children,
-  htmlFor,
 }: {
   label: string
   hint?: string
   children: ReactNode
-  htmlFor?: string
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1.5">
-      <label htmlFor={htmlFor} className="text-xs font-medium text-foreground/80">
-        {label}
-      </label>
+    // The label WRAPS the control (implicit association) rather than sitting
+    // beside it. A sibling <label htmlFor> only associates when the caller also
+    // threads an id onto the control, and no call site does — measured: all 11
+    // controls on 连接配置 had an empty accessible name and clicking a label
+    // focused nothing, so a screen reader read "edit text, blank" for every
+    // field. Wrapping associates every field with no call-site change.
+    <label className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-xs font-medium text-foreground/80">{label}</span>
       {children}
-      {hint && <p className="text-[11px] leading-4 text-muted-foreground">{hint}</p>}
-    </div>
+      {hint && <span className="text-[11px] leading-4 text-muted-foreground">{hint}</span>}
+    </label>
   )
 }
 
@@ -224,18 +266,11 @@ export function Select({
         disabled={disabled}
         aria-label={ariaLabel}
         onChange={(e) => onChange(e.target.value)}
-        className={`block h-8 w-full max-w-full min-w-0 cursor-pointer appearance-none rounded-control border border-input bg-background py-0 pl-2 pr-7 text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
+        className={`block cursor-pointer appearance-none py-0 ${CONTROL} ${FOCUS} ${className}`}
       >
         {children}
       </select>
-      {/* Dims with the control it labels: the select's own disabled:opacity-60 cannot reach a sibling. */}
-      <svg
-        aria-hidden="true"
-        viewBox="0 0 12 12"
-        className={`pointer-events-none absolute top-1/2 right-2 size-3 -translate-y-1/2 text-muted-foreground ${disabled ? 'opacity-60' : ''}`}
-      >
-        <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
+      <Chevron disabled={disabled} />
     </div>
   )
 }
@@ -438,25 +473,22 @@ export function Combobox({
         }}
         onBlur={() => setOpen(false)}
         onKeyDown={onKeyDown}
-        className={`block h-8 w-full max-w-full min-w-0 rounded-control border border-input bg-background px-2.5 text-sm text-foreground transition-colors placeholder:text-muted-foreground hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS} ${className}`}
+        className={`block placeholder:text-muted-foreground ${CONTROL} ${FOCUS} ${className}`}
       />
+      <Chevron open={open} disabled={disabled} />
       {open &&
         (filtered.length === 0 ? (
           // No matches: render the message as its own panel, NOT inside the
           // listbox. A listbox may only contain options, so a message inside it
           // is invalid markup and screen readers announce an empty list instead
           // of the explanation. role="status" announces the no-match case.
-          <div className="absolute z-30 mt-1 w-full rounded-panel border border-border bg-popover p-1 shadow-lg">
+          <div className={PANEL}>
             <p role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
               {emptyText}
             </p>
           </div>
         ) : (
-          <div
-            id={listId}
-            role="listbox"
-            className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
-          >
+          <div id={listId} role="listbox" className={PANEL}>
             {filtered.map((o, i) => (
               <div
                 // Two QQs may be bound to one account, which makes their
@@ -474,9 +506,7 @@ export function Combobox({
                 onMouseDown={(e) => e.preventDefault()}
                 onMouseEnter={() => setHi(i)}
                 onClick={() => commit(o)}
-                className={`cursor-pointer rounded-sm px-2 py-1.5 text-sm transition-colors ${
-                  i === hiIdx ? 'bg-accent text-accent-foreground' : 'text-foreground'
-                } hover:bg-accent`}
+                className={`${OPTION} ${i === hiIdx ? 'bg-accent text-accent-foreground' : 'text-foreground'}`}
               >
                 {o.label}
               </div>
@@ -525,17 +555,22 @@ export function MultiSelect({
       if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        setOpen(false)
-        btn.current?.focus()
-      }
+      if (e.key !== 'Escape') return
+      // Capture phase, and stopPropagation: a dropdown opened inside a Modal
+      // must consume the first Escape itself. React attaches the Modal's own
+      // onKeyDown at the root container, which runs before this document-level
+      // bubble listener ever sees the event — measured: one Escape closed both
+      // the dropdown AND the dialog, discarding the form being edited. Capture
+      // runs root->target, so it fires first and the Modal keeps its state.
+      e.stopPropagation()
+      setOpen(false)
+      btn.current?.focus()
     }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [open])
 
@@ -551,32 +586,26 @@ export function MultiSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
-        className={`flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-control border border-input bg-background px-2.5 text-left text-sm text-foreground transition-colors hover:border-ring/60 disabled:cursor-not-allowed disabled:opacity-60 ${FOCUS}`}
+        className={`flex items-center justify-between gap-2 text-left ${CONTROL} ${FOCUS}`}
       >
         <span className={`min-w-0 truncate ${selected.length === 0 ? 'text-muted-foreground' : ''}`}>
           {summary}
         </span>
-        <span className="flex shrink-0 items-center gap-1.5">
-          {selected.length > 0 && <Badge tone="accent">{selected.length}</Badge>}
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 12 12"
-            className={`size-3 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
-          >
-            <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
+        {selected.length > 0 && <Badge tone="accent">{selected.length}</Badge>}
       </button>
+      <Chevron open={open} disabled={disabled} />
 
       {open && (
-        <div
-          role="listbox"
-          aria-multiselectable="true"
-          className="scroll-slim absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-panel border border-border bg-popover p-1 shadow-lg"
-        >
+        // A checkbox group, not a listbox: the rows are real <input
+        // type="checkbox"> elements, so they carry their own state and keyboard
+        // behaviour. Marking this container role="listbox" (as it did) is
+        // invalid markup — a listbox may only own options — and axe flagged it
+        // critical (aria-required-children); the listbox also exposed 0 options,
+        // so the checkboxes were not reachable through it. role="group" names
+        // the popup without lying about its contents.
+        <div role="group" aria-label={ariaLabel} className={PANEL}>
           {options.length === 0 ? (
             <p className="px-2 py-1.5 text-xs text-muted-foreground">{emptyText}</p>
           ) : (
@@ -593,7 +622,7 @@ export function MultiSelect({
               {options.map((opt) => (
                 <label
                   key={opt}
-                  className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+                  className={`flex items-center gap-2 ${OPTION}`}
                 >
                   <input
                     type="checkbox"
@@ -916,8 +945,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div
         // Above the modal overlay (z-40) so a toast raised from a dialog is
         // still readable, and out of the pointer path except for its own
-        // controls.
-        className="pointer-events-none fixed inset-x-0 top-3 z-50 flex flex-col items-center gap-2 px-3 sm:items-end sm:pr-4"
+        // controls. Centred on every width: the top middle is where the eye
+        // already is after an action, and a corner stack gets missed.
+        className="pointer-events-none fixed inset-x-0 top-3 z-50 flex flex-col items-center gap-2 px-3"
         aria-live="polite"
         aria-atomic="false"
       >
@@ -955,7 +985,13 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     <div
       // An error interrupts; a success waits its turn in the polite queue.
       role={toast.tone === 'err' ? 'alert' : 'status'}
-      className={`pointer-events-auto flex w-full max-w-md items-start gap-2 rounded-panel border px-3 py-2 text-xs shadow-lg backdrop-blur-sm sm:w-auto ${t.box}`}
+      // The card stays click-through (the host is pointer-events-none) and only
+      // the dismiss button opts back in. The stack floats over the header, so a
+      // click-swallowing card silently eats taps on the tab row underneath it
+      // (measured: clicking 连接配置 while a toast covered it did nothing; the
+      // same click worked once the toast expired). A toast is not a modal — it
+      // must never intercept a control the operator can see.
+      className={`pointer-events-none flex w-full max-w-md items-start gap-2 rounded-panel border px-3 py-2 text-xs shadow-lg backdrop-blur-sm sm:w-auto ${t.box}`}
     >
       <svg aria-hidden="true" viewBox="0 0 16 16" className="mt-px size-4 shrink-0">
         {t.icon}
@@ -965,7 +1001,7 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
         type="button"
         aria-label="关闭提示"
         onClick={onDismiss}
-        className={`-mr-1 shrink-0 rounded-sm p-0.5 opacity-70 transition-opacity hover:opacity-100 ${FOCUS}`}
+        className={`pointer-events-auto -mr-1 shrink-0 rounded-sm p-0.5 opacity-70 transition-opacity hover:opacity-100 ${FOCUS}`}
       >
         <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3">
           <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
