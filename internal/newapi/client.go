@@ -398,6 +398,18 @@ func (c *Client) Refresh() error {
 	return c.installToken(data)
 }
 
+// Logout revokes the session this client holds, so it stops occupying one of the
+// account's 50 active sessions.
+//
+// It exists for the connection probe: proving credentials work requires logging
+// in, and a login mints a session, so a probe that did not revoke would leave a
+// permanent entry behind on every click with changed credentials — sessions live
+// 30 days, so repeated testing would eventually lock the account out. The route
+// sits behind the same SessionCookieOriginGuard as refresh, hence the Origin.
+func (c *Client) Logout() error {
+	return c.doWithOrigin(http.MethodPost, "/api/user/auth/logout", nil, nil, c.baseURL)
+}
+
 // Reauthenticate gets a usable token, preferring the cheap path: refresh the
 // existing session, and log in only when there is nothing to refresh.
 //

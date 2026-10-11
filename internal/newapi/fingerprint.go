@@ -3,7 +3,6 @@ package newapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 )
 
 // The gateway keys a login session on the request's User-Agent and IP (it
@@ -26,11 +25,6 @@ import (
 // endpoint) — what stops logins is reusing the stored session and refreshing
 // it, which is what the rest of this package does. The fingerprint is what
 // keeps that identity recognisable across restarts.
-// fingerprintSetting is the setting the fingerprint is derived from. The secret
-// itself lives in config (which generates and persists it); this name is here so
-// the two ends of that agreement are greppable together.
-const fingerprintSetting = "newapi.fingerprint_secret"
-
 // fingerprintBytes is how much of the digest is kept. 12 bytes is 24 hex
 // characters: far beyond any collision concern for a handful of clients, and
 // short enough to sit in a header next to the rest of the User-Agent.
@@ -77,21 +71,4 @@ func (c *Client) UserAgent() string {
 // userAgentWith returns the request's User-Agent value.
 func (c *Client) userAgentWith() string {
 	return c.UserAgent()
-}
-
-// looksLikeFingerprint reports whether s has the shape NewFingerprint emits.
-// A stored value that does not is treated as absent, so a corrupted setting
-// cannot be presented to the gateway as an identity.
-func looksLikeFingerprint(s string) bool {
-	s = strings.TrimSpace(s)
-	if len(s) != fingerprintBytes*2 {
-		return false
-	}
-	for _, r := range s {
-		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
-		if !isHex {
-			return false
-		}
-	}
-	return true
 }

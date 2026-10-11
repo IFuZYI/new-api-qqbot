@@ -447,10 +447,27 @@ func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool
 		// the operator asked for a test, so they get one.
 	}
 	c := newapi.New(url)
+	// Identify the throwaway client too. Without this its session row is
+	// anonymous, which defeats the point of the fingerprint: the operator could
+	// not tell this probe's leftover session from a real client's.
+	if p.gw != nil {
+		if secret := p.gw.cfg.SessionFingerprint(); secret != "" {
+			c.SetFingerprint(newapi.NewFingerprint(secret))
+		}
+	}
 	if err := c.Login(username, password); err != nil {
 		return nil, false, err
 	}
 	u, err := c.Self()
+	// Revoke the session the login just minted. The probe exists to prove the
+	// credentials work, and it can only do that by logging in — but leaving the
+	// session behind spends one of the account's 50 active sessions per click
+	// (they live 30 days), so repeated testing would lock the account out.
+	// A failed revoke is not worth failing the probe over: the credential check
+	// already succeeded, so it is reported as a warning by the caller.
+	if logoutErr := c.Logout(); logoutErr != nil {
+		log.Printf("new-api 连接测试：已登录但未能撤销测试会话（%v）；该会话会在 30 天后过期", logoutErr)
+	}
 	return u, false, err
 }
 

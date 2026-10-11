@@ -9,9 +9,9 @@ import (
 // new-api gates its refresh endpoint behind SessionCookieOriginGuard once
 // SESSION_COOKIE_SECURE is on (which its own startup warning tells operators to
 // set in production). That guard refuses any request without a same-origin
-// Origin/Referer, so a client that sends neither gets a 403 on every refresh —
-// and since login has no such guard, the service would silently fall back to a
-// login on every call, exhausting the account's session cap.
+// Origin/Referer, so a client that sends neither gets a 403 on every refresh.
+// Measured: refresh is then simply broken and every call fails — it does not
+// degrade into a login per call, because a 403 is excluded from IsAuthFailure.
 //
 // The refresh request must therefore carry an Origin matching the gateway it is
 // talking to, and the client must recognise the refusal as "this session cannot
