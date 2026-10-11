@@ -16,11 +16,16 @@ import (
 // deadSessionGateway models the operator revoking sessions in new-api's list:
 // while `revoked` is set, the session the client holds is refused. A login
 // clears it, because a login creates a new session.
+//
+// seenRefresh, when set, receives the value of every refresh cookie presented
+// to this instance — a test uses it to prove which credential reached which
+// host.
 type deadSessionGateway struct {
-	mu        sync.Mutex
-	revoked   bool
-	logins    atomic.Int32
-	refreshes atomic.Int32
+	mu          sync.Mutex
+	revoked     bool
+	logins      atomic.Int32
+	refreshes   atomic.Int32
+	seenRefresh chan string
 }
 
 func (g *deadSessionGateway) isRevoked() bool {
@@ -46,6 +51,21 @@ func (g *deadSessionGateway) handler() http.Handler {
 
 	mux.HandleFunc("/api/user/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
 		g.refreshes.Add(1)
+		// No cookie presented: the real gateway answers 401, and that is what
+		// makes the client log in. Modelling this is what lets a test tell
+		// "reused the stored session" from "logged in again".
+		ck, cerr := r.Cookie("new_api_refresh")
+		if cerr != nil || ck.Value == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			writeEnvelopeErr(w, "AUTH_UNAUTHORIZED")
+			return
+		}
+		if g.seenRefresh != nil {
+			select {
+			case g.seenRefresh <- ck.Value:
+			default:
+			}
+		}
 		if g.isRevoked() {
 			w.WriteHeader(http.StatusUnauthorized)
 			writeEnvelopeErr(w, "AUTH_SESSION_REVOKED")
@@ -176,6 +196,52 @@ func (l *lazyGateway) waitForSession() error {
 	}
 	_, err := l.ListUsers()
 	return err
+}
+
+// A stored session belongs to the host and account that issued it. Repointing
+// the service at another gateway must NOT present the first host's credential
+// to the second one — the refresh cookie would be transmitted verbatim to a
+// host that never issued it, which is both a credential leak and, when the two
+// are unrelated instances, a silent identity confusion.
+//
+// This is the defect the review proved: client() imported the stored session
+// whenever it rebuilt the client, and a URL change rebuilds it.
+func TestStoredSessionIsNotSentToANewHost(t *testing.T) {
+	// Host A: the service logs in and persists its session.
+	stubA := &deadSessionGateway{}
+	srvA, st, mgr, gw := newGatewayEnvFor(t, stubA)
+	if err := gw.waitForSession(); err != nil {
+		t.Fatalf("host A: could not establish a session: %v", err)
+	}
+	if got := mgr.LoadNewAPISession(config.SessionOrigin(srvA.URL, "napcat")); got == "" {
+		t.Fatal("host A: the session must be persisted")
+	}
+
+	// The operator repoints the service at host B. A fresh lazyGateway stands
+	// in for the rebuilt client (a config change drops the cached one).
+	seen := make(chan string, 4)
+	stubB := &deadSessionGateway{seenRefresh: seen}
+	srvB := httptest.NewServer(stubB.handler())
+	t.Cleanup(srvB.Close)
+
+	cfgB := mgr.MustLoad()
+	cfgB.NewAPI.URL = srvB.URL
+	if err := mgr.Save(cfgB); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	gwB := &lazyGateway{cfg: mgr, lockout: newapi.NewLockout(nil)}
+	if err := gwB.waitForSession(); err != nil {
+		t.Fatalf("host B: the service must work against the new host: %v", err)
+	}
+
+	// Whatever host B received, it must not be host A's token.
+	close(seen)
+	for token := range seen {
+		if token != "" && token == "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret" {
+			t.Fatalf("host B received host A's stored session verbatim — the credential leaked across hosts")
+		}
+	}
+	_ = st
 }
 
 // newGatewayEnvFor points a lazyGateway at an arbitrary stub, with a real store

@@ -198,8 +198,11 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 		c = newapi.New(cfg.NewAPI.URL)
 		// A restart has no jar to inherit, so the session from the last run is
 		// restored from storage. Without it every start would log in and add a
-		// session to the account's list.
-		if saved := l.cfg.LoadNewAPISession(); saved != "" {
+		// session to the account's list. It is looked up under this host and
+		// account: a session issued elsewhere is not this client's credential,
+		// and importing it would send it to a host that never issued it.
+		origin := config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username)
+		if saved := l.cfg.LoadNewAPISession(origin); saved != "" {
 			if err := c.ImportSession(saved); err != nil {
 				// A malformed value is not worth keeping; a well-formed one that
 				// is dead fails at the refresh below, which is where we find out.
@@ -227,9 +230,10 @@ func (l *lazyGateway) client() (*newapi.Client, error) {
 		}
 		return nil, err
 	}
-	// Remember the (possibly rotated) session for the next start.
+	// Remember the (possibly rotated) session for the next start, under the
+	// origin it was just issued for.
 	if s := c.ExportSession(); s != "" {
-		_ = l.cfg.SaveNewAPISession(s)
+		_ = l.cfg.SaveNewAPISession(config.SessionOrigin(cfg.NewAPI.URL, cfg.NewAPI.Username), s)
 	}
 	if l.lockout != nil {
 		l.lockout.Success()

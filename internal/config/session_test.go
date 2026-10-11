@@ -18,14 +18,47 @@ func TestSessionPersistsAcrossManagers(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	if err := NewManager(filepath.Join(dir, FileName), st).SaveNewAPISession(raw); err != nil {
+	origin := SessionOrigin("https://api.example.test", "napcat")
+	if err := NewManager(filepath.Join(dir, FileName), st).SaveNewAPISession(origin, raw); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
 	// A second Manager stands in for the next start of the process.
-	got := NewManager(filepath.Join(dir, FileName), st).LoadNewAPISession()
+	got := NewManager(filepath.Join(dir, FileName), st).LoadNewAPISession(origin)
 	if got != raw {
 		t.Errorf("LoadNewAPISession = %q, want %q", got, raw)
+	}
+}
+
+// A session is a credential for the host and account that issued it. Importing
+// it into a client pointed at another host would hand one instance's credential
+// to the other; loading it under a different account would silently keep acting
+// as the old one. Both must read as "no session".
+func TestSessionIsBoundToItsOrigin(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "s.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	m := NewManager(filepath.Join(dir, FileName), st)
+	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
+	origin := SessionOrigin("https://api.example.test", "napcat")
+	if err := m.SaveNewAPISession(origin, raw); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	if got := m.LoadNewAPISession(origin); got != raw {
+		t.Errorf("the same origin must load its own session, got %q", got)
+	}
+	for name, other := range map[string]string{
+		"a different host":    SessionOrigin("https://other.example.test", "napcat"),
+		"a different account": SessionOrigin("https://api.example.test", "someoneelse"),
+	} {
+		if got := m.LoadNewAPISession(other); got != "" {
+			t.Errorf("%s must not load the stored session, got %q", name, got)
+		}
 	}
 }
 
@@ -38,7 +71,8 @@ func TestSessionAbsentIsEmpty(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	if got := NewManager(filepath.Join(dir, FileName), st).LoadNewAPISession(); got != "" {
+	origin := SessionOrigin("https://api.example.test", "napcat")
+	if got := NewManager(filepath.Join(dir, FileName), st).LoadNewAPISession(origin); got != "" {
 		t.Errorf("a missing session must read as empty, got %q", got)
 	}
 }
@@ -54,13 +88,14 @@ func TestSessionCanBeCleared(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	m := NewManager(filepath.Join(dir, FileName), st)
-	if err := m.SaveNewAPISession("a.b"); err != nil {
+	origin := SessionOrigin("https://api.example.test", "napcat")
+	if err := m.SaveNewAPISession(origin, "a.b"); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.ClearNewAPISession(); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	if got := m.LoadNewAPISession(); got != "" {
+	if got := m.LoadNewAPISession(origin); got != "" {
 		t.Errorf("after clearing, got %q", got)
 	}
 }
@@ -77,13 +112,14 @@ func TestSavingConfigKeepsTheSession(t *testing.T) {
 
 	m := NewManager(filepath.Join(dir, FileName), st)
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	if err := m.SaveNewAPISession(raw); err != nil {
+	origin := SessionOrigin("https://api.example.test", "napcat")
+	if err := m.SaveNewAPISession(origin, raw); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Save(Config{NewAPI: NewAPI{URL: "https://api.example.test", Username: "napcat", Password: "pw"}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if got := m.LoadNewAPISession(); got != raw {
+	if got := m.LoadNewAPISession(origin); got != raw {
 		t.Errorf("the session must survive a config save, got %q", got)
 	}
 }
@@ -101,7 +137,7 @@ func TestSessionNeverAppearsInRenderedConfig(t *testing.T) {
 
 	m := NewManager(filepath.Join(dir, FileName), st)
 	const raw = "3f2504e0-4f89-11d3-9a0c-0305e82c3301.secret"
-	if err := m.SaveNewAPISession(raw); err != nil {
+	if err := m.SaveNewAPISession(SessionOrigin("https://api.example.test", "napcat"), raw); err != nil {
 		t.Fatal(err)
 	}
 	rendered := m.MustLoad().Redacted()
