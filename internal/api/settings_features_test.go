@@ -80,6 +80,10 @@ func TestActionCheckinMemberRecords(t *testing.T) {
 	srv, st, cl := newTestServer(t)
 	postJSONWith(t, cl, srv.URL+"/api/groups/refresh", map[string]any{}, nil)
 	postJSONWith(t, cl, srv.URL+"/api/groups", map[string]any{"group_ids": []int64{1129535731}}, nil)
+	// A check-in only counts for a bound member.
+	if err := st.SetBinding(store.Binding{QQ: 54321, NewAPIUserID: 7, NewAPIEmail: "54321@qq.com"}); err != nil {
+		t.Fatal(err)
+	}
 
 	var res struct {
 		Recorded bool   `json:"recorded"`

@@ -413,6 +413,7 @@ func (b bindAdapter) CheckinByMessage(groupID, qq int64) (events.CheckinOutcome,
 	return events.CheckinOutcome{
 		Recorded:         res.Recorded,
 		AlreadyCheckedIn: res.AlreadyCheckedIn,
+		Unbound:          res.Unbound,
 	}, err
 }
 

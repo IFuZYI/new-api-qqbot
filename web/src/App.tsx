@@ -339,7 +339,9 @@ function ManualCheckin({
       onDone(
         res.recorded
           ? `已为 ${qq} 记录 ${res.date} 的签到`
-          : `${qq} 在 ${res.date} 已经签过到（同一天只记一次）`,
+          : res.unbound
+            ? `${qq} 尚未绑定账号，绑定后才能签到`
+            : `${qq} 在 ${res.date} 已经签过到（同一天只记一次）`,
       )
     } catch (e) {
       onFail(e)

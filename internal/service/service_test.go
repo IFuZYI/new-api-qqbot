@@ -319,7 +319,9 @@ func TestAutoBindRefusesAmbiguousMatch(t *testing.T) {
 }
 
 func TestSyncCheckinsRecordsBoard(t *testing.T) {
-	svc, st, _, nc := newTestService(t)
+	svc, st, na, nc := newTestService(t)
+	bindForTest(t, svc, st, na, 54321)
+	bindForTest(t, svc, st, na, 99999)
 	nc.board[1] = []napcat.SignedMember{
 		{QQ: 54321, Nick: "爱丽丝", Time: 1791630000, Rank: 1},
 		{QQ: 99999, Nick: "bob", Time: 1791630600, Rank: 2},
@@ -344,7 +346,9 @@ func TestSyncCheckinsRecordsBoard(t *testing.T) {
 // The board is today-only and polled repeatedly; a later poll must merge, not
 // replace, so members who signed in earlier are not dropped.
 func TestSyncCheckinsIsAUnionAcrossPolls(t *testing.T) {
-	svc, st, _, nc := newTestService(t)
+	svc, st, na, nc := newTestService(t)
+	bindForTest(t, svc, st, na, 54321)
+	bindForTest(t, svc, st, na, 99999)
 	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
 	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
 		t.Fatal(err)
@@ -443,9 +447,9 @@ func TestAwardDoesNotPayTwice(t *testing.T) {
 }
 
 func TestAwardSkipsUnboundMembers(t *testing.T) {
-	svc, _, na, nc := newTestService(t)
-	nc.board[1] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Rank: 1}}
-	if _, err := svc.SyncCheckins(1, "2026-10-10"); err != nil {
+	svc, st, na, _ := newTestService(t)
+	// A row with no binding behind it, as an older version would have written.
+	if err := st.RecordCheckin(store.Checkin{QQ: 54321, Date: "2026-10-10", GroupID: 1}); err != nil {
 		t.Fatal(err)
 	}
 

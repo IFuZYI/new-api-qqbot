@@ -338,13 +338,33 @@ func (s *Service) SyncAllMembers() error {
 
 // SyncCheckins reads one group's sign-in board for date and records it. The
 // board is today-only and paginated, so repeated calls merge into a union.
+//
+// A board entry for a member with no binding is skipped, for the same reason the
+// message path skips it: the reward goes to the bound account, so the row could
+// never be paid. Such a member is recorded as a member (they are plainly in the
+// group), and the bind patrol picks them up; the next poll records the day once
+// they are bound.
 func (s *Service) SyncCheckins(groupID int64, date string) (int, error) {
 	ss, err := s.qq.GetGroupSignedList(groupID)
 	if err != nil {
 		return 0, err
 	}
+	// One read of the binding table for the whole board, not one per entry: a
+	// busy group's board is hundreds of rows per poll.
+	bound, err := s.boundSet()
+	if err != nil {
+		return 0, err
+	}
 	n := 0
 	for _, m := range ss {
+		if !bound[m.QQ] {
+			// Still record the member: seeing them on the board proves they are
+			// in the group, and the roster patrol may be switched off.
+			if err := s.EnsureMember(groupID, m.QQ, ""); err != nil {
+				return n, err
+			}
+			continue
+		}
 		if err := s.st.RecordCheckin(store.Checkin{
 			QQ: m.QQ, Date: date, GroupID: groupID, SignedAt: m.Time,
 			// NapCat's rank is fractional (see flexFloat); it is display-only,
@@ -356,6 +376,20 @@ func (s *Service) SyncCheckins(groupID int64, date string) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// boundSet returns the set of QQs that have an account bound, so a sweep can
+// test many members against one read of the binding table.
+func (s *Service) boundSet() (map[int64]bool, error) {
+	bs, err := s.st.ListBindings()
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[int64]bool, len(bs))
+	for _, b := range bs {
+		set[b.QQ] = true
+	}
+	return set, nil
 }
 
 // SyncAllCheckins sweeps the sign-in boards of every enabled group.
@@ -538,16 +572,23 @@ type CheckinResult struct {
 	// AlreadyCheckedIn distinguishes "you already checked in today" from a
 	// genuine store failure, which is returned as an error instead.
 	AlreadyCheckedIn bool `json:"already_checked_in"`
+	// Unbound reports that the member has no new-api account bound, which is why
+	// nothing was recorded. The reward is paid to the bound account, so a
+	// check-in without one could never be paid; the member is told to bind first.
+	Unbound bool `json:"unbound"`
 }
 
 // CheckinByMessage records a check-in for a member who sent a message.
 //
+// Only a member with a binding checks in: the reward goes to the bound new-api
+// account, so recording a check-in for an unbound member would show a "已签到"
+// day that no reward can ever clear. The member row is still recorded (the
+// message proves they are in the group, and the bind patrol needs to see them),
+// and the result says Unbound so the caller can tell the member to bind first.
+//
 // The day is the unit: the first qualifying message of the day records the
 // check-in and everything after it is a no-op, so chatting cannot farm rewards
-// (the reward is claimed once per (qq, date) by Award). The member row is
-// recorded as a side effect, because the message itself proves they are in the
-// group - which is what makes the check-in path work with the roster patrol
-// switched off.
+// (the reward is claimed once per (qq, date) by Award).
 //
 // A check-in recorded this way is upgraded if the sign-in board later reports
 // the same day (see store.RecordCheckin): the board knows the rank and the
@@ -559,6 +600,14 @@ func (s *Service) CheckinByMessage(groupID, qq int64) (CheckinResult, error) {
 	}
 	if err := s.EnsureMember(groupID, qq, ""); err != nil {
 		return res, err
+	}
+	bound, err := s.hasBinding(qq)
+	if err != nil {
+		return res, err
+	}
+	if !bound {
+		res.Unbound = true
+		return res, nil
 	}
 	date, err := s.Today()
 	if err != nil {
@@ -573,6 +622,19 @@ func (s *Service) CheckinByMessage(groupID, qq int64) (CheckinResult, error) {
 	res.Recorded = recorded
 	res.AlreadyCheckedIn = !recorded
 	return res, nil
+}
+
+// hasBinding reports whether a QQ already has a new-api account bound.
+func (s *Service) hasBinding(qq int64) (bool, error) {
+	_, err := s.st.GetBinding(qq)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, store.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // IsMonitoredGroup reports whether a group is selected for monitoring, so

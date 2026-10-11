@@ -55,6 +55,10 @@ type Service interface {
 type CheckinOutcome struct {
 	Recorded         bool
 	AlreadyCheckedIn bool
+	// Unbound means the member has no account bound yet, so the check-in was
+	// not recorded: the reward is paid to the bound account (see
+	// service.CheckinByMessage).
+	Unbound bool
 }
 
 // MessageEvent is the OneBot message event the listener cares about.
@@ -279,6 +283,9 @@ func (l *Listener) handleMessage(raw []byte) {
 			log.Printf("[events] check-in for %d failed: %v", ev.UserID, err)
 		case res.Recorded:
 			log.Printf("[events] recorded check-in for %d", ev.UserID)
+		case res.Unbound:
+			// Not an error: the member simply has to bind first.
+			log.Printf("[events] check-in for %d skipped: no account bound", ev.UserID)
 		}
 	}
 }

@@ -727,6 +727,7 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"date": date, "qq": in.QQ,
 			"recorded": res.Recorded, "already_checked_in": res.AlreadyCheckedIn,
+			"unbound": res.Unbound,
 		})
 
 	case "award":

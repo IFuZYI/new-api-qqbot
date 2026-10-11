@@ -19,11 +19,28 @@ func todayOf(t *testing.T, svc *Service) string {
 	return d
 }
 
+// bindForTest gives a member an account and binds them, which is now the
+// precondition for a check-in to count (see CheckinByMessage).
+func bindForTest(t *testing.T, svc *Service, st *store.Store, na *fakeNewAPI, qq int64) {
+	t.Helper()
+	na.byEmail[qqEmail(qq)] = newTestUser(int(qq%1000), "default")
+	if err := st.UpsertMembers(1, []store.Member{{QQ: qq, Nickname: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AutoBind(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetBinding(qq); err != nil {
+		t.Fatalf("precondition: %d should be bound: %v", qq, err)
+	}
+}
+
 // A message is a check-in in its own right: it carries no rank and no sign-in
 // time, and it must still be recorded.
 func TestCheckinByMessageRecords(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
+	svc, st, na, _ := newTestService(t)
 	enableTestGroup(t, st, 1129535731)
+	bindForTest(t, svc, st, na, 54321)
 
 	res, err := svc.CheckinByMessage(1129535731, 54321)
 	if err != nil {
@@ -49,8 +66,9 @@ func TestCheckinByMessageRecords(t *testing.T) {
 // A day is checked in once. Every further message that day is a no-op, which is
 // what stops a chatty member from farming rewards.
 func TestCheckinByMessageIsIdempotentPerDay(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
+	svc, st, na, _ := newTestService(t)
 	enableTestGroup(t, st, 1129535731)
+	bindForTest(t, svc, st, na, 54321)
 
 	first, err := svc.CheckinByMessage(1129535731, 54321)
 	if err != nil {
@@ -81,9 +99,10 @@ func TestCheckinByMessageIsIdempotentPerDay(t *testing.T) {
 // check-in, it must upgrade the row (rank, sign-in time, source) rather than be
 // ignored.
 func TestBoardUpgradesMessageCheckin(t *testing.T) {
-	svc, st, _, nc := newTestService(t)
+	svc, st, na, nc := newTestService(t)
 	enableTestGroup(t, st, 1129535731)
 	date := todayOf(t, svc)
+	bindForTest(t, svc, st, na, 54321)
 
 	if _, err := svc.CheckinByMessage(1129535731, 54321); err != nil {
 		t.Fatal(err)
@@ -108,9 +127,10 @@ func TestBoardUpgradesMessageCheckin(t *testing.T) {
 // The reverse order must not lose anything either: a message after the board
 // must not blank the rank or the sign-in time the board reported.
 func TestMessageCheckinDoesNotClobberBoardData(t *testing.T) {
-	svc, st, _, nc := newTestService(t)
+	svc, st, na, nc := newTestService(t)
 	enableTestGroup(t, st, 1129535731)
 	date := todayOf(t, svc)
+	bindForTest(t, svc, st, na, 54321)
 
 	nc.board[1129535731] = []napcat.SignedMember{{QQ: 54321, Nick: "a", Time: 1791630000, Rank: 7}}
 	if _, err := svc.SyncCheckins(1129535731, date); err != nil {
@@ -218,7 +238,8 @@ func TestCheckinByMessageRejectsZeroIdentity(t *testing.T) {
 // monitored: the member may have been recorded from a monitored group and be
 // seen in another. Filtering groups is the listener's job.
 func TestCheckinByMessageWorksForUnknownGroup(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
+	svc, st, na, _ := newTestService(t)
+	bindForTest(t, svc, st, na, 54321)
 	if _, err := svc.CheckinByMessage(999, 54321); err != nil {
 		t.Fatalf("CheckinByMessage: %v", err)
 	}

@@ -22,6 +22,10 @@ func TestMessageCheckinsCannotCauseDoubleReward(t *testing.T) {
 		t.Fatal(err)
 	}
 	na.byEmail["54321@qq.com"] = &newapi.User{ID: 7, Username: "seven", Group: "default", Role: 1}
+	// Bind first: a check-in only counts for a bound member.
+	if _, err := svc.AutoBind(); err != nil {
+		t.Fatal(err)
+	}
 
 	// A burst of messages: only the first may record.
 	for i := 0; i < 20; i++ {
@@ -35,10 +39,6 @@ func TestMessageCheckinsCannotCauseDoubleReward(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("20 messages produced %d check-in rows, want 1", len(rows))
-	}
-
-	if _, err := svc.AutoBind(); err != nil {
-		t.Fatal(err)
 	}
 
 	// Concurrent award sweeps: exactly one payment may reach the gateway.
@@ -72,9 +72,10 @@ func TestMessageCheckinsCannotCauseDoubleReward(t *testing.T) {
 // A message check-in for a member who leaves the group and comes back must not
 // be lost: the member row survives, and the day stays recorded.
 func TestMessageCheckinSurvivesGroupChange(t *testing.T) {
-	svc, st, _, _ := newTestService(t)
+	svc, st, na, _ := newTestService(t)
 	enableTestGroup(t, st, 1)
 	date := todayOf(t, svc)
+	bindForTest(t, svc, st, na, 54321)
 
 	if _, err := svc.CheckinByMessage(1, 54321); err != nil {
 		t.Fatal(err)
