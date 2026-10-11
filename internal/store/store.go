@@ -62,8 +62,18 @@ type Binding struct {
 	UpdatedAt      int64  `json:"updated_at"`
 }
 
-// Checkin is one member's sign-in on one day, as read from the group's
-// sign-in board. (QQ, Date) is the identity: re-polling the same day is a no-op.
+// Check-in sources: how the row was learned. A message is a first-hand
+// statement by the member, the board is QQ's own record of them. Both count as
+// a check-in for the day; the board is the richer row, so it upgrades a
+// message-sourced one (see RecordCheckin).
+const (
+	CheckinSourceBoard   = "board"
+	CheckinSourceMessage = "message"
+)
+
+// Checkin is one member's sign-in on one day. (QQ, Date) is the identity:
+// re-polling the same day is a no-op, whether the row came from the sign-in
+// board or from a message the member sent.
 type Checkin struct {
 	QQ          int64  `gorm:"primaryKey;autoIncrement:false" json:"qq"`
 	Date        string `gorm:"primaryKey;autoIncrement:false;type:varchar(10)" json:"date"`
@@ -72,6 +82,11 @@ type Checkin struct {
 	Rank        int    `json:"rank"`
 	RewardQuota int    `json:"reward_quota"`
 	RewardedAt  int64  `json:"rewarded_at"`
+
+	// Source records how the check-in was learned: board or message. The
+	// default keeps rows written before this column existed reading as board
+	// rows, which is what they were.
+	Source string `gorm:"default:board" json:"source"`
 }
 
 // Setting is a key/value configuration row; Value holds JSON.
@@ -419,17 +434,53 @@ func (s *Store) UnboundMembers() ([]Member, error) {
 
 // ---------- check-ins ----------
 
-// RecordCheckin stores a sign-in seen on the board. Re-recording the same
-// (qq, date) updates the observed rank/time but never touches RewardQuota or
-// RewardedAt, so a repeated poll cannot re-randomise or re-award.
+// RecordCheckin stores a check-in seen on the sign-in board. Re-recording the
+// same (qq, date) updates the observed rank/time but never touches RewardQuota
+// or RewardedAt, so a repeated poll cannot re-randomise or re-award.
+//
+// A board row supersedes a message-sourced one: the board is QQ's own record,
+// so it takes over the row and its source. The reverse cannot happen, because
+// RecordMessageCheckin never writes over an existing row.
 func (s *Store) RecordCheckin(c Checkin) error {
+	if c.Source == "" {
+		c.Source = CheckinSourceBoard
+	}
 	// Upsert on the (qq, date) primary key: two concurrent polls of the same
 	// board must not race between a read and an insert and trip the unique
 	// index, which would abort the rest of that group's sync.
 	return s.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "qq"}, {Name: "date"}},
-		DoUpdates: clause.AssignmentColumns([]string{"signed_at", "rank", "group_id"}),
+		Columns: []clause.Column{{Name: "qq"}, {Name: "date"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"signed_at": c.SignedAt,
+			"rank":      c.Rank,
+			"group_id":  c.GroupID,
+			"source":    c.Source,
+		}),
 	}).Create(&c).Error
+}
+
+// RecordMessageCheckin stores a check-in inferred from a message the member
+// sent. Unlike RecordCheckin it is strictly additive: a day already recorded
+// (from the board, or from an earlier message) is left exactly as it is, and
+// the call reports that it did not record anything. The board row is never
+// downgraded, because this never writes over an existing row.
+//
+// This is the (qq, date) idempotency guard for the message path, and it is why
+// a member cannot farm rewards by chatting: the row can only be created once.
+//
+// The insert is a single conditional statement rather than a read followed by a
+// write, so two messages racing on the same day cannot both report themselves
+// as the one that recorded it - which is the count the operator sees.
+func (s *Store) RecordMessageCheckin(c Checkin) (bool, error) {
+	c.Source = CheckinSourceMessage
+	res := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "qq"}, {Name: "date"}},
+		DoNothing: true,
+	}).Create(&c)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
 }
 
 // GetCheckin loads one member's sign-in for a date.
@@ -552,6 +603,21 @@ func (s *Store) PutSetting(key string, value any) error {
 	existing.Value = string(raw)
 	existing.UpdatedAt = now()
 	return s.db.Save(&existing).Error
+}
+
+// GetSettingRaw returns a setting's stored JSON without decoding it. Callers
+// that must tell "the field was never written" from "the field was cleared"
+// need the raw text, since both decode to the zero value.
+func (s *Store) GetSettingRaw(key string) (string, error) {
+	var rec Setting
+	err := s.db.First(&rec, "key = ?", key).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return rec.Value, nil
 }
 
 // GetSetting decodes a setting into out. A missing setting is not an error: it
