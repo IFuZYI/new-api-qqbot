@@ -158,10 +158,23 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Read each enabled group's roster once, for the QQ-side condition values.
-	groupMembers, err := s.rosterByQQ()
-	if err != nil {
-		return nil, err
+	// Read each enabled group's roster once, for the QQ-side condition values -
+	// but only when a rule in this batch actually looks at them. A set of
+	// gateway-only rules then costs no QQ request at all, which matters because
+	// this sweep runs on its own timer.
+	needQQData := false
+	for _, rule := range rules {
+		if rule.NeedsQQData() {
+			needQQData = true
+			break
+		}
+	}
+	groupMembers := map[int64]MemberContext{}
+	if needQQData {
+		groupMembers, err = s.rosterByQQ()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now().Unix()
@@ -259,7 +272,19 @@ func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
 		return nil, err
 	}
 
-	ctx, err := s.memberContext(qq, u)
+	// Only read QQ data if one of these rules actually looks at it. On the bind
+	// path this matters most: AutoBind calls this per member, so a
+	// gateway-only rule set would otherwise read every monitored group's roster
+	// once per newly bound member.
+	needQQData := false
+	for _, row := range rows {
+		if ruleFromStore(row).NeedsQQData() {
+			needQQData = true
+			break
+		}
+	}
+
+	ctx, err := s.memberContext(qq, u, needQQData)
 	if err != nil {
 		return nil, err
 	}
@@ -289,10 +314,19 @@ func (s *Service) ApplyOnBindRules(qq int64) ([]RuleRunResult, error) {
 }
 
 // memberContext assembles one member's rule context from QQ and the gateway.
-func (s *Service) memberContext(qq int64, u *newapi.User) (*MemberContext, error) {
+//
+// The roster is only read when a rule actually needs QQ-side data (see
+// Rule.NeedsQQData): the caller passes that in, so a set of gateway-only rules
+// costs no QQ request at all. When it is not needed, HasQQData stays false, and
+// a QQ-side condition would fail closed rather than read a zero level as a real
+// one - which is why the flag, not just the values, is what callers rely on.
+func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool) (*MemberContext, error) {
 	ctx := MemberContext{QQ: qq, Bound: u != nil, User: u}
 	if days, err := s.st.CountCheckins(qq); err == nil {
 		ctx.CheckinDays = days
+	}
+	if !needQQData {
+		return &ctx, nil
 	}
 
 	groups, err := s.st.EnabledGroups()

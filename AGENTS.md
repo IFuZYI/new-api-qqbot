@@ -112,6 +112,17 @@ below) and never as part of `go test`.
   "only these".** The master switch enables the path, the list decides which
   messages qualify. Reading the switch alone as "any message" would silently
   override a configured command list and check in everyone who speaks.
+- **A switched-off path makes no request at all.** Every sweep is gated on its
+  own switch, and the expensive ones (roster reads, sign-in boards) are gated
+  again at the point of the call: `SyncAllCheckins` is skipped when the board
+  patrol is off, and `rosterByQQ` / `memberContext` are skipped when no rule in
+  the batch has a QQ-side condition (`Rule.NeedsQQData`). Turning a feature off
+  must remove its traffic, not just its effects.
+- **Rewards are paid by the check-in loop, which therefore runs while either
+  check-in path is on.** The board read (one QQ request per group) and the award
+  step are separable: an operator running message check-ins with the board
+  patrol off must still be paid. Gating the whole loop on the board switch
+  silently stopped every reward — do not re-merge the two.
 - **An invalid command pattern is refused at save time** (`command.Parse`), with
   a 400 naming the problem. A pattern that can never match is the hardest failure
   of this feature to notice, so it must not be storable.

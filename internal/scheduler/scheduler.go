@@ -55,22 +55,41 @@ func (s *Scheduler) Run(ctx context.Context) {
 		return err
 	})
 
-	go s.loop(ctx, "checkins", s.checkinInterval, func() error {
-		date, err := s.svc.Today()
-		if err != nil {
-			return err
-		}
-		// Remember a sync failure: the award step usually succeeds, and its nil
-		// return would otherwise erase the error before the UI could read it,
-		// making a dead board look like a healthy patrol.
-		syncErr := s.svc.SyncAllCheckins(date)
-		if _, err := s.svc.Award(date); err != nil {
-			return err
-		}
-		return syncErr
-	})
+	go s.loop(ctx, "checkins", s.checkinInterval, s.runCheckinSweep)
 
 	<-ctx.Done()
+}
+
+// runCheckinSweep is the check-in patrol's body: read the sign-in board when that
+// path is on, then pay the day's rewards.
+//
+// The two are separable on purpose. Reading a board costs one QQ request per
+// monitored group and errors on every poll for a group without a board, so
+// "message check-ins only" is a normal configuration; rewards, however, must
+// still be paid, because a check-in that is never paid is the failure where
+// people sign in and get nothing. The loop therefore runs while either path is
+// on, and only the board read is skipped.
+func (s *Scheduler) runCheckinSweep() error {
+	cfg, err := s.svc.Settings()
+	if err != nil {
+		return err
+	}
+	date, err := s.svc.Today()
+	if err != nil {
+		return err
+	}
+
+	// Remember a sync failure: the award step usually succeeds, and its nil
+	// return would otherwise erase the error before the UI could read it,
+	// making a dead board look like a healthy patrol.
+	var syncErr error
+	if cfg.CheckinPatrolEnabled {
+		syncErr = s.svc.SyncAllCheckins(date)
+	}
+	if _, err := s.svc.Award(date); err != nil {
+		return err
+	}
+	return syncErr
 }
 
 // bindInterval returns 0 when the bind patrol is switched off or its interval
@@ -123,13 +142,18 @@ func (s *Scheduler) ruleInterval() time.Duration {
 	return time.Duration(best) * time.Minute
 }
 
-// checkinInterval returns 0 when the check-in patrol is switched off.
+// checkinInterval returns 0 when there is nothing for the check-in loop to do.
+//
+// The loop reads the board AND pays rewards, so it must run while either is
+// wanted: switching the board patrol off (the expensive path) must not stop
+// rewards for message check-ins. Only when both paths are off is there nothing
+// to do - and then no request is made at all.
 func (s *Scheduler) checkinInterval() time.Duration {
 	cfg, err := s.svc.Settings()
 	if err != nil {
 		return 30 * time.Minute
 	}
-	if !cfg.CheckinPatrolEnabled {
+	if !cfg.CheckinPatrolEnabled && !cfg.CheckinByMessageEnabled {
 		return 0
 	}
 	return time.Duration(cfg.CheckinSyncMinutes) * time.Minute

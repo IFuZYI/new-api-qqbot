@@ -156,6 +156,38 @@ func (r Rule) Validate() error {
 // RunsOnSchedule reports whether the rule takes part in the periodic sweep.
 func (r Rule) RunsOnSchedule() bool { return r.IntervalMinutes > 0 }
 
+// NeedsQQData reports whether evaluating this rule requires a QQ roster read.
+//
+// Reading a roster is this system's expensive call - one request per monitored
+// group, and the call NapCat serves from an in-process cache that still costs a
+// round trip - so a rule that can be decided from the gateway alone must not
+// cause one. Conditions that read QQ data (群等级 / QQ 等级 / 入群天数) need it;
+// the gateway-side ones (余额 / 请求数) and the check-in count do not.
+//
+// A rule whose conditions could not be decoded reports true: it fails closed
+// anyway (see Matches), and guessing "no QQ data needed" for a rule that might
+// have had a level condition would silently change its meaning.
+func (r Rule) NeedsQQData() bool {
+	if r.DecodeError != "" {
+		return true
+	}
+	for _, c := range r.Conditions {
+		if c.ConditionType.needsQQData() {
+			return true
+		}
+	}
+	return false
+}
+
+// needsQQData reports whether a condition is evaluated from QQ-side data.
+func (t ConditionType) needsQQData() bool {
+	switch t {
+	case CondGroupLevel, CondQQLevel, CondJoinDays:
+		return true
+	}
+	return false
+}
+
 // MemberContext is everything a rule can look at for one member.
 type MemberContext struct {
 	QQ    int64

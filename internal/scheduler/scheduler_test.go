@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,22 +16,77 @@ import (
 	"path/filepath"
 )
 
-type stubGateway struct{}
+// stubQQ counts what the sweep asked it for, so a test can prove a switched-off
+// feature made no request. It is package state because the stub is a value type
+// passed by value into service.New; the counters are reset per test.
+type stubQQState struct {
+	mu         sync.Mutex
+	boardCalls int
+	boardErr   error
+	awardRuns  int
+}
 
-func (stubGateway) FindUserByEmail(string) (*newapi.User, error) { return nil, nil }
-func (stubGateway) GetUser(int) (*newapi.User, error)            { return &newapi.User{}, nil }
-func (stubGateway) SetGroup(*newapi.User, string) error          { return nil }
-func (stubGateway) AddQuota(int, int) error                      { return nil }
-func (stubGateway) Groups() (map[string]struct{}, error)         { return map[string]struct{}{}, nil }
-func (stubGateway) ListUsers() ([]newapi.User, error)            { return nil, nil }
+var stubState stubQQState
+
+func resetStubQQ() {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	stubState.boardCalls = 0
+	stubState.boardErr = nil
+	stubState.awardRuns = 0
+}
+
+func stubBoardCalls() int {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	return stubState.boardCalls
+}
+
+func stubAwardRan() bool {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	return stubState.awardRuns > 0
+}
+
+func setStubBoardErr(err error) {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	stubState.boardErr = err
+}
+
+// errString is a tiny error type so a test can name an error inline.
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 type stubQQ struct{}
 
 func (stubQQ) GetGroupList() ([]napcat.Group, error)                  { return nil, nil }
 func (stubQQ) GetGroupMemberList(int64) ([]napcat.GroupMember, error) { return nil, nil }
 func (stubQQ) GetGroupSignedList(int64) ([]napcat.SignedMember, error) {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	stubState.boardCalls++
+	if stubState.boardErr != nil {
+		return nil, stubState.boardErr
+	}
 	return nil, nil
 }
+
+// stubGateway counts award calls, so a test can prove the reward step ran.
+type stubGateway struct{}
+
+func (stubGateway) FindUserByEmail(string) (*newapi.User, error) { return nil, nil }
+func (stubGateway) GetUser(int) (*newapi.User, error)            { return &newapi.User{}, nil }
+func (stubGateway) SetGroup(*newapi.User, string) error          { return nil }
+func (stubGateway) AddQuota(int, int) error {
+	stubState.mu.Lock()
+	defer stubState.mu.Unlock()
+	stubState.awardRuns++
+	return nil
+}
+func (stubGateway) Groups() (map[string]struct{}, error) { return map[string]struct{}{}, nil }
+func (stubGateway) ListUsers() ([]newapi.User, error)    { return nil, nil }
 
 // enableSchedGroup registers one monitored group and turns monitoring on (a
 // newly discovered group is disabled until the operator selects it).
@@ -40,6 +96,25 @@ func enableSchedGroup(t *testing.T, st *store.Store, id int64) {
 		t.Fatal(err)
 	}
 	if err := st.SetGroupEnabled(id, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// enableSchedMember records a member in a group.
+func enableSchedMember(t *testing.T, st *store.Store, groupID, qq int64) {
+	t.Helper()
+	if err := st.UpsertMembers(groupID, []store.Member{{QQ: qq, Nickname: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// enableSchedBinding gives a member an account binding, so the award step has
+// somewhere to pay.
+func enableSchedBinding(t *testing.T, st *store.Store, qq int64, userID int) {
+	t.Helper()
+	if err := st.SetBinding(store.Binding{
+		QQ: qq, NewAPIUserID: userID, NewAPIUsername: "u", Source: "manual",
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -74,14 +149,17 @@ func TestIntervalsAreZeroWhenPatrolDisabled(t *testing.T) {
 
 	s.MemberPatrolEnabled = false
 	s.CheckinPatrolEnabled = false
+	s.CheckinByMessageEnabled = false
 	if err := svc.SaveSettings(s); err != nil {
 		t.Fatal(err)
 	}
 	if got := sched.memberInterval(); got != 0 {
 		t.Errorf("disabled member patrol must report 0, got %s", got)
 	}
+	// The check-in loop also pays rewards, so it stops only when both of its
+	// paths are off; that is asserted in checkin_sweep_test.go.
 	if got := sched.checkinInterval(); got != 0 {
-		t.Errorf("disabled check-in patrol must report 0, got %s", got)
+		t.Errorf("with both check-in paths off the loop must report 0, got %s", got)
 	}
 }
 

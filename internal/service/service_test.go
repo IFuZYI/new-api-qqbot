@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 
 	"qqbot/internal/napcat"
@@ -133,6 +134,23 @@ type fakeNapCat struct {
 	members  map[int64][]napcat.GroupMember
 	board    map[int64][]napcat.SignedMember
 	boardErr map[int64]error
+
+	// rosterCalls counts GetGroupMemberList invocations. Reading a roster is the
+	// expensive call this system makes (one request per monitored group), so the
+	// count is how a test proves a feature did not make it.
+	rosterCalls int
+}
+
+// memberListCalls reports how many roster reads have happened.
+func (f *fakeNapCat) memberListCalls() int { return f.rosterCalls }
+
+// newTestUser builds an account fixture. It carries a non-zero quota so a
+// gateway-side condition (余额/请求数) has something to compare against.
+func newTestUser(id int, group string) *newapi.User {
+	return &newapi.User{
+		ID: id, Username: "u" + strconv.Itoa(id), Group: group, Role: 1,
+		Quota: 1000, RequestCount: 10,
+	}
 }
 
 func newFakeNapCat() *fakeNapCat {
@@ -146,6 +164,7 @@ func newFakeNapCat() *fakeNapCat {
 func (f *fakeNapCat) GetGroupList() ([]napcat.Group, error) { return f.groups, nil }
 
 func (f *fakeNapCat) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error) {
+	f.rosterCalls++
 	return f.members[groupID], nil
 }
 
