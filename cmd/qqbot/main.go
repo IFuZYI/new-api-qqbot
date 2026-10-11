@@ -456,6 +456,11 @@ func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool
 		}
 	}
 	if err := c.Login(username, password); err != nil {
+		// Known limit: if the gateway minted a session but the response did not
+		// arrive intact (a transport drop, an unreadable body), that session is
+		// not revoked — we hold no usable cookie to revoke it with. It ages out
+		// in 30 days and the operator can revoke it from the panel meanwhile;
+		// the alternative (revoking blind) needs a credential we do not have.
 		return nil, false, err
 	}
 	u, err := c.Self()

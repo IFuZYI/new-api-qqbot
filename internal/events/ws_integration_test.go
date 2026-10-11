@@ -148,6 +148,7 @@ func TestProbeConnectsAndCloses(t *testing.T) {
 	var mu sync.Mutex
 	var gotAuth string
 	var upgraded int
+	upgradedCh := make(chan struct{}, 1)
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -160,6 +161,10 @@ func TestProbeConnectsAndCloses(t *testing.T) {
 		mu.Lock()
 		upgraded++
 		mu.Unlock()
+		select {
+		case upgradedCh <- struct{}{}:
+		default:
+		}
 		defer conn.Close()
 		// Hold it open long enough for Probe to consider the dial a success.
 		time.Sleep(500 * time.Millisecond)
@@ -169,6 +174,15 @@ func TestProbeConnectsAndCloses(t *testing.T) {
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 	if err := Probe(url, "probe-tok"); err != nil {
 		t.Fatalf("Probe: %v", err)
+	}
+	// Probe returns as soon as the dial succeeds; the server counts the upgrade
+	// on its own goroutine, which may not have run yet. Wait for the count
+	// rather than assuming it already happened — that assumption is what made
+	// this test fail intermittently.
+	select {
+	case <-upgradedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server never saw the upgrade")
 	}
 	mu.Lock()
 	defer mu.Unlock()

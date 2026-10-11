@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"strings"
+	"sync"
 
 	"qqbot/internal/store"
 )
@@ -89,6 +91,14 @@ func (m *Manager) ClearNewAPISession() error {
 // from, generated on first use.
 const fingerprintSecretSetting = "newapi.fingerprint_secret"
 
+// fingerprintMu serialises the get-or-create below. Two callers reach it on a
+// cold row — the live client's build path (under lazyGateway's lock) and the
+// connection probe (under no such lock) — and a read-then-write race there
+// would let both generate, leaving the database holding the loser's value while
+// a client keeps using its own, i.e. an identity that disagrees with the stored
+// one until the next rebuild.
+var fingerprintMu sync.Mutex
+
 // SessionFingerprint returns the secret this service derives its gateway
 // fingerprint from, generating and persisting one on first use.
 //
@@ -102,9 +112,18 @@ const fingerprintSecretSetting = "newapi.fingerprint_secret"
 // after a restart and inside a rebuilt container — which is the whole point:
 // the gateway records the fingerprint on the session row, and a value that
 // changed per start would look like a new device every time.
+//
+// An empty return means the fingerprint is unavailable (the store could not be
+// read, or the system RNG failed). Callers present the plain User-Agent in that
+// case rather than an unstable value; the failure is logged because otherwise
+// the service would look like an older build forever with no explanation.
 func (m *Manager) SessionFingerprint() string {
+	fingerprintMu.Lock()
+	defer fingerprintMu.Unlock()
+
 	var secret string
 	if err := m.st.GetSetting(fingerprintSecretSetting, &secret); err != nil {
+		log.Printf("无法读取设备指纹密钥（%v）；本次运行将不带指纹", err)
 		return ""
 	}
 	if secret != "" {
@@ -112,13 +131,16 @@ func (m *Manager) SessionFingerprint() string {
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
+		log.Printf("无法生成设备指纹密钥（%v）；本次运行将不带指纹", err)
 		return ""
 	}
 	secret = hex.EncodeToString(raw)
 	// A failed write still returns the value for this process: an unstable
 	// identity is worse than an unpersisted one, and the next start simply
 	// generates another.
-	_ = m.st.PutSetting(fingerprintSecretSetting, secret)
+	if err := m.st.PutSetting(fingerprintSecretSetting, secret); err != nil {
+		log.Printf("无法保存设备指纹密钥（%v）；重启后指纹会变", err)
+	}
 	return secret
 }
 

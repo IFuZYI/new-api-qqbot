@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"qqbot/internal/store"
@@ -76,5 +77,46 @@ func TestSessionFingerprintSecretIsGeneratedOnceAndPersisted(t *testing.T) {
 	// A fresh manager over the same store (i.e. a restart) must read it back.
 	if again := NewManager(filepath.Join(t.TempDir(), FileName), st).SessionFingerprint(); again != first {
 		t.Fatalf("secret was not persisted: %q then %q", first, again)
+	}
+}
+
+// Two callers can reach the get-or-create at the same moment on a cold row: the
+// live client's build path and the connection probe. A read-then-write race
+// there lets both generate, and the loser's value is what ends up in the
+// database while it keeps using its own — so the service's identity would
+// differ from the stored one until the next rebuild. Whichever secret wins must
+// be the one every caller sees.
+func TestSessionFingerprintIsStableUnderConcurrentFirstUse(t *testing.T) {
+	st := newFingerprintStore(t)
+	m := NewManager(filepath.Join(t.TempDir(), FileName), st)
+
+	const callers = 16
+	results := make([]string, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = m.SessionFingerprint()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Every concurrent caller must agree, and the agreed value must be the one
+	// that was persisted (so the next process presents the same identity).
+	first := results[0]
+	if first == "" {
+		t.Fatal("a concurrent first read must still produce a secret")
+	}
+	for i, got := range results {
+		if got != first {
+			t.Fatalf("caller %d saw a different secret: %q vs %q", i, got, first)
+		}
+	}
+	if stored := NewManager(filepath.Join(t.TempDir(), FileName), st).SessionFingerprint(); stored != first {
+		t.Fatalf("persisted secret %q differs from the one the callers used %q", stored, first)
 	}
 }
