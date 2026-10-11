@@ -160,6 +160,109 @@ fail closed，表现成「规则好像不生效」，是最难查的一种。
 比较，B 实例立即收到 A 的令牌，测试报「credential leaked across hosts」），以及
 `internal/config` 的 `TestSessionIsBoundToItsOrigin`（覆盖改账号 / 改密码 / 尾斜杠）。
 
+## 鲁棒性：边界与失败方向
+
+这一节记的是「出错时往哪边倒」——每一处都是**故意**选的，改之前先读这里的理由。
+
+**规则里存的 JSON 一律 fail closed。** `ruleFromStore` 解两个列表字段
+（`source_groups` / `conditions`），任一解不开就把整条规则标成不可用（`DecodeError`），
+`Rule.Matches` 直接拒绝。理由是两个字段的**空值都有语义**：空 `source_groups` 是
+「任意分组」，空 `conditions` 是「无附加限制」。所以「解不开就当空」等于**把规则放宽**——
+一条定向规则会变成全量转换，把所有已绑定成员的账号搬进目标分组。反方向（解不开就当空）
+在 `conditions` 上早就防住了，`source_groups` 曾经漏了，由
+`TestCorruptSourceGroupsDoesNotWidenTheRule` 钉住。
+
+**HTTP 两侧都有体积上限。** 请求体由 `api.decode` 里的 `http.MaxBytesReader` 限住——
+`/api/auth/state|setup|login|logout` 是**未鉴权**路由，任何人都能 POST，不设上限就是把
+内存交给匿名调用者。响应体由两个外部客户端的 `readBody` 限住（各 8 MiB）：它**多读一个字节**
+来判断「正常结束」还是「撞到上限」，否则被截断的 JSON 会以「解析失败」的面目出现，
+运维会去查一个不存在的网关 bug。两个上限各自有测试，其中响应体那条必须用**无限流**
+（`TestReadBodyStopsAtTheCap`）——用有限 body 的测试在去掉上限后照样通过，测不到内存边界。
+
+**HTTP 面自己 recover panic。** `Router.Handler` 把 mux 包在 `recoverPanics` 里。
+`net/http` 本来就会 recover，但它随后**关掉连接**：调用方拿到 EOF 而不是响应（在面板里
+就是「点了没反应」），而且**一条日志都没有**。测试驱动的是 `Router.Handler` 而不是中间件
+本身，所以拆掉接线会失败——这一点是实测出来的：直接测中间件时，把 `Handler()` 改回
+裸 mux 测试仍然通过。
+
+**未鉴权路由的 500 不回内部细节。** `writeAuthErr` 对 ≥500 只回「服务器内部错误，请查看
+服务端日志」并把原文写日志；4xx（密码错、密码太短）照旧回具体原因，因为它们不泄露进程内部。
+已鉴权路由保留细节——运维需要它。
+
+**QQ 侧的 OneBot → WebUI 回退由 `napcat.Failover` 驱动，触发条件是「调用失败」而不只是
+「构造失败」。** 这是实测出来的差别：构造一个 OneBot 客户端只是拼 URL，永远成功；而
+NapCat 最常见的故障是 **QQ 登录态失效**——此时 OneBot 端口仍在监听并返回错误信封，
+WebUI 桥却是好的（NapCat 故意在登录前就启动 WebUI，好让运营用它完成登录）。只在构造
+失败时回退的写法，在这个状态下**永远走不到 WebUI**。两边都失败时错误用 `errors.Join`
+同时带上两个原因（运维要知道两条路都断了），且保留 `errors.Is` 语义，所以
+`ErrNoSigninBoard` 这类「正常情况」仍能被识别。
+
+## UI：对比度与可达性的取舍
+
+这一节记的是「装饰与无障碍冲突时谁赢」——两个都是实测数字，不是设计偏好。
+
+**边缘渐隐不得削弱焦点环。** 页签条用 3rem 的 `mask-image` 提示「还能横向滚动」，但 mask
+会**乘算其下所有内容的 alpha**，而焦点环画在页签盒子**外面**（`outline-offset: 2px`），正好
+落在渐隐斜坡里。像素采样（390 视口、最后一个页签、浅色、`data-scroll=start`）：
+
+| | 环的采样值 | 对比度 |
+|---|---|---|
+| 渐隐生效 | rgb(161,205,238) | **1.68:1** ✗ |
+| `.tab-strip:focus-within { mask-image: none }` | rgb(0,119,210) | **4.60:1** ✓ |
+
+WCAG 1.4.11 要求非文本指示器 ≥3:1。规则是 **`:focus-within` 时关掉渐隐**：焦点在条内意味着
+运维已经找到这个条了，提示的使命完成，焦点指示器必须赢。（反向验证：强制把渐隐加回来 →
+掉回 1.68:1。）
+
+**被裁的页签要能被键盘滚进视野。** 最后一个页签在 390 视口 box x=360-432、条右边界 374
+——只露 14px。Chrome 判定「部分可见」因此**不做 focus 滚动**，Tab 落上去时页面毫无提示。
+`onFocus` 里加 `scrollIntoView({ inline: 'nearest', block: 'nearest' })` 后实测
+`scrollLeft 0 → 58`，元素完全在视口内。
+
+**关闭态用表面色带，不用整块 opacity。** `opacity-60` 会**乘算所有后代文字的 alpha**，
+提示灰在浅色卡片只有 2.63:1；改表面色带后文字对比 6.0:1。语义上也更对：关闭是「表面变了」，
+不是「整个卡片变淡」。
+
+色带本身有两个反例数字要记住（都是实测，第二次才修对）：
+
+- **不要加内边距。** 早先的 `p-3` 版本在开关一翻的瞬间把输入框右移 12px、卡片撑高 24px
+  （实测 227px → 251px），关掉一个功能会把整页往下推——正好是注释里承诺的「nothing jumps
+  around」的反面。色带的盒子就是卡片内容盒，两态几何完全一致（现在两态都是 227px）。
+- **`bg-muted` 而不是 `bg-muted/50`。** 半档 muted 在浅色卡片上合成 `rgb(250,250,250)`，
+  只有 **1.044:1**——低于 `--table-header` 注释里写下的「浅色下最小可见台阶」1.10:1，
+  且贴近它判定为「消失」的 1.035:1。等于把「文字读不清」换成了「色带看不见」。
+  全档 `bg-muted` 实测 1.09:1 浅 / 1.072:1 深，与 muted 徽标同一种表面。
+
+**字号是三层，不是漂移。** 表格里出现 11/12/14px 曾被认为是缺陷，实测确认是**按内容类型**
+分的层：11px = 徽标 chip（全站唯一）、12px = 次要说明、14px = 正文（`td` 与上游
+`[&_td]:text-sm` 一致）。三档各有语义，且与 `index.css` 的字号阶梯相符。
+
+上游 Table 那种「把 `font-size: inherit` 压到整棵子树」的做法**试过后已回退**：它会把 11px 的
+chip 和 12px 的操作按钮一起顶到 14px，徽标变大、表格变高，换不到任何东西。`ui.tsx` 的
+`Table` 注释记着这件事，代码与注释自洽——**这条不需要再"对齐"一次**。
+
+**操作员的错误文案一律简体中文。** 包括被 `%w` 包裹的内层原因——`validateURL` 的
+`missing host` 会经 `NapCat.Validate` → 保存配置的 toast 显示给操作员，所以它也必须中文。
+判断标准是**「会不会出现在 toast 里」**，不是「是不是顶层 error」。
+
+**列表字段的 JSON 线格式恒为数组，永不为 `null`。** Go 的 nil slice 序列化成 `null`，而面板
+把它们声明成数组并直接 `.length`，**没有 ErrorBoundary**——一个 `null` 不是让那一行降级，
+而是让**整个页面白屏**（实测：payload 里 `source_groups: null` → `TypeError: Cannot read
+properties of null (reading 'length')` → nav/main/body 全空）。
+`ruleFromStore` 因此在解码失败时把字段置为 `[]` 而不是留 `nil`：「这条规则不可用」由
+`DecodeError` 表达，字段本身不需要是 null 才能说明这件事。
+由 `TestUnreadableRuleStillMarshalsListsAsArrays` 钉住（变异验证：改回 nil → 测试报出
+`marshalled as null`）。
+
+**损坏的规则必须在界面上看得出来。** 后端拒绝匹配是第一步；但如果面板把一条损坏规则渲染成
+一条正常的「任意分组」规则，运维就永远不会知道它已经停止工作。`decode_error` 现在驱动一个
+红色徽标「规则已损坏，不匹配任何人」。
+
+**回退路径必须能撑住一整轮 sweep。** OneBot 逐组失败时每次都新建 WebUI 并登录，200 个组就是
+200 次登录——而 NapCat 对自己的登录接口**有限流**，回退会在一轮中途失效，把「还有一条可用
+的路」变成「两条路都没了」。`lazyQQ` 因此缓存已登录的桥（配置指纹变化才重新登录），
+由 `TestWebUIClientLogsInOnce` 钉住（变异验证：去掉缓存 → 「logged in 3 times, want 1」）。
+
 ## 本机 NapCat 已完成的配置
 
 通过 WebUI 热写入 `onebot11_3688665216.json`（无需重启，实测生效）：
