@@ -408,8 +408,19 @@ func TestSaveSectionNapCatLeavesTheGatewayAlone(t *testing.T) {
 	}
 
 	got := m.MustLoad()
-	if got.NapCat.OneBotToken != "new-ob" || got.NapCat.EventWSToken != "new-ws" {
-		t.Errorf("NapCat section not saved: %+v", got.NapCat)
+	// Pin the WHOLE saved section, not a couple of its fields: asserting two of
+	// six would stay green if a save dropped WebUIURL, WebUIToken, OneBotURL or
+	// EventWSURL.
+	wantNapCat := NapCat{
+		WebUIURL:     "http://127.0.0.1:6099",
+		WebUIToken:   "new-webui",
+		OneBotURL:    "http://127.0.0.1:3002",
+		OneBotToken:  "new-ob",
+		EventWSURL:   "ws://127.0.0.1:3001",
+		EventWSToken: "new-ws",
+	}
+	if got.NapCat != wantNapCat {
+		t.Errorf("NapCat section not saved:\n got %+v\nwant %+v", got.NapCat, wantNapCat)
 	}
 	if got.NewAPI != full.NewAPI {
 		t.Errorf("gateway section was clobbered by a NapCat save:\n got %+v\nwant %+v", got.NewAPI, full.NewAPI)

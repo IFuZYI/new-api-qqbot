@@ -14,6 +14,10 @@ export default function Login({ needsSetup, onDone }: { needsSetup: boolean; onD
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
+    // The disabled attribute stops every user path, but a programmatic
+    // requestSubmit() while a login is in flight would fire the handler again
+    // (measured: 3 requests). Guarding in-function closes that.
+    if (busy) return
     setErr('')
     if (!username.trim()) {
       setErr('请输入用户名')

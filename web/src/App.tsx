@@ -1041,24 +1041,47 @@ function Connection({
   const [napcatCheck, setNapcatCheck] = useState<CheckResult[] | null>(null)
   const [cur, setCur] = useState('')
   const [next, setNext] = useState('')
+  const [loadErr, setLoadErr] = useState('')
 
   const apply = useCallback((r: { config: Config; revisions: ConfigRevisions }) => {
     setC(r.config)
     setRevs(r.revisions)
+    setLoadErr('')
   }, [])
 
   const load = useCallback(() => {
+    // Report the failure BOTH ways: a toast says what went wrong now, and the
+    // inline error (below) keeps a retry on screen — a toast expires, and the
+    // card would otherwise sit on 载入中… forever with no way forward.
     api
       .getConfig()
       .then((r) => apply(r))
-      .catch(onFail)
+      .catch((e) => {
+        setLoadErr(e instanceof Error ? e.message : String(e))
+        onFail(e)
+      })
   }, [apply, onFail])
 
   useEffect(() => {
     load()
   }, [load])
 
-  if (!c) return <Card title="连接配置">载入中…</Card>
+  if (!c) {
+    return (
+      <Card title="连接配置">
+        {loadErr ? (
+          <div className="space-y-3">
+            <ErrorNote>{loadErr}</ErrorNote>
+            <Button size="sm" onClick={load}>
+              重试
+            </Button>
+          </div>
+        ) : (
+          '载入中…'
+        )}
+      </Card>
+    )
+  }
 
   // Testing is a separate action from saving: the operator can check what they
   // typed before committing it, and a failed test never blocks a save.

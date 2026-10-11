@@ -991,6 +991,19 @@ func TestStaticCachingDistinguishesIndexFromHashedAssets(t *testing.T) {
 		t.Errorf("hashed asset Cache-Control = %q, want %q", cc, hashedAssetCacheControl)
 	}
 
+	// A missing file under /assets/ falls back to index.html, so it must carry
+	// index.html's rule. Without this case a mutation that hoists the asset
+	// header above the os.Stat branch keeps every other assertion green while
+	// caching that HTML for a year — and a later deploy that ships a file of
+	// that name would then serve a stale page from cache.
+	cc, ct = get("/assets/does-not-exist.js")
+	if cc != indexCacheControl {
+		t.Errorf("missing asset fallback Cache-Control = %q, want %q", cc, indexCacheControl)
+	}
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("missing asset fallback Content-Type = %q, want html", ct)
+	}
+
 	// A file served from the root is not content-hashed, so it must revalidate
 	// like index.html: an operator can replace it under the same name.
 	if err := os.WriteFile(filepath.Join(dir, "favicon.ico"), []byte("x"), 0o644); err != nil {

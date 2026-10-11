@@ -435,10 +435,13 @@ export function Combobox({
         type="text"
         role="combobox"
         aria-expanded={open}
-        // Only point at the listbox when it is mounted with options: the
-        // no-match panel carries no listbox role, and a dangling aria-controls
-        // is worse than none.
-        aria-controls={open && filtered.length > 0 ? listId : undefined}
+        // ARIA 1.2 makes aria-controls required on a combobox whenever
+        // aria-expanded is true, so it points at whichever popup is actually
+        // rendered: the listbox, or the no-match panel — which carries the same
+        // id, because the requirement is that the reference resolves, not that
+        // the target's role be listbox. Pointing at nothing (as this did in the
+        // no-match state) is what axe flags, critical.
+        aria-controls={open ? listId : undefined}
         aria-activedescendant={open && hiIdx >= 0 ? optId(hiIdx) : undefined}
         aria-autocomplete="list"
         aria-label={ariaLabel}
@@ -482,7 +485,10 @@ export function Combobox({
           // listbox. A listbox may only contain options, so a message inside it
           // is invalid markup and screen readers announce an empty list instead
           // of the explanation. role="status" announces the no-match case.
-          <div className={PANEL}>
+          //
+          // It carries the listbox's id because aria-controls must resolve to
+          // whatever popup is open; the id names the popup, not the role.
+          <div id={listId} className={PANEL}>
             <p role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
               {emptyText}
             </p>
@@ -888,6 +894,9 @@ export function useToast() {
 // error carries the server's message) more still.
 const TOAST_MS: Record<ToastTone, number> = { ok: 4000, info: 5000, err: 9000 }
 
+/** How many cards may be on screen at once. */
+const TOAST_MAX = 4
+
 /**
  * ToastProvider renders the toast stack and hands the API down. It lives above
  * the whole panel, so a message survives a tab change — the operator switches
@@ -900,6 +909,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // Track timers so an unmount does not leave callbacks running, and so closing
   // a toast by hand cancels its own dismissal.
   const timers = useRef(new Map<number, number>())
+  // Mirror of the stack, kept so eviction can cancel the timer of the card it
+  // drops: a state updater runs during render, which is too late to clear a
+  // timeout, and the new list has to be known at push time.
+  const stack = useRef<Toast[]>([])
 
   const dismiss = useCallback((id: number) => {
     const t = timers.current.get(id)
@@ -907,7 +920,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(t)
       timers.current.delete(id)
     }
-    setToasts((prev) => prev.filter((x) => x.id !== id))
+    stack.current = stack.current.filter((x) => x.id !== id)
+    setToasts(stack.current)
   }, [])
 
   const push = useCallback(
@@ -915,8 +929,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       const text = message.trim()
       if (!text) return
       const id = nextID.current++
-      // Cap the stack: a burst of failures must not cover the page.
-      setToasts((prev) => [...prev.slice(-3), { id, tone, message: text }])
+      const next = [...stack.current, { id, tone, message: text }]
+      // Cap the stack: a burst of failures must not cover the page. The evicted
+      // card's timer is cancelled here — leaving it would fire a dismissal
+      // against a card that is no longer on screen, and a burst would pile up
+      // orphaned timeouts.
+      while (next.length > TOAST_MAX) {
+        const gone = next.shift()!
+        const t = timers.current.get(gone.id)
+        if (t !== undefined) {
+          window.clearTimeout(t)
+          timers.current.delete(gone.id)
+        }
+      }
+      stack.current = next
+      setToasts(next)
       timers.current.set(id, window.setTimeout(() => dismiss(id), TOAST_MS[tone]))
     },
     [dismiss],
@@ -930,6 +957,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }),
     [push],
   )
+
+  // Every card on screen must own a timer. StrictMode's simulated unmount runs
+  // the cleanup below, which clears the map while the toasts state survives the
+  // remount; without this, a toast pushed from a mount effect would stay on
+  // screen forever. Re-arming also covers any later path that loses a timer.
+  useEffect(() => {
+    for (const t of toasts) {
+      if (!timers.current.has(t.id)) {
+        timers.current.set(t.id, window.setTimeout(() => dismiss(t.id), TOAST_MS[t.tone]))
+      }
+    }
+  }, [toasts, dismiss])
 
   useEffect(
     () => () => {
