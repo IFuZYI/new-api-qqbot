@@ -89,19 +89,34 @@ export function Card({
       className={`rounded-surface border border-border bg-card text-card-foreground shadow-sm ${className}`}
     >
       {(title || actions) && (
-        <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-border px-4 py-3">
-          <div className="min-w-0">
-            {title && (
-              <h2 id={id} className="text-sm font-semibold tracking-tight">
-                {title}
-              </h2>
-            )}
-            {description && <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>}
+        // The title and the actions share the first line and the description
+        // sits under both, spanning the full card. Wrapping title+description
+        // in one block and centring the actions against it pushed them 9px
+        // below the title (measured: title mid 134 vs actions mid 143 on every
+        // card with a description) and squeezed the description into whatever
+        // width the buttons left over — 299px inside a 1118px card, so the
+        // longer ones wrapped to five lines.
+        <header className="border-b border-border px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="min-w-0">
+              {title && (
+                <h2 id={id} className="text-sm font-semibold tracking-tight">
+                  {title}
+                </h2>
+              )}
+            </div>
+            {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
           </div>
-          {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+          {description && <p className="mt-1 text-xs text-muted-foreground">{description}</p>}
         </header>
       )}
-      <div className="p-4">{children}</div>
+      {/*
+        No body when there is nothing to put in it. 进群自动绑定 is a switch and
+        nothing else, and its empty `p-4` measured 56px of blank card under a
+        20px header — a hole the operator reads as a loading failure. The
+        feature's state is already in the header badge and its switch.
+      */}
+      {children ? <div className="p-4">{children}</div> : null}
     </section>
   )
 }
@@ -173,7 +188,7 @@ export function Field({
     <label className="flex min-w-0 flex-col gap-1.5">
       <span className="text-xs font-medium text-foreground/80">{label}</span>
       {children}
-      {hint && <span className="text-[11px] leading-4 text-muted-foreground">{hint}</span>}
+      {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
     </label>
   )
 }
@@ -214,7 +229,7 @@ export function CheckboxRow({
       />
       <span className="min-w-0">
         <span className="text-xs font-medium text-foreground/80">{label}</span>
-        {hint && <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{hint}</span>}
+        {hint && <span className="mt-0.5 block text-2xs text-muted-foreground">{hint}</span>}
       </span>
     </label>
   )
@@ -287,6 +302,13 @@ export function Input({
  * size to its content, and a block wrapper would stretch it across the column.
  * Inside a Field (a flex column) the wrapper is blockified and stretches, and
  * the select fills it via w-full — the layout those call sites already had.
+ *
+ * The caller's className goes on the WRAPPER, not on the select. On the select
+ * it lost: the select carries `w-full` from CONTROL, and Tailwind emits `.w-56`
+ * before `.w-full`, so the wider one won on source order alone — measured, the
+ * 签到触发方式 picker asked for `w-56` (224px) and rendered 1086px, and the
+ * 时区 field asked for `w-56` and rendered 535px. Sizing the wrapper is what
+ * the caller means, and the select then fills whatever width the caller chose.
  */
 export function Select({
   value,
@@ -306,14 +328,14 @@ export function Select({
   ariaLabel?: string
 }) {
   return (
-    <div className="relative inline-block max-w-full min-w-0">
+    <div className={`relative inline-block max-w-full min-w-0 ${className}`}>
       <select
         id={id}
         value={value}
         disabled={disabled}
         aria-label={ariaLabel}
         onChange={(e) => onChange(e.target.value)}
-        className={`block cursor-pointer appearance-none py-0 ${CONTROL} ${FOCUS} ${className}`}
+        className={`block cursor-pointer appearance-none py-0 ${CONTROL} ${FOCUS}`}
       >
         {children}
       </select>
@@ -750,7 +772,11 @@ export function Switch({
         />
       </span>
       {label && (
-        <span className={`text-xs ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>
+        // `whitespace-nowrap` + `shrink-0`: without them a narrow cell (the
+        // 群管理 监测 column on a phone, measured 87px) squeezes the label to
+        // one character per line — "已监测" rendered 19px wide and 48px tall,
+        // i.e. a vertical column of glyphs.
+        <span className={`shrink-0 text-xs whitespace-nowrap ${checked ? 'text-foreground' : 'text-muted-foreground'}`}>
           {label}
         </span>
       )}
@@ -775,7 +801,7 @@ export function Badge({
   }
   return (
     <span
-      className={`inline-flex items-center rounded-chip border px-1.5 py-px text-[11px] leading-4 font-medium whitespace-nowrap ${tones[tone]}`}
+      className={`inline-flex items-center rounded-chip border px-1.5 py-px text-2xs font-medium whitespace-nowrap ${tones[tone]}`}
     >
       {children}
     </span>
@@ -789,6 +815,13 @@ export function Badge({
  * sit past the viewport edge with no hint they are there (measured at
  * x=769-853px inside a 390px viewport), so the operator sees a table with no
  * way to act on a row.
+ *
+ * The cell size is the table's own (14px, matching new-api's `[&_td]:text-sm`),
+ * and a cell that wants something smaller says so at the call site — a mono id,
+ * a chip, a small action button. Forcing `font-size: inherit` down the subtree
+ * the way upstream's Table does was tried and reverted: it flattened the 11px
+ * chips and the 12px action buttons up to 14px, so the badges grew and the
+ * table got taller for no gain.
  */
 export function Table({
   head,
@@ -806,7 +839,7 @@ export function Table({
   const isSticky = (i: number) => stickyEnd !== undefined && i >= n - stickyEnd
   return (
     <div className={`scroll-slim -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0 ${className}`}>
-      <table className="w-full border-collapse text-sm">
+      <table className="w-full border-collapse text-sm tabular-nums">
         <thead>
           <tr className="text-left text-xs text-muted-foreground">
             {head.map((h, i) => (
@@ -1316,7 +1349,7 @@ export function Fieldset({
   return (
     <fieldset className="rounded-panel border border-border px-3 pt-3 pb-3.5">
       <legend className="px-1 text-xs font-medium text-foreground/80">{legend}</legend>
-      {hint && <p className="mb-3 text-[11px] leading-4 text-muted-foreground">{hint}</p>}
+      {hint && <p className="mb-3 text-2xs text-muted-foreground">{hint}</p>}
       <div className="space-y-3.5">{children}</div>
     </fieldset>
   )

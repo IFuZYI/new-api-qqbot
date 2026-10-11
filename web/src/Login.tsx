@@ -67,7 +67,7 @@ export default function Login({ needsSetup, onDone }: { needsSetup: boolean; onD
               />
             </svg>
           </span>
-          <h1 className="text-base font-semibold tracking-tight">QQBot 群监测</h1>
+          <h1 className="text-sm font-semibold tracking-tight">QQBot 群监测</h1>
           <p className="mt-1 text-xs text-muted-foreground">
             {needsSetup ? '首次使用，请设置管理账号' : '请登录管理后台'}
           </p>
@@ -110,7 +110,7 @@ export default function Login({ needsSetup, onDone }: { needsSetup: boolean; onD
             </div>
           </form>
         </Card>
-        <p className="mt-4 text-center text-[11px] leading-4 text-muted-foreground">
+        <p className="mt-4 text-center text-2xs text-muted-foreground">
           这是本服务自己的管理账号，与 new-api 无关。
         </p>
       </div>

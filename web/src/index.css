@@ -27,6 +27,20 @@
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
 
+  /*
+   * Type scale. Three sizes carry the whole panel, and every text node picks
+   * one of them by role — a bare `text-[11px]` in a component is what produced
+   * five sizes (11/12/13/14/20) with no meaning attached:
+   *   2xs (11px) — captions: a field's hint line, a chip's label
+   *   xs  (12px) — chrome: buttons, tabs, table heads, secondary cell values
+   *   sm  (14px) — content: body copy, primary table values, card titles
+   *   xl  (20px) — a stat's number
+   * `text-2xs` exists so the caption size is named once instead of spelled as
+   * an arbitrary value in fourteen places.
+   */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -100,7 +114,16 @@
   --info-foreground: oklch(0.985 0 0);
   --border: oklch(0.93 0 0);
   --input: oklch(0.93 0 0);
-  --ring: oklch(0.708 0.16 249.003);
+  /*
+   * The focus ring is a *non-text* indicator, so it is judged against WCAG
+   * 1.4.11 (3:1) rather than 4.5:1 — and it is drawn on whatever surface the
+   * focused control sits on, so the worst case is the lightest one it can
+   * reach, not the page background. Upstream's ring measured 2.58:1 on a card
+   * and 2.37:1 on a muted chip, i.e. it failed outright. This value clears
+   * 4.60:1 on a card and 4.22:1 on muted, so the ring is legible on every
+   * surface the panel actually uses.
+   */
+  --ring: oklch(0.56 0.17 249);
   --sidebar: color-mix(in oklch, var(--foreground) 0.5%, var(--background));
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-border: oklch(0.93 0 0);
@@ -140,7 +163,13 @@
   --info-foreground: oklch(0.145 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 17%);
-  --ring: oklch(0.554 0.148 250.726);
+  /*
+   * Same 3:1 rule as the light ring, measured against the dark surfaces. The
+   * dark palette is inverted, so the ring has to be *lighter* than the card it
+   * sits on: upstream's measured 3.00:1 on a card and 2.80:1 on a muted chip.
+   * This value clears 5.39:1 on a card, 6.26:1 on the page and 5.03:1 on muted.
+   */
+  --ring: oklch(0.7 0.16 250);
   --sidebar: oklch(0.225 0 0);
   --sidebar-foreground: oklch(0.95 0 0);
   --sidebar-border: oklch(1 0 0 / 11%);
@@ -203,6 +232,33 @@
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+
+  /*
+   * The ring has to be there the instant the element is focused, so the
+   * focused element's own transitions are switched off while it carries the
+   * indicator. Every `.transition-colors` control expands to
+   * `transition-property: …, outline-color, …`, and the ring's start colour is
+   * the element's own text colour, so the ring otherwise animates in: measured
+   * on a muted-foreground control, outline-color read oklab(0.49 0 0) at +0ms,
+   * oklab(0.538651 …) at +60ms and only settled on oklch(0.56 0.17 249) after
+   * the full 150ms — a keyboard user Tabbing through the panel watches the
+   * ring fade grey→blue.
+   *
+   * Scoping this to :focus-visible is what makes it safe: it touches only the
+   * element that is focused, only while it stays focused, and reverts the
+   * moment focus leaves. transition is not inherited, so nothing else loses
+   * anything — measured: an unfocused sibling keeps its full transition, and
+   * the Switch's knob still interpolated 3px→18px while its parent button was
+   * focused. `!important` is load-bearing, not a shortcut: @layer base
+   * precedes @layer utilities and the later layer wins regardless of
+   * specificity, so a plain `transition: none` here was measured to lose to
+   * the `.transition-colors` utility (the focused element still reported the
+   * full transition-property and still interpolated). Confined to this one
+   * selector, it cannot leak anywhere else.
+   */
+  :focus-visible {
+    transition: none !important;
   }
 
   /* Anchors that act as buttons should not inherit the UA link colour. */
@@ -276,15 +332,64 @@
   /*
    * Horizontal tab strip. Scrolls instead of wrapping, so six tabs stay one
    * row tall on a phone (wrapping measured 81px per tab against 38px on
-   * desktop) and the scrollbar is hidden because the fade already signals it.
+   * desktop). The scrollbar is hidden, so the strip carries its own edge fade
+   * instead — without it the last tab (连接配置, measured at x=360-432 in a
+   * 390px viewport) is simply cut off with nothing on screen saying the row
+   * scrolls.
+   *
+   * The fade is a mask rather than a gradient overlay, so it follows the
+   * palette in both themes and cannot swallow a click on the tab underneath.
+   * `data-scroll` is set from the element's real geometry (see App.tsx): a fade
+   * is only drawn on the side that actually has content behind it, and none at
+   * all when the six tabs fit — a permanent fade on a desktop that clips
+   * nothing reads as a rendering glitch.
+   *
+   * 3rem of fade, not 28px: pixel-sampling the rendered strip showed a 28px
+   * fade only lifted the clipped glyph by 23/255 (253 vs 230 without the mask),
+   * which is under the threshold where an edge reads as "there is more here".
+   * The wider ramp is measured the same way and is what actually signals it.
    */
   .tab-strip {
     scrollbar-width: none;
     -ms-overflow-style: none;
+    mask-image: linear-gradient(to right, transparent 0, #000 3rem, #000 calc(100% - 3rem), transparent 100%);
   }
 
   .tab-strip::-webkit-scrollbar {
     display: none;
+  }
+
+  .tab-strip[data-scroll='none'] {
+    mask-image: none;
+  }
+
+  /* At the left edge only the right side is clipped. */
+  .tab-strip[data-scroll='start'] {
+    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 3rem), transparent 100%);
+  }
+
+  /* At the right edge only the left side is clipped. */
+  .tab-strip[data-scroll='end'] {
+    mask-image: linear-gradient(to right, transparent 0, #000 3rem, #000 100%);
+  }
+
+  /*
+   * Focus switches the fade off entirely.
+   *
+   * The mask multiplies the alpha of everything under it, including a focus
+   * ring — and the ring is drawn *outside* the tab box (outline-offset: 2px),
+   * so it lands squarely in the ramp. Pixel-sampling the last tab's ring
+   * (x=356-358) under `data-scroll='start'` measured 180/255 where the unmasked
+   * value is 253, i.e. 2.07:1 against the page instead of 6.48:1 — under WCAG
+   * 1.4.11's 3:1 for a non-text indicator, and it cancels the very fix the
+   * `--ring` colour was chosen for.
+   *
+   * Turning the fade off while focus is inside is the honest trade: the
+   * operator has already found the strip (that is what focusing means), so the
+   * "there is more here" hint has done its job and the focus indicator must win.
+   */
+  .tab-strip:focus-within {
+    mask-image: none;
   }
 
   /* Slim scrollbars that follow the palette instead of the OS default. */

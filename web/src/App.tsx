@@ -25,6 +25,64 @@ export default function App() {
 
   const [authError, setAuthError] = useState('')
 
+  // Which edges of the tab strip are actually hiding content, so index.css can
+  // fade exactly those. Without it the strip scrolls invisibly: the 6th tab
+  // measured x=360-432 in a 390px viewport, cut off with no scrollbar and no
+  // hint that it was there.
+  //
+  // The element is held in state rather than a ref so the effect below runs
+  // when the strip actually mounts. The strip is conditionally rendered (only
+  // once `authenticated` is true), and a ref-based effect that early-returns on
+  // a null ref would never re-run: its dependency is `authenticated`, which
+  // does not change again, so `data-scroll` would stay at its initial 'none'
+  // and the fade would never appear.
+  const [tabStripEl, setTabStripEl] = useState<HTMLDivElement | null>(null)
+  const [tabScroll, setTabScroll] = useState<'none' | 'start' | 'middle' | 'end'>('none')
+
+  useEffect(() => {
+    if (!tabStripEl) return
+    const el = tabStripEl
+    // Guards the one path that outlives the effect: `fonts.ready` may resolve
+    // after unmount, and the update would then set state on a dead component.
+    // React tolerates it today (no warning, no throw), but the cleanup below
+    // removes every other listener, so this is the odd one out.
+    let alive = true
+    const update = () => {
+      if (!alive) return
+      const max = el.scrollWidth - el.clientWidth
+      if (max <= 1) setTabScroll('none')
+      else if (el.scrollLeft <= 1) setTabScroll('start')
+      else if (el.scrollLeft >= max - 1) setTabScroll('end')
+      else setTabScroll('middle')
+    }
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    // A ResizeObserver on the strip alone is not enough: the strip's own box is
+    // set by its parent, so it does not fire when the *labels* get wider inside
+    // it — which is exactly what happens when the CJK fallback font lands after
+    // first paint (measured: scrollWidth 358 -> 416 with clientWidth unchanged,
+    // so the strip silently started clipping the last tab while `data-scroll`
+    // still said "nothing to scroll"). Watching the tabs themselves covers it,
+    // and `fonts.ready` covers the swap that happens before they mount.
+    //
+    // The strip itself is observed too. Its own resize only reaches us through
+    // the `resize` listener above, so a container that changes width without
+    // the window doing so (a zoom, a devtools dock, an embedded frame) would
+    // leave a stale fade. Observing both costs nothing and the two paths are
+    // redundant on purpose: whichever fires first recomputes the same answer.
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    for (const child of el.children) ro.observe(child)
+    document.fonts?.ready.then(update).catch(() => {})
+    return () => {
+      alive = false
+      el.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+      ro.disconnect()
+    }
+  }, [tabStripEl])
+
   const checkAuth = useCallback(async () => {
     try {
       setAuth(await api.authState())
@@ -118,7 +176,7 @@ export default function App() {
             </span>
             <div className="min-w-0">
               <h1 className="truncate text-sm font-semibold tracking-tight">QQBot 群监测</h1>
-              <p className="hidden truncate text-[11px] text-muted-foreground sm:block">
+              <p className="hidden truncate text-2xs text-muted-foreground sm:block">
                 QQ 群与 new-api 账号绑定
               </p>
             </div>
@@ -139,16 +197,27 @@ export default function App() {
         {/*
           The strip scrolls rather than wraps: six tabs wrapped to 81px each on a
           390px screen against 38px on desktop, which doubled the header for no
-          extra information.
+          extra information. The scrollbar is hidden, so the strip publishes its
+          own scroll state and index.css draws the edge fade from it.
         */}
         <nav className="mx-auto max-w-6xl px-4">
-          <div className="tab-strip -mb-px flex gap-1 overflow-x-auto">
+          <div
+            ref={setTabStripEl}
+            data-scroll={tabScroll}
+            className="tab-strip -mb-px flex gap-1 overflow-x-auto"
+          >
             {TABS.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 aria-current={tab === t.id ? 'page' : undefined}
                 onClick={() => setTab(t.id)}
+                // A clipped tab is "partly visible", so Chrome decides no
+                // scrolling is needed and Tab can land on a tab the operator
+                // cannot see (measured: 连接配置 box x=360-432 in a 390px
+                // viewport, scrollLeft stayed 0). `nearest` moves it the minimum
+                // distance and does nothing when it is already in view.
+                onFocus={(e) => e.currentTarget.scrollIntoView({ inline: 'nearest', block: 'nearest' })}
                 className={`shrink-0 border-b-2 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
                   tab === t.id
                     ? 'border-primary font-medium text-foreground'
@@ -265,7 +334,7 @@ function Overview({
             手动签到
           </Button>
         </div>
-        <p className="mt-3 border-t border-border pt-3 text-[11px] leading-4 text-muted-foreground">
+        <p className="mt-3 border-t border-border pt-3 text-2xs text-muted-foreground">
           「手动签到」用于验证「消息即签到」这条路：选一个成员，按当天记录一次签到（同一天只会记一次），随后可以点「发放奖励」看他是否拿到 quota。
         </p>
       </Card>
@@ -679,54 +748,60 @@ function Users({
           </p>
         )}
 
-        <div className="mb-4 flex flex-wrap items-end gap-3">
-          <div className="grid min-w-0 flex-1 basis-full gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            <Field label="绑定状态">
-              <Select value={bound} onChange={(v) => setBound(v as typeof bound)} className="w-full">
-                <option value="">全部</option>
-                <option value="bound">已绑定</option>
-                <option value="unbound">未绑定</option>
-              </Select>
-            </Field>
-            <Field label="群状态">
-              <Select value={inGroup} onChange={(v) => setInGroup(v as typeof inGroup)} className="w-full">
-                <option value="">全部</option>
-                <option value="in">在群</option>
-                <option value="out">已退群 / 未进群</option>
-              </Select>
-            </Field>
-            <Field label="分组">
-              <Select value={group} onChange={setGroup} className="w-full">
-                <option value="">全部分组</option>
-                {groups.map((g) => (
-                  <option key={g} value={g}>
-                    {g}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="类型">
-              <Select value={kind} onChange={(v) => setKind(v as typeof kind)} className="w-full">
-                <option value="">全部</option>
-                <option value="member">在群成员</option>
-                <option value="left">已退群成员</option>
-                <option value="account">未进群账号</option>
-              </Select>
-            </Field>
-            <Field label="搜索" hint="QQ / 昵称 / new-api 用户名 / 邮箱">
-              <Input value={q} onChange={setQ} placeholder="例如 54321 或 alice" />
-            </Field>
-          </div>
+        {/*
+          The filter grid and the clear button share one row. `items-end` put
+          the button on its own line (measured y=301 against the grid's
+          bottom=289) because the grid claims `basis-full` — so the one control
+          that undoes the filters sat below the controls that set them.
+        */}
+        <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+          <Field label="绑定状态">
+            <Select value={bound} onChange={(v) => setBound(v as typeof bound)} className="w-full">
+              <option value="">全部</option>
+              <option value="bound">已绑定</option>
+              <option value="unbound">未绑定</option>
+            </Select>
+          </Field>
+          <Field label="群状态">
+            <Select value={inGroup} onChange={(v) => setInGroup(v as typeof inGroup)} className="w-full">
+              <option value="">全部</option>
+              <option value="in">在群</option>
+              <option value="out">已退群 / 未进群</option>
+            </Select>
+          </Field>
+          <Field label="分组">
+            <Select value={group} onChange={setGroup} className="w-full">
+              <option value="">全部分组</option>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="类型">
+            <Select value={kind} onChange={(v) => setKind(v as typeof kind)} className="w-full">
+              <option value="">全部</option>
+              <option value="member">在群成员</option>
+              <option value="left">已退群成员</option>
+              <option value="account">未进群账号</option>
+            </Select>
+          </Field>
+          <Field label="搜索" hint="QQ / 昵称 / new-api 用户名 / 邮箱">
+            <Input value={q} onChange={setQ} placeholder="例如 54321 或 alice" />
+          </Field>
           {/* Clearing sits with the controls that set the filters, not below the table. */}
-          <Button kind="ghost" onClick={resetFilters} disabled={busy}>
-            清除筛选
-          </Button>
+          <FieldAction>
+            <Button kind="ghost" onClick={resetFilters} disabled={busy} full>
+              清除筛选
+            </Button>
+          </FieldAction>
         </div>
 
         {selected.size > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-panel border border-primary/40 bg-primary/5 px-3 py-2">
             <span className="text-xs font-medium">已选 {selected.size} 个账号</span>
-            <Select value={batchGroup} onChange={setBatchGroup} ariaLabel="批量调整的目标分组">
+            <Select value={batchGroup} onChange={setBatchGroup} ariaLabel="批量调整的目标分组" className="w-40">
               <option value="">选择目标分组…</option>
               {groups.map((g) => (
                 <option key={g} value={g}>
@@ -843,7 +918,7 @@ function Users({
                     <span className="text-muted-foreground">—</span>
                   )}
                 </Cell>
-                <Cell className="text-xs text-muted-foreground">{m.bind_source || '—'}</Cell>
+                <Cell className="text-muted-foreground">{m.bind_source || '—'}</Cell>
                 <Cell>
                   {m.checked_today ? (
                     <span className="inline-flex items-center gap-1.5">
@@ -1025,7 +1100,7 @@ function RebindDialog({
           <Combobox value={accountID} onChange={setAccountID} options={accountOptions} ariaLabel="选择 new-api 账号" placeholder="搜索用户名、账号 ID 或邮箱" emptyText="没有匹配的账号" className="w-full" />
         </Field>
         {accountOptions.length <= 1 && (
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             账号列表为空？先在上方点「同步 new-api 账号」把账号拉取下来。
           </p>
         )}
