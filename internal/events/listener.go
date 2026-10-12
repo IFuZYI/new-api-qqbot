@@ -90,11 +90,29 @@ type Endpoint func() (url, token string)
 type Listener struct {
 	endpoint Endpoint
 	svc      Service
+	// pingInterval and pongWait bound how long a silent peer is trusted.
+	// ReadMessage only returns on a read error, and a half-open socket (NapCat
+	// wedged, or a NAT drop with no FIN) produces none: measured, the listener
+	// stayed "connected" indefinitely with every later event lost silently.
+	// The listener pings; a peer that stops answering is dropped so Run
+	// reconnects.
+	pingInterval time.Duration
+	pongWait     time.Duration
 }
+
+// readLimit caps one inbound frame. gorilla's default is 0 (unlimited), so a
+// rogue or wedged peer could make the process allocate the whole payload.
+// Real events are a few KiB; the ceiling is generous but finite.
+func readLimit() int64 { return 8 << 20 }
 
 // New builds a Listener. endpoint is called on each connection attempt.
 func New(endpoint Endpoint, svc Service) *Listener {
-	return &Listener{endpoint: endpoint, svc: svc}
+	return &Listener{
+		endpoint:     endpoint,
+		svc:          svc,
+		pingInterval: 30 * time.Second,
+		pongWait:     90 * time.Second,
+	}
 }
 
 // Run connects and keeps reconnecting until ctx is cancelled. It never returns
@@ -186,6 +204,37 @@ func (l *Listener) session(ctx context.Context, url, token string) error {
 	defer conn.Close()
 
 	slog.Info("事件 WebSocket 已连接", "url", url)
+
+	// One huge frame must not be read whole into memory.
+	conn.SetReadLimit(readLimit())
+	// A peer that stops answering pings is disconnected, so a wedged NapCat or
+	// a dropped NAT entry is noticed instead of silently swallowing events.
+	conn.SetReadDeadline(time.Now().Add(l.pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(l.pongWait))
+	})
+	// The ping loop stops with the session (and with ctx).
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		t := time.NewTicker(l.pingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+					// The write failed, which means the socket is already gone:
+					// closing it unblocks ReadMessage and the caller reconnects.
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	// Closing the connection on shutdown unblocks ReadMessage.
 	done := make(chan struct{})

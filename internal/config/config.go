@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"errors"
@@ -85,6 +86,11 @@ type Manager struct {
 
 	mu       sync.Mutex
 	lastHash string // content hash of the file as last read or written
+	// reportedHash is the hash of the last MALFORMED file already reported.
+	// syncFromFile runs on every load and every save, so without this the same
+	// broken file would write one WARN per call and bury the day's log. A file
+	// that changes (or is fixed and broken again) is reported afresh.
+	reportedHash string
 }
 
 // NewManager builds a Manager for the config file at path, mirroring into st.
@@ -140,6 +146,16 @@ func (m *Manager) syncFromFile() error {
 
 	var c Config
 	if err := yaml.Unmarshal(raw, &c); err != nil {
+		// The file is refused (adopting it would wipe the stored settings), and
+		// the refusal is REPORTED: every production caller uses MustLoad, which
+		// discards the error, so without this record the operator saw a working
+		// panel and a broken file with nothing connecting the two — only a later
+		// 保存 surfaced it, as a 500. Reported once per distinct broken content.
+		if sum != m.reportedHash {
+			m.reportedHash = sum
+			slog.Warn("配置文件无法解析，已继续使用数据库中的配置",
+				"path", m.path, "err", err)
+		}
 		return fmt.Errorf("parse %s: %w", m.path, err)
 	}
 
