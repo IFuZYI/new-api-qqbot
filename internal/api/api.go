@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"qqbot/internal/config"
 	"qqbot/internal/logging"
@@ -756,6 +757,13 @@ func (r *Router) listCheckins(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		date = d
+	} else if _, err := time.Parse(time.DateOnly, date); err != nil {
+		// The date reaches a query, so a typo must be refused rather than
+		// answered with an empty list: "no check-ins that day" is
+		// indistinguishable from a misspelled day, and the logs endpoint
+		// already rejects a malformed limit the same way.
+		writeErr(w, 400, errors.New("date 必须是 YYYY-MM-DD 格式"))
+		return
 	}
 	cs, err := r.st.CheckinsOn(date)
 	if err != nil {

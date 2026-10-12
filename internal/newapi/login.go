@@ -24,6 +24,15 @@ import (
 // short enough that the service recovers on its own when the window passes.
 const defaultRateLimitBackoff = 2 * time.Minute
 
+// sessionLimitBackoff is how long a hit 50-session cap blocks further logins.
+//
+// Longer than a 429's window because the fix is human: the operator must revoke
+// sessions (or wait for them to expire — they live 30 days). Measured on the
+// reference gateway, 12 calls with the cap hit produced 12 login attempts, each
+// against the same rate-limited route, so without this the failure feeds itself
+// and the operator never sees a settled state.
+const sessionLimitBackoff = 30 * time.Minute
+
 // loginAttempts bounds retries of a *transient* failure (a 5xx, a dropped
 // connection). It must not be applied to rate limits or bad credentials — see
 // Client.Reauthenticate.
@@ -58,29 +67,42 @@ func (l *Lockout) Blocked() error {
 		return nil
 	}
 	remaining := l.until.Sub(l.now())
-	if rl, ok := l.last.(*RateLimitError); ok {
-		return &RateLimitError{Method: rl.Method, Path: rl.Path, RetryAfter: remaining}
+	switch last := l.last.(type) {
+	case *RateLimitError:
+		return &RateLimitError{Method: last.Method, Path: last.Path, RetryAfter: remaining}
+	case *SessionLimitError:
+		// The cause must survive: "会话数已达上限" tells the operator what to
+		// do (revoke sessions), while a bare rate-limit message would send them
+		// looking for a limiter.
+		return &SessionLimitError{Method: last.Method, Path: last.Path}
 	}
 	return &RateLimitError{RetryAfter: remaining}
 }
 
-// Fail records a failed attempt. Only a rate limit arms the lockout: a wrong
-// password or a session cap is not fixed by waiting, and blocking on them would
-// hide the real error from the operator.
+// Fail records a failed attempt. A rate limit arms the lockout with the
+// server's own hint; the 50-session cap arms it for much longer, because the
+// fix is the operator revoking sessions rather than the window passing. A wrong
+// password arms nothing: waiting cannot fix it, and blocking would hide the
+// real error from the operator.
 func (l *Lockout) Fail(err error) {
 	if err == nil {
 		return
 	}
 	var rl *RateLimitError
-	if !errors.As(err, &rl) {
+	if errors.As(err, &rl) {
+		wait := rl.RetryAfter
+		if wait <= 0 {
+			wait = defaultRateLimitBackoff
+		}
+		l.until = l.now().Add(wait)
+		l.last = err
 		return
 	}
-	wait := rl.RetryAfter
-	if wait <= 0 {
-		wait = defaultRateLimitBackoff
+	var sl *SessionLimitError
+	if errors.As(err, &sl) {
+		l.until = l.now().Add(sessionLimitBackoff)
+		l.last = err
 	}
-	l.until = l.now().Add(wait)
-	l.last = err
 }
 
 // Success clears the lockout. A working login proves the window has passed —

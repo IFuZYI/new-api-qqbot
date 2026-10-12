@@ -109,9 +109,19 @@ func TestLockoutIgnoresOtherFailures(t *testing.T) {
 	if err := l.Blocked(); err != nil {
 		t.Errorf("a non-limit failure must not lock the caller out: %v", err)
 	}
+	// The session cap DOES arm a cooldown, and deliberately so: measured, 12
+	// calls with the cap hit produced 12 login attempts against a rate-limited
+	// route. Waiting cannot fix the cap, but retrying per call makes it worse
+	// and buries the cause; the operator still sees the real error (Blocked
+	// returns a SessionLimitError naming the fix).
 	l.Fail(&SessionLimitError{Method: "POST", Path: "/api/user/login"})
-	if err := l.Blocked(); err != nil {
-		t.Errorf("the session cap is fixed by revoking, not by waiting: %v", err)
+	if err := l.Blocked(); err == nil {
+		t.Error("the session cap must stop the per-call login attempts")
+	} else {
+		var sl *SessionLimitError
+		if !errors.As(err, &sl) {
+			t.Errorf("the cooldown must keep naming the session cap, got %T: %v", err, err)
+		}
 	}
 }
 
