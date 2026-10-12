@@ -82,7 +82,7 @@ func Open(o Options) (*Manager, error) {
 	}
 	m := &Manager{dir: o.Dir, now: o.Now, loc: o.Location}
 	m.level.Set(slog.LevelInfo)
-	m.file = &dayFile{dir: o.Dir, now: o.Now, loc: o.Location}
+	m.file = &dayFile{dir: o.Dir, now: o.Now, loc: o.Location, stderr: o.Stderr}
 	opts := &slog.HandlerOptions{Level: &m.level}
 	m.logger = slog.New(slog.NewMultiHandler(
 		attrRenamer{slog.NewJSONHandler(m.file, opts)},
@@ -240,10 +240,16 @@ type dayFile struct {
 	dir string
 	now func() time.Time
 	loc *time.Location
+	// stderr is where a file failure is reported. It cannot go through the
+	// logger: the logger is what is broken.
+	stderr io.Writer
 
 	mu   sync.Mutex
 	day  string
 	file *os.File
+	// lastErr is the last distinct failure already reported, so a broken file
+	// cannot write one line per record (a DEBUG day is tens of thousands).
+	lastErr string
 }
 
 func fileName(day string) string { return "qqbot-" + day + ".log" }
@@ -259,11 +265,44 @@ func (d *dayFile) Write(p []byte) (int, error) {
 		}
 		f, err := os.OpenFile(filepath.Join(d.dir, fileName(day)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
+			d.reportOpenFailure(err, day)
 			return 0, err
 		}
 		d.file, d.day = f, day
+		d.lastErr = ""
 	}
-	return d.file.Write(p)
+	n, err := d.file.Write(p)
+	if err != nil {
+		d.reportWriteFailure(err)
+	}
+	return n, err
+}
+
+// reportOpenFailure tells the operator, once per distinct cause, that the day's
+// file cannot be opened.
+//
+// The record itself still reaches stderr (the multi-handler runs both), but the
+// panel reads the FILES: without this, a broken log directory looked like a day
+// with no records at all. Reported on the stderr stream directly, because the
+// logger is the thing that is broken.
+func (d *dayFile) reportOpenFailure(err error, day string) {
+	key := day + ": " + err.Error()
+	if d.lastErr == key {
+		return
+	}
+	d.lastErr = key
+	fmt.Fprintf(d.stderr, "qqbot: 日志文件 %s 写入失败，记录只输出到控制台: %v\n", fileName(day), err)
+}
+
+// reportWriteFailure is the same for a write that fails after the file was
+// opened (a full disk).
+func (d *dayFile) reportWriteFailure(err error) {
+	key := "write: " + err.Error()
+	if d.lastErr == key {
+		return
+	}
+	d.lastErr = key
+	fmt.Fprintf(d.stderr, "qqbot: 日志文件 %s 写入失败，记录只输出到控制台: %v\n", fileName(d.day), err)
 }
 
 func (d *dayFile) Close() error {
