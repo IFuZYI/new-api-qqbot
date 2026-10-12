@@ -36,4 +36,43 @@ export const tests = {
     await click('取消');
     return {unfilteredCandidates:true,retry:true,bothDirections:true};
   `,
+
+  // S-4: the retention field is an int on the server, and a range-only clamp
+  // let "1.5" through — the operator got a 400 naming neither the field nor the
+  // reason. The clamp must also round.
+  'F-15': `
+    await fresh(); await click('监测设置'); await wait(250);
+    const input=document.querySelector('[aria-label="日志保留天数"]'); check(!!input,'no retention input');
+    await set(input,'1.5'); await wait(80);
+    check(input.value==='2'||input.value==='1','a non-integer retention must be rounded, got '+input.value);
+    await set(input,'99999'); await wait(80);
+    check(Number(input.value)<=3650,'retention above the cap must be clamped, got '+input.value);
+    return {rounded:input.value};
+  `,
+
+  // S-5: a hard failure of the next batch must clear the previous batch's note.
+  // It described a DIFFERENT run; leaving it under the new failure's toast read
+  // as if it belonged to it.
+  'F-16': `
+    await fresh(); await click('用户管理');
+    // The batch controls render only once something is selected, so select first.
+    await until(()=>document.querySelectorAll('input[type="checkbox"]').length>0,'account checkboxes');
+    const boxes=[...document.querySelectorAll('input[type="checkbox"]')];
+    boxes[0].click(); await wait();
+    await until(()=>text().includes('已选'),'selection banner');
+    await set(document.querySelector('[aria-label="批量调整的目标分组"]'),'vip'); await wait();
+    await click('批量调整分组'); await wait(200);
+    check(text().includes('批量调整到'),'no batch note after the first run');
+    // A successful batch clears the selection (and with it the controls), so
+    // select again for the second run.
+    const boxes2=[...document.querySelectorAll('input[type="checkbox"]')];
+    boxes2[0].click(); await wait();
+    await until(()=>text().includes('已选'),'second selection banner');
+    await set(document.querySelector('[aria-label="批量调整的目标分组"]'),'vip'); await wait();
+    // A second batch that fails hard: the note must go.
+    mock.fail['POST /api/users/groups']='gateway down';
+    await click('批量调整分组'); await wait(200);
+    check(!text().includes('批量调整到'),'a stale batch note survived the next hard failure');
+    return {staleCleared:true};
+  `,
 };

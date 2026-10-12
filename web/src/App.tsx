@@ -770,6 +770,9 @@ function Users({
       await load()
       await onRefresh()
     } catch (e) {
+      // Clear the previous batch's note: it described a DIFFERENT run, and
+      // leaving it under this failure's toast read as if it belonged to it.
+      setBatchResults(null)
       onFail(e)
     } finally {
       groupWrite.current = false
