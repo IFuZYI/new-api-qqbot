@@ -5,7 +5,7 @@ import Rules from './Rules'
 import LogsView from './features/Logs'
 import SettingsView from './features/Settings'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, TabBoundary, Table, useToast, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'logs' | 'connection'
 
@@ -243,6 +243,9 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-4 p-4">
+        {/* One tab's render error must not unmount the panel: the nav and tab
+            bar are outside this boundary, so another tab is always reachable. */}
+        <TabBoundary tab={tab}>
         {tab === 'overview' && <Overview boot={boot} onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'groups' && <Groups onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
@@ -252,6 +255,7 @@ export default function App() {
         {tab === 'connection' && (
           <Connection onDone={flash} onFail={fail} onRefresh={refresh} username={auth.username} />
         )}
+        </TabBoundary>
       </main>
     </div>
   )
@@ -645,6 +649,15 @@ function Users({
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [batchGroup, setBatchGroup] = useState('')
   const groupWrite = useRef(false)
+  // loadError is the directory's persistent failure state. A toast expires and
+  // left the PREVIOUS rows on screen under the NEW filter value — 10001 (bound)
+  // stayed listed while the control said 未绑定, so the table contradicted the
+  // filter with nothing on the page to say why.
+  const [loadError, setLoadError] = useState('')
+  // batchResults keeps the per-account outcome on the page. The API reports
+  // each account separately (ADR-0007) and the toast that used to be the only
+  // carrier expired, so the detail was gone before it could be acted on.
+  const [batchResults, setBatchResults] = useState<{ group: string; results: { user_id: number; ok: boolean; error?: string }[] } | null>(null)
 
   useEffect(() => {
     const t = window.setTimeout(() => setKeyword(q.trim()), 300)
@@ -658,9 +671,19 @@ function Users({
     const generation = ++directoryGeneration.current
     try {
       const result = await api.users(filter)
-      if (generation === directoryGeneration.current) setData(result)
+      if (generation === directoryGeneration.current) {
+        setData(result)
+        setLoadError('')
+      }
     } catch (e) {
-      if (generation === directoryGeneration.current) onFail(e)
+      // A failed query must clear the rows, not keep them: the table would
+      // otherwise show the previous filter's result under the new control
+      // value, which reads as a wrong answer rather than a failed request.
+      if (generation === directoryGeneration.current) {
+        setData(null)
+        setLoadError(e instanceof Error ? e.message : String(e))
+        onFail(e)
+      }
     }
     // filter is rebuilt each render; depend on its fields instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -729,11 +752,14 @@ function Users({
     setBusy(true)
     try {
       const res = await api.setUserGroups([...selected], batchGroup)
+      // The per-account results stay on the page: one role-protected account
+      // must not hide the rest of the selection's outcome, and a toast that
+      // expires cannot carry a list.
+      setBatchResults({ group: batchGroup, results: res.results ?? [] })
       if (res.failed === 0) {
         onDone(`已把 ${res.succeeded} 个账号调整到「${batchGroup}」`)
       } else {
-        const first = res.results.find((r) => !r.ok)
-        onDone(`成功 ${res.succeeded} 个，失败 ${res.failed} 个${first ? `（例如 #${first.user_id}: ${first.error}）` : ''}`)
+        onDone(`成功 ${res.succeeded} 个，失败 ${res.failed} 个（明细见下表）`)
       }
       setSelected(new Set())
       await load()
@@ -771,6 +797,11 @@ function Users({
           </>
         }
       >
+        {loadError && (
+          <div className="mb-3">
+            <ErrorNote>目录读取失败：{loadError}。当前列表已清空，避免显示与筛选条件不符的旧数据。</ErrorNote>
+          </div>
+        )}
         {s && data && (
           <p className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <span>共 {data.total} 行{data.total !== s.total && `（全部 ${s.total} 行）`}</span>
@@ -854,6 +885,32 @@ function Users({
             <Button kind="ghost" onClick={() => setSelected(new Set())}>
               取消选择
             </Button>
+          </div>
+        )}
+
+        {/*
+          The per-account outcome stays on the page. ADR-0007 makes each
+          account's result its own report — one role-protected account must not
+          hide the rest — and a toast expires before it can be read or copied.
+        */}
+        {batchResults && batchResults.results.length > 0 && (
+          <div className="mb-3">
+            <ErrorNote onClose={() => setBatchResults(null)}>
+              批量调整到「{batchResults.group}」的结果：成功{' '}
+              {batchResults.results.filter((r) => r.ok).length} 个，失败{' '}
+              {batchResults.results.filter((r) => !r.ok).length} 个
+              {batchResults.results.some((r) => !r.ok) && (
+                <ul className="mt-1 list-disc pl-4">
+                  {batchResults.results
+                    .filter((r) => !r.ok)
+                    .map((r) => (
+                      <li key={r.user_id}>
+                        #{r.user_id}：{r.error || '未知错误'}
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </ErrorNote>
           </div>
         )}
 

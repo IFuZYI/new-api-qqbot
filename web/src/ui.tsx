@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Component, createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 
 /**
  * Shared UI kit. Colours come from the token layer in index.css (new-api's
@@ -10,6 +10,48 @@ import { createContext, useCallback, useContext, useEffect, useId, useMemo, useR
  * field widths or two button heights. The radius ladder is
  * surface > panel > control > chip.
  */
+
+/**
+ * Boundary keeps one tab's render error from unmounting the whole panel.
+ *
+ * React tears down the entire tree above a component that throws during render,
+ * and this app had no boundary at all: measured, a `日志` tab handed a 200 whose
+ * body had no `entries` threw on `.length` and left `<nav>` gone and `#root`
+ * empty — a blank page with no way back but a manual reload, for a payload the
+ * tab merely failed to recognise. The nav and the tab bar sit OUTSIDE this
+ * boundary, so the operator can always switch to another tab.
+ *
+ * The message is deliberately generic: it reports that this tab failed without
+ * echoing an exception the operator cannot act on, and the reload button is the
+ * one action that reliably clears a stuck state.
+ */
+export class TabBoundary extends Component<{ children: ReactNode; tab: string }, { error: unknown }> {
+  state = { error: null as unknown }
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error }
+  }
+
+  // A tab switch resets the boundary: the failing tab's error must not stick
+  // once the operator navigates away and back.
+  componentDidUpdate(prev: { tab: string }) {
+    if (prev.tab !== this.props.tab && this.state.error) this.setState({ error: null })
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <Card title="这个页面出错了">
+        <ErrorNote>页面渲染失败，已隔离，其他页面仍可使用。请刷新页面重试；若持续出现，请到「日志」页查看错误记录。</ErrorNote>
+        <div className="mt-3">
+          <Button size="sm" onClick={() => location.reload()}>
+            刷新页面
+          </Button>
+        </div>
+      </Card>
+    )
+  }
+}
 
 /**
  * Focus ring shared by every interactive element.
@@ -186,6 +228,11 @@ export function Field({
   hint?: string
   children: ReactNode
 }) {
+  // The hint is tied to the field with aria-describedby, not just rendered next
+  // to it: measured, the 日志 controls' hints ("0 = 永久保留", "含今天") had
+  // `aria-describedby: null` and an empty AX description, so they were
+  // visual-only and a screen-reader user never learned the 0 case.
+  const hintId = useId()
   return (
     // The label WRAPS the control (implicit association) rather than sitting
     // beside it. A sibling <label htmlFor> only associates when the caller also
@@ -195,10 +242,34 @@ export function Field({
     // field. Wrapping associates every field with no call-site change.
     <label className="flex min-w-0 flex-col gap-1.5">
       <span className="text-xs font-medium text-foreground/80">{label}</span>
-      {children}
-      {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
+      {/* The description is attached to whatever control the caller passes. */}
+      {hint ? (
+        <FieldHintContext.Provider value={hintId}>{children}</FieldHintContext.Provider>
+      ) : (
+        children
+      )}
+      {hint && (
+        <span id={hintId} className="text-2xs text-muted-foreground">
+          {hint}
+        </span>
+      )}
     </label>
   )
+}
+
+/**
+ * Carries a Field's hint id down to the control inside it.
+ *
+ * A React context rather than a prop: the call sites wrap arbitrary controls
+ * (Input, Select, a div of several elements), and threading a prop through
+ * every one of them would touch all 40+ call sites for an accessibility
+ * attribute.
+ */
+const FieldHintContext = createContext<string | undefined>(undefined)
+
+/** The id a control inside a Field should pass to aria-describedby. */
+export function useFieldHint(): string | undefined {
+  return useContext(FieldHintContext)
 }
 
 /**
@@ -258,6 +329,7 @@ export function Input({
   inputMode,
   className = '',
   ariaLabel,
+  describedBy,
 }: {
   value: string | number
   onChange: (v: string) => void
@@ -273,13 +345,17 @@ export function Input({
   inputMode?: 'text' | 'numeric' | 'decimal'
   className?: string
   ariaLabel?: string
+  describedBy?: string
 }) {
   // No `w-full` in the base: Field is a flex column, so the control already
   // stretches to the field width, and a hard-coded 100% here would outrank any
   // `w-*` the caller passes (measured: a `w-20` interval input rendered 203px).
+  // The hint an enclosing Field carries is announced with the control.
+  const fieldHint = useFieldHint()
   return (
     <input
       id={id}
+      aria-describedby={describedBy ?? fieldHint}
       type={type}
       value={value}
       placeholder={placeholder}
@@ -326,6 +402,7 @@ export function Select({
   id,
   disabled,
   ariaLabel,
+  describedBy,
 }: {
   value: string | number
   onChange: (v: string) => void
@@ -334,7 +411,9 @@ export function Select({
   id?: string
   disabled?: boolean
   ariaLabel?: string
+  describedBy?: string
 }) {
+  const fieldHint = useFieldHint()
   return (
     <div className={`relative inline-block max-w-full min-w-0 ${className}`}>
       <select
@@ -342,6 +421,7 @@ export function Select({
         value={value}
         disabled={disabled}
         aria-label={ariaLabel}
+        aria-describedby={describedBy ?? fieldHint}
         onChange={(e) => onChange(e.target.value)}
         className={`block cursor-pointer appearance-none py-0 ${CONTROL} ${FOCUS}`}
       >

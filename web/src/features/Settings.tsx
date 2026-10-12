@@ -407,8 +407,11 @@ export default function SettingsView({
                 max={3650}
                 value={s.log_retention_days}
                 onChange={(v) => {
+                  // Clamped at the input, like the patrol intervals: the max
+                  // attribute alone does not stop typing, and a value above it
+                  // was posted for the server's 400 to reject.
                   const n = Number(v)
-                  setS({ ...s, log_retention_days: Number.isFinite(n) ? Math.max(0, n) : 0 })
+                  setS({ ...s, log_retention_days: Number.isFinite(n) ? Math.min(3650, Math.max(0, n)) : 0 })
                 }}
                 ariaLabel="日志保留天数"
                 className="w-24"

@@ -127,6 +127,12 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
 
   const counts = res?.counts ?? {}
   const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  // entries is read from the response, which is not guaranteed to match the
+  // declared type: a partial or future payload (or a 200 from a proxy) with no
+  // `entries` used to throw on `.length` during render, and with no error
+  // boundary that unmounted the ENTIRE panel to a blank page. An absent list
+  // degrades to "nothing to show" instead.
+  const entries = res?.entries ?? []
 
   return (
     <div className="space-y-4">
@@ -229,11 +235,11 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
           ) : (
             '载入中…'
           )
-        ) : res.entries.length === 0 ? (
+        ) : entries.length === 0 ? (
           <Empty>这一天没有符合条件的记录。</Empty>
         ) : (
           <Table head={['时间', '等级', '内容']}>
-            {res.entries.map((e, i) => (
+            {entries.map((e, i) => (
               <tr key={`${e.time}-${i}`} className="align-top">
                 <Cell className="whitespace-nowrap text-muted-foreground tabular-nums">
                   {formatClock(e.time, tz)}
