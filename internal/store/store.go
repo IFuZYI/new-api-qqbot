@@ -158,9 +158,26 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("create data dir %s: %w", dir, err)
 		}
 	}
-	dsn := path + "?_pragma=busy_timeout(10000)" +
+	// _txlock=immediate makes every transaction take the write lock at BEGIN
+	// rather than upgrading a read snapshot on its first write. The store's own
+	// transactions read a row and then write it (BumpSettingInt,
+	// ClaimPendingReward); with the default deferred BEGIN, another connection
+	// committing in between makes that snapshot stale and SQLite refuses the
+	// upgrade instantly with SQLITE_BUSY_SNAPSHOT — which busy_timeout does NOT
+	// cover, because the transaction is being told to roll back, not waiting for
+	// a lock. Measured before the fix: the second writer failed with
+	// "database is locked (517)" while the first waited on it. With the write
+	// lock held from BEGIN, the two queue on busy_timeout instead.
+	dsn := path + "?_txlock=immediate" +
+		"&_pragma=busy_timeout(10000)" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
+		// foreign_keys is ON for future constraints: today no table declares a
+		// FOREIGN KEY (verified: pragma_foreign_key_list is empty for every
+		// table), so it currently enforces nothing and an orphan member_groups
+		// row still inserts. It is kept because SQLite defaults it OFF per
+		// connection — a constraint added later would otherwise be silently
+		// unenforced, which is the failure mode that is hardest to notice.
 		"&_pragma=foreign_keys(1)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
@@ -640,30 +657,6 @@ func (s *Store) FinishReward(qq int64, date, state, message string, at time.Time
 		return fmt.Errorf("reward claim missing for %d on %s", qq, date)
 	}
 	return nil
-}
-
-// ClaimReward is the legacy claim API. New reward flows use ClaimPendingReward
-// and FinishReward to retain the first draw and distinguish paid from uncertain.
-// ClaimReward claims the one-time reward for a (qq, date) and records the amount
-// in the same statement, returning false if it was already claimed. Combining
-// them keeps the recorded amount equal to the amount actually paid even when two
-// sweeps run concurrently; the conditional WHERE is what makes the claim atomic.
-func (s *Store) ClaimReward(qq int64, date string, amount int, at time.Time) (bool, error) {
-	res := s.db.Model(&Checkin{}).
-		Where("qq = ? AND date = ? AND rewarded_at = 0", qq, date).
-		Updates(map[string]any{"rewarded_at": at.Unix(), "reward_quota": amount})
-	if res.Error != nil {
-		return false, res.Error
-	}
-	return res.RowsAffected == 1, nil
-}
-
-// ReleaseReward clears the claim on a (qq, date) so a failed award is retried.
-// It also resets the recorded amount, so the retry draws afresh.
-func (s *Store) ReleaseReward(qq int64, date string) error {
-	return s.db.Model(&Checkin{}).
-		Where("qq = ? AND date = ?", qq, date).
-		Updates(map[string]any{"rewarded_at": 0, "reward_quota": 0}).Error
 }
 
 // PendingRewardsThrough includes missed days, but never future or held claims.

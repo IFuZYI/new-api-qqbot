@@ -38,7 +38,9 @@ func TestConnectionPragmasAreInForce(t *testing.T) {
 		t.Errorf("journal_mode = %q, want wal", mode)
 	}
 
-	// foreign_keys is on, so an orphan row cannot be written silently.
+	// foreign_keys is on for any constraint declared later. NOTE: no table
+	// declares one today, so this asserts the SETTING, not enforcement — an
+	// orphan member_groups insert still succeeds (verified by the reviewer).
 	var fk int
 	if err := st.db.Raw("PRAGMA foreign_keys").Scan(&fk).Error; err != nil {
 		t.Fatalf("read foreign_keys: %v", err)
