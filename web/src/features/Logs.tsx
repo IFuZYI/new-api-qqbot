@@ -52,8 +52,16 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
   // search is pure waste.
   const daysRefreshedAt = useRef(0)
 
+  // reqSeq is the request generation. Changing the filter while a request is in
+  // flight leaves two responses racing, and the one that resolves LAST would win
+  // — which can be the older one (a slow ERROR query answering after a fast
+  // DEBUG one), leaving the rows showing one filter while the control shows
+  // another. Only the newest request is allowed to write state.
+  const reqSeq = useRef(0)
+
   const load = useCallback(
     async (opts: { day: string; level: string; q: string }) => {
+      const seq = ++reqSeq.current
       setBusy(true)
       try {
         const r = await api.logs({
@@ -61,6 +69,7 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
           level: (opts.level || undefined) as never,
           q: opts.q || undefined,
         })
+        if (seq !== reqSeq.current) return
         setRes(r)
         setErr('')
         if (r.tz) setTz(r.tz)
@@ -69,15 +78,17 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
         if (Date.now() - daysRefreshedAt.current > 60_000) {
           daysRefreshedAt.current = Date.now()
           const d = await api.logDays()
+          if (seq !== reqSeq.current) return
           setDays(d.days ?? [])
           setDir(d.dir)
           if (d.tz) setTz(d.tz)
         }
       } catch (e) {
+        if (seq !== reqSeq.current) return
         setErr(e instanceof Error ? e.message : String(e))
         onFail(e)
       } finally {
-        setBusy(false)
+        if (seq === reqSeq.current) setBusy(false)
       }
     },
     [onFail],
@@ -213,11 +224,30 @@ function Attrs({ entry }: { entry: LogEntry }) {
     <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-2xs text-muted-foreground">
       {Object.entries(attrs).map(([k, v]) => (
         <span key={k} className="break-all">
-          <span className="font-medium">{k}</span>={clip(String(v))}
+          <span className="font-medium">{k}</span>={clip(attrValue(v))}
         </span>
       ))}
     </div>
   )
+}
+
+/**
+ * attrValue renders one attribute value.
+ *
+ * String(v) turns a nested object into "[object Object]" and an array into a
+ * bare comma-joined list; JSON is what the file actually holds, so it is what
+ * the reader should see. Numbers and booleans keep their plain form.
+ */
+function attrValue(v: unknown): string {
+  if (v === null || v === undefined) return String(v)
+  if (typeof v === 'object') {
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return String(v)
+    }
+  }
+  return String(v)
 }
 
 /**
@@ -234,8 +264,12 @@ function clip(s: string, max = 240): string {
  * the calendar the selected day is in.
  */
 function formatClock(iso: string, tz: string): string {
+  if (!iso) return '—'
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return iso
+  // A zero timestamp (a producer that wrote no time) reads as 1/01/01 in the
+  // operator's zone; an em dash says "not recorded" instead of inventing a date.
+  if (t <= 0) return '—' 
   if (!tz) return formatDateTime(Math.floor(t / 1000))
   try {
     return new Intl.DateTimeFormat('zh-CN', {
