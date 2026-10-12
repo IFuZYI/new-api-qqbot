@@ -29,6 +29,9 @@ type fakeNewAPI struct {
 	// must be visible without relying on the first call failing.
 	findCalls     int
 	failFindAfter int
+	// getCalls counts GetUser invocations: a batch group change must read each
+	// account once, not once for the username and again for the write.
+	getCalls int
 
 	// failSetFor fails SetGroup for specific account ids, so a batch can be
 	// exercised with one protected account among successful ones.
@@ -85,6 +88,7 @@ func (f *fakeNewAPI) users() map[int]*newapi.User {
 }
 
 func (f *fakeNewAPI) GetUser(id int) (*newapi.User, error) {
+	f.getCalls++
 	if u, ok := f.users()[id]; ok {
 		return u, nil
 	}

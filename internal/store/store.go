@@ -843,6 +843,13 @@ func (s *Store) DeleteRule(id int64) error {
 }
 
 // MarkRuleRun records a rule's outcome.
+// MarkRuleRun records a rule's outcome.
+//
+// last_error is the RULE-level reason (the sweep could not run), not a
+// per-member one: a per-member failure is counted in the result and logged with
+// its qq/user_id, and an existing test pins that it must not mark the rule
+// itself broken. A clean run clears the field, so the panel's row stops
+// showing a reason that no longer applies.
 func (s *Store) MarkRuleRun(id int64, at int64, errMsg string) error {
 	return s.db.Model(&PromotionRule{}).Where("id = ?", id).Updates(map[string]any{
 		"last_run_at": at,

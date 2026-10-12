@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"qqbot/internal/newapi"
 	"qqbot/internal/store"
 )
 
@@ -271,9 +272,14 @@ func (s *Service) SyncNewAPIUsers() (int, error) {
 	if len(us) == 0 {
 		// An empty answer is ambiguous — a broken fetch and an instance with no
 		// accounts look identical from here — and a full replace with an empty
-		// list would wipe the cache. The read is reported as "0 accounts" and
-		// the cache is left as it was; the operator can still clear it
-		// deliberately from the panel.
+		// list would wipe the cache, so the read is reported as "0 accounts" and
+		// the cache is left as it was.
+		//
+		// There is deliberately no clear path: POST /api/users/sync is the only
+		// writer and it refuses the empty write, so an instance that genuinely
+		// has no accounts keeps its stale cache until the next non-empty read.
+		// (An earlier version of this comment promised a panel clear button that
+		// was never built.)
 		return 0, nil
 	}
 	out := make([]store.NewAPIUser, 0, len(us))
@@ -308,6 +314,19 @@ func (s *Service) SetUserGroup(userID int, group string) error {
 // setUserGroupLocked is the body of SetUserGroup for callers that already hold
 // groupMu (the bulk path holds it across the whole selection).
 func (s *Service) setUserGroupLocked(userID int, group string) error {
+	// A single change reads the account itself; the batch path already read it
+	// (one GetUser per account instead of two) and passes it in.
+	u, err := s.gw.GetUser(userID)
+	if err != nil {
+		return err
+	}
+	return s.setUserGroupFrom(userID, group, u, nil)
+}
+
+// setUserGroupFrom is the write half, for a caller that already read the
+// account. readErr is that read's error, so the validation and error reporting
+// stay in one place.
+func (s *Service) setUserGroupFrom(userID int, group string, u *newapi.User, readErr error) error {
 	group = strings.TrimSpace(group)
 	if group == "" {
 		return errors.New("目标分组不能为空")
@@ -315,9 +334,13 @@ func (s *Service) setUserGroupLocked(userID int, group string) error {
 	if userID == 0 {
 		return errors.New("new-api 账号 ID 不能为空")
 	}
-	u, err := s.gw.GetUser(userID)
-	if err != nil {
-		return err
+	if readErr != nil {
+		return readErr
+	}
+	if u == nil {
+		// The caller passed a nil account without an error, which cannot happen
+		// today; refuse rather than dereference it.
+		return errors.New("读取账号失败")
 	}
 	if u.Group == group {
 		// Already there: writing anyway would be a no-op on the gateway but
@@ -372,10 +395,14 @@ func (s *Service) SetUserGroups(userIDs []int, group string) ([]GroupChangeResul
 		}
 		seen[id] = true
 		res := GroupChangeResult{UserID: id, Group: group, QQ: bindings[id]}
-		if u, err := s.gw.GetUser(id); err == nil {
+		// Read the account once and hand it to the write path: reading it again
+		// inside setUserGroupLocked spent a second gateway call per account, and
+		// this loop is the one that has to be careful about the limiter.
+		u, readErr := s.gw.GetUser(id)
+		if readErr == nil {
 			res.Username = u.Username
 		}
-		if err := s.setUserGroupLocked(id, group); err != nil {
+		if err := s.setUserGroupFrom(id, group, u, readErr); err != nil {
 			res.Error = err.Error()
 		} else {
 			res.OK = true
