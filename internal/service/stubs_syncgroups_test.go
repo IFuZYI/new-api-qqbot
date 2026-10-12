@@ -99,6 +99,34 @@ func TestSyncGroupsKeepsTheEnabledChoice(t *testing.T) {
 		}
 	}
 
+	// The ENABLE direction is the dangerous one: SyncGroups builds
+	// store.MonitoredGroup without an Enabled field, so a refresh that took the
+	// caller's zero value would silently DISABLE every monitored group — and the
+	// operator's members would stop being recorded and paid. Only the disable
+	// side was pinned before, so `existing.Enabled = g.Enabled` survived.
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	gs, err = svc.SyncGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range gs {
+		if g.GroupID == 1 && !g.Enabled {
+			t.Error("the refresh DISABLED a group the operator had enabled")
+		}
+	}
+	// And it must still be enabled in the store, not just in the return value.
+	rows, err := st.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range rows {
+		if g.GroupID == 1 && !g.Enabled {
+			t.Error("the store lost the operator's enabled choice")
+		}
+	}
+
 	// A QQ failure is reported.
 	nc.groupListErr = errors.New("napcat down")
 	if _, err := svc.SyncGroups(); err == nil {

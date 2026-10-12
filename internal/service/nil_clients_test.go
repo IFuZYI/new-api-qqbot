@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -56,6 +57,11 @@ func TestNilGatewayFailsInsteadOfPanicking(t *testing.T) {
 }
 
 // A nil QQ client must not panic the roster or board reads either.
+//
+// The group must be ENABLED: SyncAllCheckins and SyncAllMembers only touch
+// enabled groups, so an empty group list meant the nil client was never
+// dereferenced — an independent reviewer removed the unconfiguredQQ stub and
+// this test stayed green. With an enabled group the call reaches the client.
 func TestNilQQClientFailsInsteadOfPanicking(t *testing.T) {
 	st, err := store.Open(t.TempDir() + "/nilqq.db")
 	if err != nil {
@@ -64,7 +70,26 @@ func TestNilQQClientFailsInsteadOfPanicking(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	svc := New(st, nil, nil)
 
-	if err := svc.SyncAllCheckins("2026-10-12"); err != nil {
-		t.Errorf("SyncAllCheckins with no QQ client must not fail the whole sweep: %v", err)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// The board read: it must report the sentinel, not panic. Unlike a group
+	// without a sign-in board (ErrNoSigninBoard, which is normal and skipped),
+	// an unconfigured client is a real failure and the sweep reports it.
+	if err := svc.SyncAllCheckins("2026-10-12"); err == nil {
+		t.Error("SyncAllCheckins with no QQ client reported success")
+	} else if !errors.Is(err, ErrQQNotConfigured) {
+		t.Errorf("SyncAllCheckins error = %v, want ErrQQNotConfigured", err)
+	}
+	// The roster read: it must surface the sentinel rather than panic.
+	err = svc.SyncAllMembers()
+	if err == nil {
+		t.Error("SyncAllMembers with no QQ client reported success")
+	} else if !errors.Is(err, ErrQQNotConfigured) {
+		t.Errorf("SyncAllMembers error = %v, want ErrQQNotConfigured", err)
 	}
 }
