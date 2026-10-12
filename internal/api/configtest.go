@@ -41,7 +41,10 @@ func (r *Router) testNewAPI(w http.ResponseWriter, req *http.Request) {
 
 	cur := r.cfg.MustLoad()
 	// A blank or redacted password means "use the stored one", so testing an
-	// unchanged form does not require retyping the secret.
+	// unchanged form does not require retyping the secret. The URL and the
+	// username fall back the same way: testing from the connection page usually
+	// means "try what is stored", and an empty body must not answer
+	// 「请先填写 new-api 地址、账号与密码」 when every value it needs is stored.
 	if in.Password == "" || in.Password == config.RedactedPassword {
 		in.Password = cur.NewAPI.Password
 	}
@@ -49,16 +52,20 @@ func (r *Router) testNewAPI(w http.ResponseWriter, req *http.Request) {
 	if url == "" {
 		url = cur.NewAPI.URL
 	}
-	if url == "" || in.Username == "" || in.Password == "" {
+	username := strings.TrimSpace(in.Username)
+	if username == "" {
+		username = cur.NewAPI.Username
+	}
+	if url == "" || username == "" || in.Password == "" {
 		writeErr(w, 400, errors.New("请先填写 new-api 地址、账号与密码"))
 		return
 	}
-	if err := (config.NewAPI{URL: url, Username: in.Username, Password: in.Password}).Validate(); err != nil {
+	if err := (config.NewAPI{URL: url, Username: username, Password: in.Password}).Validate(); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
 
-	user, reused, err := r.prober.ProbeGateway(url, in.Username, in.Password)
+	user, reused, err := r.prober.ProbeGateway(url, username, in.Password)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{
 			"results": []checkResult{{
