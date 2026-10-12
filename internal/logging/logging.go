@@ -205,6 +205,15 @@ func ParseLevel(name string) (slog.Level, error) {
 	return 0, fmt.Errorf("日志等级必须是 info 或 debug，收到 %q", name)
 }
 
+// LevelName is the canonical lowercase name for a level, so a value read back
+// from the settings compares equal to the name the logger reports.
+func LevelName(lv slog.Level) string {
+	if lv <= slog.LevelDebug {
+		return LevelDebug
+	}
+	return LevelInfo
+}
+
 // SetLevel changes the level of the running logger.
 func (m *Manager) SetLevel(name string) error {
 	lv, err := ParseLevel(name)
@@ -216,12 +225,7 @@ func (m *Manager) SetLevel(name string) error {
 }
 
 // Level reports the current level name.
-func (m *Manager) Level() string {
-	if m.level.Level() <= slog.LevelDebug {
-		return LevelDebug
-	}
-	return LevelInfo
-}
+func (m *Manager) Level() string { return LevelName(m.level.Level()) }
 
 // dayFile is an io.Writer that appends to the file for the clock's current day,
 // switching files at midnight. slog hands it one complete record per Write, so

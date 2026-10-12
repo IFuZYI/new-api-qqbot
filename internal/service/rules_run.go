@@ -251,6 +251,11 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 			}
 			if err := s.gw.SetGroup(u, rule.TargetGroup); err != nil {
 				res.Failed++
+				// Record the reason here too: this is the same operation the
+				// on-bind path performs, and leaving res.Error empty also made
+				// MarkRuleRun store a stale error from an earlier run.
+				res.Error = err.Error()
+				slog.Warn("分组转换失败", "rule", rule.Name, "qq", b.QQ, "user_id", u.ID, "target", rule.TargetGroup, "err", err)
 				continue
 			}
 			// The gateway client does not mutate u, so record the new group

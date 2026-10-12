@@ -240,9 +240,14 @@ func (s *Service) SaveSettings(in Settings) error {
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
 		return fmt.Errorf("unknown timezone %q: %w", in.Timezone, err)
 	}
-	if _, err := logging.ParseLevel(in.LogLevel); err != nil {
+	// Store the canonical spelling: ParseLevel accepts "DEBUG" and " debug ",
+	// and a verbatim copy would then be compared against the logger's own name
+	// ("debug") by every reader that checks whether the setting changed.
+	lv, err := logging.ParseLevel(in.LogLevel)
+	if err != nil {
 		return err
 	}
+	in.LogLevel = logging.LevelName(lv)
 
 	// A broken expression must be refused here, by the operator who typed it,
 	// rather than silently becoming a pattern that never matches - the failure
