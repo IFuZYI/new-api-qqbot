@@ -41,10 +41,17 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
   // it too: with the browser in another zone, a record filed under the
   // operator's day would otherwise read as a time on the day before.
   const [tz, setTz] = useState('')
+  // today is the server's today, kept apart from the selected day: the 今天
+  // option's value is '' and its label must name the day that value selects.
+  const [today, setToday] = useState('')
   const [day, setDay] = useState('')
   const [level, setLevel] = useState('')
   const [search, setSearch] = useState('')
-  const [busy, setBusy] = useState(false)
+  // inFlight counts requests, so the 刷新 button stays disabled while ANY query
+  // is outstanding: a boolean set/cleared per request re-enabled it as soon as
+  // the first of two overlapping requests settled.
+  const [inFlight, setInFlight] = useState(0)
+  const busy = inFlight > 0
   const [err, setErr] = useState('')
 
   // daysRefreshedAt throttles the day-list request: it only changes when a day
@@ -62,7 +69,7 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
   const load = useCallback(
     async (opts: { day: string; level: string; q: string }) => {
       const seq = ++reqSeq.current
-      setBusy(true)
+      setInFlight((n) => n + 1)
       try {
         const r = await api.logs({
           day: opts.day || undefined,
@@ -72,12 +79,19 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
         if (seq !== reqSeq.current) return
         setRes(r)
         setErr('')
+        // Only a query with no day parameter answers for TODAY: r.day is the
+        // day that was asked for, so reading it unconditionally made the 今天
+        // option claim a past day was today.
+        if (!opts.day && r.day) setToday(r.day)
         if (r.tz) setTz(r.tz)
         // Refresh the picker at most once a minute: it is a directory listing,
         // not part of the query.
         if (Date.now() - daysRefreshedAt.current > 60_000) {
-          daysRefreshedAt.current = Date.now()
           const d = await api.logDays()
+          // Arm the throttle only after the listing landed: arming it first
+          // locked the picker out for a minute after a FAILED listing, with the
+          // directory hint left blank and nothing to select.
+          daysRefreshedAt.current = Date.now()
           if (seq !== reqSeq.current) return
           setDays(d.days ?? [])
           setDir(d.dir)
@@ -88,7 +102,7 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
         setErr(e instanceof Error ? e.message : String(e))
         onFail(e)
       } finally {
-        if (seq === reqSeq.current) setBusy(false)
+        setInFlight((n) => n - 1)
       }
     },
     [onFail],
@@ -102,6 +116,8 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
   }, [load])
 
   const apply = (next: Partial<{ day: string; level: string; q: string }>) => {
+    // The 今天 option carries value '' and means "no day parameter" — that is
+    // what makes the server answer for today.
     const q = { day, level, q: search, ...next }
     if (next.day !== undefined) setDay(next.day)
     if (next.level !== undefined) setLevel(next.level)
@@ -131,7 +147,11 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
               ariaLabel="日志日期"
               className="w-44"
             >
-              <option value="">今天（{res?.day ?? '…'}）</option>
+              {/* Labelled from the SERVER's today, not from the selected day:
+                  res.day is the day the current query answered for, so after
+                  picking a past day this option used to claim that past day was
+                  today while its value ('') still means today. */}
+              <option value="">{today ? `今天（${today}）` : '今天'}</option>
               {days.map((d) => (
                 <option key={d.day} value={d.day}>
                   {d.day}（{formatSize(d.size)}）
@@ -148,7 +168,7 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
               ))}
             </Select>
           </Field>
-          <Field label="搜索" hint="匹配消息与属性值，例如 QQ 号、错误串">
+          <Field label="搜索" hint="匹配消息、属性名与属性值，例如 QQ 号、patrol、错误串">
             <form
               // Without preventDefault the browser performs a real navigation:
               // the SPA reloads, the filter is lost and the operator is back on
@@ -180,6 +200,16 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
             </Badge>
           ))}
           {res?.truncated && <span className="text-2xs text-muted-foreground">只显示最新的若干条，请缩小范围</span>}
+          {!!res?.unparsed && (
+            <span className="text-2xs text-muted-foreground">
+              其中 {res.unparsed} 条无法解析（半截记录），计入总数但不会列出
+            </span>
+          )}
+          {res?.incomplete && (
+            <span className="text-2xs text-destructive">
+              读取中断：有一条超长记录，之后的记录未计入
+            </span>
+          )}
         </div>
 
         {err && <div className="mt-3"><ErrorNote>{err}</ErrorNote></div>}
@@ -187,7 +217,18 @@ export default function LogsView({ onFail }: { onFail: (e: unknown) => void }) {
 
       <Card title="记录">
         {!res ? (
-          '载入中…'
+          err ? (
+            // A failed first load leaves res null; without this branch the card
+            // said 载入中… forever while the error was already known.
+            <div className="space-y-3">
+              <ErrorNote>{err}</ErrorNote>
+              <Button size="sm" onClick={() => apply({})}>
+                重试
+              </Button>
+            </div>
+          ) : (
+            '载入中…'
+          )
         ) : res.entries.length === 0 ? (
           <Empty>这一天没有符合条件的记录。</Empty>
         ) : (

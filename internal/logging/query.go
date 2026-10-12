@@ -44,10 +44,21 @@ const (
 
 // Result is a query's answer.
 type Result struct {
-	Day       string         `json:"day"`
-	Entries   []Entry        `json:"entries"`
-	Counts    map[string]int `json:"counts"`
-	Truncated bool           `json:"truncated"`
+	Day     string         `json:"day"`
+	Entries []Entry        `json:"entries"`
+	Counts  map[string]int `json:"counts"`
+	// Truncated means the limit cut the list short: there are more records than
+	// the caller asked for.
+	Truncated bool `json:"truncated"`
+	// Unparsed counts lines whose level could be read but which do not decode
+	// (a partial write, a record from another producer). They are in Counts but
+	// can never appear in Entries, so the panel has to say so or its totals and
+	// its list disagree with no explanation.
+	Unparsed int `json:"unparsed"`
+	// Incomplete means the scan stopped early (a record longer than the read
+	// limit). Everything after that point is missing from both Counts and
+	// Entries, so the day's numbers are a lower bound.
+	Incomplete bool `json:"incomplete"`
 }
 
 // QueryError is a malformed query (the caller's mistake), as opposed to a
@@ -125,6 +136,7 @@ func (m *Manager) Query(q Query) (Result, error) {
 		}
 		e, ok := decodeEntry(line)
 		if !ok {
+			res.Unparsed++
 			continue
 		}
 		if search != "" && !matchesSearch(e, search) {
@@ -132,8 +144,14 @@ func (m *Manager) Query(q Query) (Result, error) {
 		}
 		matched = append(matched, e)
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return res, err
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			// A line longer than maxLine stops the scan: the records after it
+			// are silently absent, so the caller is told the answer is partial.
+			res.Incomplete = true
+		} else {
+			return res, err
+		}
 	}
 	if len(matched) > limit {
 		matched = matched[len(matched)-limit:]
@@ -191,7 +209,7 @@ func attrText(v any) string {
 }
 
 // matchesSearch reports whether a record mentions term (already lowercased) in
-// its message or one of its attribute values.
+// its message, one of its attribute names, or one of its attribute values.
 //
 // The raw line is deliberately NOT searched: it also carries the timestamp and
 // the level, so a search for "502" matched every record whose nanosecond field

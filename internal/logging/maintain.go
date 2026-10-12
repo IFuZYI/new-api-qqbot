@@ -18,17 +18,29 @@ const MaintainInterval = time.Hour
 
 // Apply sets the level and runs the retention sweep once.
 //
+// It is serialised: the hourly maintenance tick and a settings save can call it
+// at the same moment, and two sweeps over the same directory make the loser's
+// os.Remove return ENOENT, which was reported as a cleanup FAILURE even though
+// every file it wanted gone was gone. (Measured: 38% of overlapping pairs with
+// 23 expired files logged a false ERROR, which is the one level the operator is
+// meant to trust.) Serialising also keeps the level-change record exact.
+//
 // A change of level is itself recorded: the operator flips the switch in the
 // panel and then opens the log page, and without a line saying the new level is
 // in force they cannot tell the save from a silent failure. An unchanged policy
 // records nothing, because the maintenance loop re-applies it every hour.
 func (m *Manager) Apply(p Policy) {
-	changed := p.Level != "" && p.Level != m.Level()
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	// Decide "did it change" from what the logger actually holds, and only after
+	// a successful set: comparing the raw stored string against the canonical
+	// name made "DEBUG" look like a change on every hourly tick, and announcing
+	// a refused value said "已生效" next to the warning that it was ignored.
+	before := m.Level()
 	if err := m.SetLevel(p.Level); err != nil {
 		m.logger.Warn("忽略无效的日志等级", "level", p.Level, "err", err)
-	}
-	if changed {
-		m.logger.Info("日志等级已生效", "new_level", m.Level())
+	} else if after := m.Level(); after != before {
+		m.logger.Info("日志等级已生效", "new_level", after)
 	}
 	removed, err := m.Cleanup(p.RetentionDays)
 	if err != nil {

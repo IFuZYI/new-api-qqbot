@@ -137,10 +137,12 @@ func (r *Router) listLogs(w http.ResponseWriter, req *http.Request) {
 // follows the operator's calendar to avoid.
 func logResponse(res logging.Result, m *logging.Manager) map[string]any {
 	out := map[string]any{
-		"day":       res.Day,
-		"entries":   res.Entries,
-		"counts":    res.Counts,
-		"truncated": res.Truncated,
+		"day":        res.Day,
+		"entries":    res.Entries,
+		"counts":     res.Counts,
+		"truncated":  res.Truncated,
+		"unparsed":   res.Unparsed,
+		"incomplete": res.Incomplete,
 	}
 	if m != nil && m.Location() != nil {
 		out["tz"] = m.Location().String()

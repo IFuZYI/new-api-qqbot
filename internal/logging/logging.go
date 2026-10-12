@@ -13,6 +13,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +53,11 @@ type Manager struct {
 	// locMu guards loc, which SetLocation changes while the service is running.
 	locMu sync.RWMutex
 	loc   *time.Location
+
+	// applyMu serialises Apply, which the maintenance tick and a settings save
+	// can both reach: two sweeps over one directory make the loser's os.Remove
+	// return ENOENT and log a false cleanup failure.
+	applyMu sync.Mutex
 
 	file   *dayFile
 	logger *slog.Logger
@@ -298,6 +304,13 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(m.dir, e.Name())); err != nil {
+			// Already gone is success: the sweep wanted the file deleted, and a
+			// concurrent sweep (or an operator tidying the directory by hand)
+			// got there first. Reporting it as a failure would put a false ERROR
+			// in the one view the operator is meant to trust.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

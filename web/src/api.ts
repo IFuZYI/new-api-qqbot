@@ -109,6 +109,11 @@ export interface LogResponse {
   /** Per-level totals for the whole day, regardless of the filter. */
   counts: Record<string, number>
   truncated: boolean
+  /** Lines whose level was readable but which do not decode; they are in the
+   *  counts but can never be listed. */
+  unparsed?: number
+  /** The scan stopped early (an over-long record): the numbers are a lower bound. */
+  incomplete?: boolean
   /** IANA name of the timezone the day boundaries follow (the operator's). */
   tz?: string
 }
