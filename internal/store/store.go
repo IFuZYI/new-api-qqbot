@@ -301,6 +301,19 @@ func (s *Store) SetGroupEnabled(groupID int64, enabled bool) error {
 // updated, and memberships that are no longer present are removed from that
 // group. Member rows are never deleted, so history (bindings, check-ins) survives.
 func (s *Store) UpsertMembers(groupID int64, ms []Member) error {
+	// An EMPTY roster is refused rather than reconciled to nothing.
+	//
+	// The reconciliation below is deliberate: a member the group no longer
+	// reports has left, and their membership row must go. But "the group has no
+	// members" is impossible for a roster this service can read — the bot is
+	// itself a member of every group it polls — so an empty list means the read
+	// was partial (NapCat's member cache can be transiently empty and still
+	// answer retcode 0), not that everyone left. Reconciling it would blank the
+	// whole group in the panel until the next poll, which is the same class of
+	// damage as replacing the new-api user cache from a partial fetch.
+	if len(ms) == 0 {
+		return nil
+	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		seen := make([]int64, 0, len(ms))
 		for _, m := range ms {
