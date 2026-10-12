@@ -156,8 +156,57 @@ type Service struct {
 	rnd   *rand.Rand
 }
 
+// ErrNotConfigured is what a Service without a gateway or QQ client reports.
+// It is a sentinel so a caller can tell "this instance has no connection
+// configured" from an upstream failure.
+var ErrNotConfigured = errors.New("未配置 new-api 连接")
+
+// ErrQQNotConfigured is the same for the QQ side.
+var ErrQQNotConfigured = errors.New("未配置 NapCat 连接")
+
+// unconfiguredGateway fails every call with ErrNotConfigured.
+//
+// New accepts nil for either dependency (tests and partial wiring do), and the
+// call sites dereference the interface directly, so a nil one used to panic the
+// process instead of reporting that nothing is configured. Substituting an
+// explicit failing implementation keeps every call site unchanged and turns the
+// crash into an error the caller already handles.
+type unconfiguredGateway struct{}
+
+func (unconfiguredGateway) FindUserByEmail(string) (*newapi.User, error) {
+	return nil, ErrNotConfigured
+}
+func (unconfiguredGateway) GetUser(int) (*newapi.User, error) { return nil, ErrNotConfigured }
+func (unconfiguredGateway) SetGroup(*newapi.User, string) error {
+	return ErrNotConfigured
+}
+func (unconfiguredGateway) AddQuota(int, int) error              { return ErrNotConfigured }
+func (unconfiguredGateway) Groups() (map[string]struct{}, error) { return nil, ErrNotConfigured }
+func (unconfiguredGateway) ListUsers() ([]newapi.User, error)    { return nil, ErrNotConfigured }
+
+// unconfiguredQQ fails every call with ErrQQNotConfigured.
+type unconfiguredQQ struct{}
+
+func (unconfiguredQQ) GetGroupList() ([]napcat.Group, error) { return nil, ErrQQNotConfigured }
+func (unconfiguredQQ) GetGroupMemberList(int64) ([]napcat.GroupMember, error) {
+	return nil, ErrQQNotConfigured
+}
+func (unconfiguredQQ) GetGroupSignedList(int64) ([]napcat.SignedMember, error) {
+	return nil, ErrQQNotConfigured
+}
+
 // New builds a Service.
+//
+// A nil gateway or QQ client is replaced by an implementation that fails every
+// call with ErrNotConfigured / ErrQQNotConfigured: a missing connection must be
+// reported, not turned into a nil-pointer panic.
 func New(st *store.Store, gw Gateway, qq QQ) *Service {
+	if gw == nil {
+		gw = unconfiguredGateway{}
+	}
+	if qq == nil {
+		qq = unconfiguredQQ{}
+	}
 	return &Service{
 		st:  st,
 		gw:  gw,
