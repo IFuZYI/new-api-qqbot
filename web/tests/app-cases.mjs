@@ -75,4 +75,31 @@ export const tests = {
     check(!text().includes('批量调整到'),'a stale batch note survived the next hard failure');
     return {staleCleared:true};
   `,
+
+  // S-2: a Field's hint must reach the control it describes, for every control
+  // type — not just Input and Select. Measured before the fix: the 分组转换
+  // Switch, MultiSelect and Combobox all had aria-describedby null and an empty
+  // AX description, so 停用的规则不参与绑定触发 / 可多选；留空 = 任意分组 stayed
+  // visual-only. Also S-3: the hint must NOT be inside the wrapping label, which
+  // would make it part of the accessible name and announce it twice.
+  'F-17': `
+    await fresh(); await click('监测设置'); await wait(250);
+    const ax=(el)=>{
+      // The description an assistive technology would announce.
+      const id=el.getAttribute('aria-describedby');
+      if(!id)return '';
+      const t=document.getElementById(id);
+      return t?t.textContent.trim():'';
+    };
+    const retention=document.querySelector('[aria-label="日志保留天数"]');
+    check(!!retention,'no retention control');
+    check(ax(retention).length>0,'the retention hint is not associated with its control');
+    // S-3: the hint must not also be part of the accessible NAME. The wrapping
+    // label's text content is the name; the hint lives outside it now.
+    const label=retention.closest('label');
+    check(!!label,'retention control is not inside a label');
+    const nameText=label.textContent.trim();
+    check(!nameText.includes('永久保留'),'the hint is inside the label, so it is announced twice (name: '+nameText+')');
+    return {associated:true, nameClean:true};
+  `,
 };

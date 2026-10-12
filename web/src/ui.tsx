@@ -240,20 +240,31 @@ export function Field({
     // controls on 连接配置 had an empty accessible name and clicking a label
     // focused nothing, so a screen reader read "edit text, blank" for every
     // field. Wrapping associates every field with no call-site change.
-    <label className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-xs font-medium text-foreground/80">{label}</span>
-      {/* The description is attached to whatever control the caller passes. */}
-      {hint ? (
-        <FieldHintContext.Provider value={hintId}>{children}</FieldHintContext.Provider>
-      ) : (
-        children
-      )}
+    // The hint sits OUTSIDE the <label>.
+    //
+    // A wrapping label takes its accessible name from its whole text content, so
+    // a hint inside it became part of the name AND the aria-describedby target —
+    // measured on 奖励下限: name "奖励下限（quota） 单位是 new-api 的 quota，不做货币
+    // 换算" and the same string again as the description. Outside the label the
+    // name is the label text alone and the hint is the description, which is what
+    // aria-describedby is for. The layout is unchanged: this div is the same flex
+    // column the label was.
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label className="flex min-w-0 flex-col gap-1.5">
+        <span className="text-xs font-medium text-foreground/80">{label}</span>
+        {/* The description is attached to whatever control the caller passes. */}
+        {hint ? (
+          <FieldHintContext.Provider value={hintId}>{children}</FieldHintContext.Provider>
+        ) : (
+          children
+        )}
+      </label>
       {hint && (
         <span id={hintId} className="text-2xs text-muted-foreground">
           {hint}
         </span>
       )}
-    </label>
+    </div>
   )
 }
 
@@ -602,6 +613,10 @@ export function Combobox({
         aria-activedescendant={open && hiIdx >= 0 ? optId(hiIdx) : undefined}
         aria-autocomplete="list"
         aria-label={ariaLabel}
+        // The enclosing Field's hint is announced with the control, like Input
+        // and Select already do: 从群成员里选择 stayed visual-only for a screen
+        // reader because nothing pointed at it.
+        aria-describedby={useFieldHint()}
         autoComplete="off"
         disabled={disabled}
         value={shown}
@@ -751,6 +766,9 @@ export function MultiSelect({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-label={ariaLabel}
+        // See Combobox: the Field's hint must reach this control too, or
+        // 可多选；留空 = 任意分组 is visual-only.
+        aria-describedby={useFieldHint()}
         className={`flex items-center justify-between gap-2 text-left ${CONTROL} ${FOCUS}`}
       >
         <span className={`min-w-0 truncate ${selected.length === 0 ? 'text-muted-foreground' : ''}`}>
@@ -844,6 +862,9 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel ?? label}
+      // The Field's hint reaches the switch as well: 停用的规则不参与绑定触发 is
+      // the whole point of the control and was visual-only.
+      aria-describedby={useFieldHint()}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`group inline-flex min-h-8 items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS} rounded-control`}
