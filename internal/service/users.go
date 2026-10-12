@@ -263,7 +263,18 @@ func formatQQ(qq int64) string {
 func (s *Service) SyncNewAPIUsers() (int, error) {
 	us, err := s.gw.ListUsers()
 	if err != nil {
+		// The cache is written with a FULL replace, so it must only be written
+		// after a complete read: caching a failed fetch would delete real
+		// accounts. The error is returned and the cache is left alone.
 		return 0, err
+	}
+	if len(us) == 0 {
+		// An empty answer is ambiguous — a broken fetch and an instance with no
+		// accounts look identical from here — and a full replace with an empty
+		// list would wipe the cache. The read is reported as "0 accounts" and
+		// the cache is left as it was; the operator can still clear it
+		// deliberately from the panel.
+		return 0, nil
 	}
 	out := make([]store.NewAPIUser, 0, len(us))
 	for _, u := range us {
