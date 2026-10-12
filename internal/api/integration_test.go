@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -120,6 +122,11 @@ type scriptedQQ struct {
 	members  map[int64][]napcat.GroupMember
 	signed   map[int64][]napcat.SignedMember
 	boardErr map[int64]error
+	// groupErr fails every roster read, for the 5xx path.
+	groupErr error
+	// memberReads counts GetGroupMemberList calls, so a test can assert that a
+	// switched-off sweep made none.
+	memberReads int
 }
 
 func newScriptedQQ() *scriptedQQ {
@@ -128,6 +135,10 @@ func newScriptedQQ() *scriptedQQ {
 
 func (q *scriptedQQ) GetGroupList() ([]napcat.Group, error) { return q.groups, nil }
 func (q *scriptedQQ) GetGroupMemberList(id int64) ([]napcat.GroupMember, error) {
+	q.memberReads++
+	if q.groupErr != nil {
+		return nil, q.groupErr
+	}
 	return q.members[id], nil
 }
 func (q *scriptedQQ) GetGroupSignedList(id int64) ([]napcat.SignedMember, error) {
@@ -160,6 +171,13 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	cfgMgr := config.NewManager(filepath.Join(dir, config.FileName), st)
 	r := NewRouter(st, svc, cfgMgr, dir)
 	r.SetLogs(logs)
+	// traceRequests logs through the PACKAGE-level slog, so without this the
+	// records under test go to the process default logger and the manager the
+	// test queries sees nothing — measured: 0 entries after a request, 1 after a
+	// direct e.logs.Logger().Info(...). Every log assertion in this file would
+	// have been vacuous.
+	logs.InstallDefault()
+	t.Cleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil))) })
 	// The patrol endpoints are part of the wiring under test: without a runner
 	// they answer 503, which is correct but would hide the chain this file
 	// exists to exercise.
@@ -351,12 +369,24 @@ func TestIntegrationDisabledPatrolMakesNoQQRequest(t *testing.T) {
 	if err := e.svc.SaveSettings(s); err != nil {
 		t.Fatal(err)
 	}
-	// The action endpoint is an explicit request, so it still runs; the point is
-	// that it is the ONLY way in while the switch is off.
-	before := len(e.qq.groups)
+	// The switch gates the PATROL, not the explicit action: an operator's click
+	// is deliberate and runs regardless (the same distinction the scheduler
+	// makes for RunNow). So this asserts the two things that are actually
+	// testable end to end: the action answers 200, and the sweep it triggers
+	// really does read the roster — without which "the patrol is off" would be
+	// indistinguishable from "the sweep is broken".
+	//
+	// This asserted NOTHING before (a counter incremented, then `_ = before`):
+	// an independent reviewer forced the sync case to answer 500 and the test
+	// stayed green through 50 repeats.
+	readsBefore := e.qq.memberReads
 	var out map[string]any
-	_ = postJSONWith(t, e.client, e.srv.URL+"/api/actions/sync", map[string]any{}, &out)
-	_ = before
+	if code := postJSONWith(t, e.client, e.srv.URL+"/api/actions/sync", map[string]any{}, &out); code != 200 {
+		t.Fatalf("the explicit action answered %d: %+v", code, out)
+	}
+	if got := e.qq.memberReads - readsBefore; got == 0 {
+		t.Error("the explicit sweep read no roster at all: the endpoint did not run")
+	}
 }
 
 // The settings round trip through the real stack: a save is visible on the next
@@ -383,25 +413,61 @@ func TestIntegrationSettingsSaveReachesTheLogger(t *testing.T) {
 
 // A request that the store cannot satisfy must answer 5xx and record an ERROR,
 // not a 200 with an empty body: the panel and the log must agree.
+//
+// The 4xx half is checked too, and it has to be a REAL 4xx: an earlier version
+// of this test posted a rule with an unknown target_group and accepted "400 or
+// 200", because CreateRule never consults the gateway's group list and answered
+// 200. With that ambiguity the test passed while the level rule was mutated to
+// log every 4xx as ERROR.
 func TestIntegrationServerErrorIsRecordedAndReported(t *testing.T) {
 	e := newIntegrationEnv(t)
-	// A rule referencing a group the gateway does not know: the create path
-	// validates against the gateway's group list, so this is a 400 (the
-	// caller's input), which must NOT be recorded as ERROR.
+
+	// A 4xx first: a rule with no name is refused by the create path, and it is
+	// the CALLER's input, so it must not be recorded as ERROR.
 	var out map[string]any
 	code := postJSONWith(t, e.client, e.srv.URL+"/api/rules", map[string]any{
-		"name": "bad", "enabled": true, "interval_minutes": 60, "target_group": "nope",
+		"name": "", "enabled": true, "interval_minutes": 60, "target_group": "vip",
 	}, &out)
-	if code != 400 && code != 200 {
-		t.Fatalf("unexpected status %d: %+v", code, out)
+	if code != 400 {
+		t.Fatalf("a nameless rule answered %d, want 400: %+v", code, out)
 	}
 	res, err := e.logs.Query(logging.Query{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range res.Entries {
-		if entry.Level == "ERROR" {
+		if entry.Level == "ERROR" && entry.Attrs["path"] == "/api/rules" {
 			t.Errorf("a 4xx was recorded as ERROR: %s %+v", entry.Msg, entry.Attrs)
 		}
+	}
+
+	// Then a real 5xx. The QQ read fails (an unreachable NapCat), which the
+	// action endpoint reports as 502 — a genuine upstream failure, and one that
+	// leaves the session intact, unlike closing the store (that turns every
+	// request into 401 before the handler runs).
+	e.qq.groupErr = errors.New("napcat unreachable")
+	e.monitorGroup(t, 1, "g")
+	code = postJSONWith(t, e.client, e.srv.URL+"/api/actions/sync", map[string]any{}, &out)
+	if code != 502 {
+		t.Fatalf("a failing QQ read answered %d, want 502: %+v", code, out)
+	}
+	res, err = e.logs.Query(logging.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range res.Entries {
+		if entry.Level == "ERROR" && entry.Attrs["path"] == "/api/actions/sync" {
+			found = true
+			// The failure must be answerable from the record: the panel filters
+			// on the ERROR level, and "the button did nothing" is answered by
+			// fields, not by a sentence.
+			if entry.Attrs["status"] == nil {
+				t.Errorf("the ERROR record does not carry the status: %+v", entry.Attrs)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("a 5xx was not recorded as ERROR at all: %+v", res.Entries)
 	}
 }

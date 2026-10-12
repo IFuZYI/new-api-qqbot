@@ -108,9 +108,14 @@ func TestStartupLoggingSurvivesABadTimezone(t *testing.T) {
 
 	applyStartupLogging(logs, svc, "test-data")
 
-	// It must not panic and must still log somewhere: the host's day, since the
-	// operator's zone is unusable.
-	if _, err := os.Stat(filepath.Join(dir, "logs", "qqbot-2026-10-12.log")); err != nil {
+	// It must not panic and must still log somewhere: the HOST's day, since the
+	// operator's zone is unusable. The expected day is computed from the same
+	// injected clock and the host's location rather than written as a literal —
+	// a literal is only correct when the host happens to be UTC, and this test
+	// failed under TZ=Asia/Shanghai (the fixed instant is 19:00Z, which is the
+	// 13th in Beijing).
+	day := host.In(time.Local).Format(time.DateOnly)
+	if _, err := os.Stat(filepath.Join(dir, "logs", "qqbot-"+day+".log")); err != nil {
 		t.Errorf("a bad timezone broke start-up logging entirely: %v", err)
 	}
 	_ = slog.LevelInfo

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"qqbot/internal/napcat"
 	"qqbot/internal/service"
@@ -417,8 +418,24 @@ func TestActionMapsEveryFailureToItsStatus(t *testing.T) {
 		if code := postJSONWith(t, env.client, env.srv.URL+"/api/actions/checkin", map[string]any{}, &out); code != 200 {
 			t.Fatalf("status %d", code)
 		}
-		if len(out.Date) != len("2006-01-02") || out.Checked != 0 {
-			t.Errorf("unexpected body: %+v", out)
+		// The VALUE matters, not its length: `len(out.Date) != len("2006-01-02")`
+		// passed for any 10-character string, so a constant wrong day shipped.
+		// Compute the expected day the way the service does — its own Today() —
+		// rather than from a literal. The value matters, not its length:
+		// `len(out.Date) != len("2006-01-02")` passed for any 10-character
+		// string, so a constant wrong day shipped.
+		want, err := env.router.svc.Today()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Date != want {
+			t.Errorf("date = %q, want the day the service reports (%q)", out.Date, want)
+		}
+		if _, err := time.Parse(time.DateOnly, out.Date); err != nil {
+			t.Errorf("date %q is not a calendar day: %v", out.Date, err)
+		}
+		if out.Checked != 0 {
+			t.Errorf("checked = %d, want 0", out.Checked)
 		}
 	})
 

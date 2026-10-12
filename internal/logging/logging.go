@@ -342,14 +342,7 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 		if !ok || e.IsDir() || day >= cutoff {
 			continue
 		}
-		if err := os.Remove(filepath.Join(m.dir, e.Name())); err != nil {
-			// Already gone is success: the sweep wanted the file deleted, and a
-			// concurrent sweep (or an operator tidying the directory by hand)
-			// got there first. Reporting it as a failure would put a false ERROR
-			// in the one view the operator is meant to trust.
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
+		if err := m.removeExpired(filepath.Join(m.dir, e.Name())); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -358,6 +351,22 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 		removed++
 	}
 	return removed, firstErr
+}
+
+// removeExpired deletes one expired day file.
+//
+// Already gone is SUCCESS: the sweep wanted the file deleted, and a concurrent
+// sweep (or an operator tidying the directory by hand) got there first.
+// Reporting it as a failure would put a false ERROR in the one view the operator
+// is meant to trust. Extracted from Cleanup so the tolerance is testable
+// directly — the racy version of the test only caught it in ~3% of runs, because
+// the ENOENT landed in whichever goroutine happened to lose.
+func (m *Manager) removeExpired(path string) error {
+	err := os.Remove(path)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // dayOf extracts the date from a daily file's name.
