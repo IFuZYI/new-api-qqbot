@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -432,6 +433,23 @@ type lazyQQ struct {
 	mu     sync.Mutex
 	webui  *napcat.WebUI
 	webuiK string // config fingerprint the cached bridge was built from
+	// Login attempts are budgeted per window, because NapCat allows only 10 per
+	// 60s. A dead credential is routine — it is signed with NapCat's
+	// per-process secret unless NAPCAT_WEBUI_JWT_SECRET_KEY is set, so it dies
+	// with every restart — and without a budget a sweep re-logins once per
+	// group: measured, 20 refused reads produced 20 logins, which exhausts the
+	// allowance and leaves the fallback failing with "login rate limit" instead
+	// of recovering. A small budget still lets the documented recovery happen
+	// (a re-login after a refusal) while leaving the allowance headroom.
+	loginWindowStart time.Time
+	loginCount       int
+	// loginKey is the config fingerprint the budget was spent on. A changed
+	// address or token is the operator's fix for a dead credential, so it must
+	// not be held back by a budget spent on the old one.
+	loginKey string
+	// loginWindow and loginBudget are fields so a test can drive them directly.
+	loginWindow time.Duration
+	loginBudget int
 }
 
 func (l *lazyQQ) onebot() (*napcat.Client, error) {
@@ -457,6 +475,32 @@ func (l *lazyQQ) webuiClient() (*napcat.WebUI, error) {
 	if l.webui != nil && l.webuiK == key && l.webui.Credential() != "" {
 		return l.webui, nil
 	}
+	// Budget the attempts per window: NapCat allows 10 logins per 60s, and a
+	// sweep that re-logins per call spends the whole allowance and then fails
+	// with "login rate limit" for the rest of the minute.
+	window := l.loginWindow
+	if window == 0 {
+		window = 60 * time.Second
+	}
+	budget := l.loginBudget
+	if budget == 0 {
+		budget = 3
+	}
+	now := time.Now()
+	if l.loginKey != key {
+		// A changed address or token is the operator's fix for a dead
+		// credential, so it starts a fresh window.
+		l.loginKey, l.loginWindowStart, l.loginCount = key, now, 0
+	}
+	if now.Sub(l.loginWindowStart) >= window {
+		l.loginWindowStart, l.loginCount = now, 0
+	}
+	if l.loginCount >= budget {
+		wait := window - now.Sub(l.loginWindowStart)
+		return nil, fmt.Errorf("NapCat WebUI 登录过于频繁，%s 后重试（窗口内已尝试 %d 次）",
+			wait.Round(time.Second), l.loginCount)
+	}
+	l.loginCount++
 	w := napcat.NewWebUI(cfg.NapCat.WebUIURL, cfg.NapCat.WebUIToken)
 	if err := w.Login(); err != nil {
 		return nil, err
