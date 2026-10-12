@@ -137,10 +137,13 @@ func (f *fakeNewAPI) AddQuota(userID, value int) error {
 
 // fakeNapCat serves canned rosters, boards and group lists.
 type fakeNapCat struct {
-	groups   []napcat.Group
-	members  map[int64][]napcat.GroupMember
-	board    map[int64][]napcat.SignedMember
-	boardErr map[int64]error
+	groups []napcat.Group
+	// groupListErr makes the group-list read fail, so a caller's error path is
+	// exercised without a second fake.
+	groupListErr error
+	members      map[int64][]napcat.GroupMember
+	board        map[int64][]napcat.SignedMember
+	boardErr     map[int64]error
 
 	// rosterCalls counts GetGroupMemberList invocations. Reading a roster is the
 	// expensive call this system makes (one request per monitored group), so the
@@ -168,7 +171,12 @@ func newFakeNapCat() *fakeNapCat {
 	}
 }
 
-func (f *fakeNapCat) GetGroupList() ([]napcat.Group, error) { return f.groups, nil }
+func (f *fakeNapCat) GetGroupList() ([]napcat.Group, error) {
+	if f.groupListErr != nil {
+		return nil, f.groupListErr
+	}
+	return f.groups, nil
+}
 
 func (f *fakeNapCat) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error) {
 	f.rosterCalls++
