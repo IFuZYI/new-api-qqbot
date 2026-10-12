@@ -92,8 +92,6 @@ func main() {
 	if err := cfgMgr.EnsureFile(); err != nil {
 		slog.Warn("无法创建配置文件", "path", cfgMgr.Path(), "err", err)
 	}
-	slog.Info("数据目录", "dir", *dataDir, "database", "qqbot.db", "config", config.FileName)
-
 	// The gateway and NapCat clients are rebuilt per call from the stored
 	// configuration, so editing either in the WebUI takes effect immediately
 	// without restarting the service.
@@ -136,6 +134,10 @@ func main() {
 			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
 		}
 	}
+	// Logged here, after the calendar is installed: a record written earlier
+	// would land in the host-day file while every later one uses the operator's
+	// day, splitting one start-up across two files.
+	slog.Info("数据目录", "dir", *dataDir, "database", "qqbot.db", "config", config.FileName)
 	logs.Apply(logPolicy())
 
 	var workers sync.WaitGroup
