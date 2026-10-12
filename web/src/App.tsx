@@ -5,7 +5,7 @@ import Rules from './Rules'
 import LogsView from './features/Logs'
 import SettingsView from './features/Settings'
 import { ThemeToggle } from './theme'
-import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, TabBoundary, Table, useToast, WarnNote } from './ui'
+import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Note, Row, Select, Switch, TabBoundary, Table, useToast, WarnNote } from './ui'
 
 type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'logs' | 'connection'
 
@@ -755,11 +755,16 @@ function Users({
       // The per-account results stay on the page: one role-protected account
       // must not hide the rest of the selection's outcome, and a toast that
       // expires cannot carry a list.
-      setBatchResults({ group: batchGroup, results: res.results ?? [] })
-      if (res.failed === 0) {
-        onDone(`已把 ${res.succeeded} 个账号调整到「${batchGroup}」`)
+      const results = res.results ?? []
+      setBatchResults({ group: batchGroup, results })
+      // Derived from `results`, not from the response's counters: a 200 whose
+      // body omits them printed "成功 undefined 个，失败 undefined 个".
+      const failed = results.filter((r) => !r.ok).length
+      const ok = results.length - failed
+      if (failed === 0) {
+        onDone(`已把 ${ok} 个账号调整到「${batchGroup}」`)
       } else {
-        onDone(`成功 ${res.succeeded} 个，失败 ${res.failed} 个（明细见下表）`)
+        onDone(`成功 ${ok} 个，失败 ${failed} 个（明细见下表）`)
       }
       setSelected(new Set())
       await load()
@@ -893,32 +898,49 @@ function Users({
           account's result its own report — one role-protected account must not
           hide the rest — and a toast expires before it can be read or copied.
         */}
-        {batchResults && batchResults.results.length > 0 && (
-          <div className="mb-3">
-            <ErrorNote onClose={() => setBatchResults(null)}>
-              批量调整到「{batchResults.group}」的结果：成功{' '}
-              {batchResults.results.filter((r) => r.ok).length} 个，失败{' '}
-              {batchResults.results.filter((r) => !r.ok).length} 个
-              {batchResults.results.some((r) => !r.ok) && (
+        {batchResults && batchResults.results.length > 0 && (() => {
+          // The container follows the OUTCOME: a fully successful batch is not
+          // an error. Rendering it in ErrorNote (role="alert", destructive
+          // colours) announced "成功 2 个，失败 0 个" as a failure and invited a
+          // retry of a change that had already landed.
+          const failed = batchResults.results.filter((r) => !r.ok)
+          const okCount = batchResults.results.length - failed.length
+          const body = (
+            <>
+              批量调整到「{batchResults.group}」的结果：成功 {okCount} 个，失败 {failed.length} 个
+              {failed.length > 0 && (
                 <ul className="mt-1 list-disc pl-4">
-                  {batchResults.results
-                    .filter((r) => !r.ok)
-                    .map((r) => (
-                      <li key={r.user_id}>
-                        #{r.user_id}：{r.error || '未知错误'}
-                      </li>
-                    ))}
+                  {failed.map((r) => (
+                    <li key={r.user_id}>
+                      #{r.user_id}：{r.error || '未知错误'}
+                    </li>
+                  ))}
                 </ul>
               )}
-            </ErrorNote>
-          </div>
-        )}
+            </>
+          )
+          return (
+            <div className="mb-3">
+              {failed.length > 0 ? (
+                <ErrorNote onClose={() => setBatchResults(null)}>{body}</ErrorNote>
+              ) : (
+                <Note onClose={() => setBatchResults(null)}>{body}</Note>
+              )}
+            </div>
+          )
+        })()}
 
         {items.length === 0 ? (
-          <Empty>
-            没有匹配的用户。先到「群管理」刷新并同步成员；要看到没人进群的 new-api 账号，请点「从
-            new-api 同步账号」。
-          </Empty>
+          // A failed query clears the rows, so the empty state must not claim a
+          // result for it: with the note above showing 目录读取失败, the page
+          // also said 没有匹配的用户 and sent the operator to refresh/sync
+          // members in 群管理 — an action that cannot fix a failed read.
+          loadError ? null : (
+            <Empty>
+              没有匹配的用户。先到「群管理」刷新并同步成员；要看到没人进群的 new-api 账号，请点「从
+              new-api 同步账号」。
+            </Empty>
+          )
         ) : (
           <Table
             stickyEnd={1}

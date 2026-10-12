@@ -1022,6 +1022,33 @@ export function ErrorNote({ children, onClose }: { children: ReactNode; onClose?
 }
 
 /**
+ * Neutral, persistent note. Used where a result must stay on the page but is
+ * NOT a failure — a fully successful batch, for instance: rendering it in
+ * ErrorNote put "成功 2 个，失败 0 个" inside a destructive role="alert" box,
+ * announcing success to the operator and to a screen reader as an error and
+ * inviting a retry of a change that had already landed.
+ *
+ * No role: a note is not an alert. The destructive variant stays for failures.
+ */
+export function Note({ children, onClose }: { children: ReactNode; onClose?: () => void }) {
+  return (
+    <div className="mb-3 flex items-start justify-between gap-3 rounded-control border border-border bg-muted/40 px-3 py-2 text-xs text-foreground">
+      <span className="min-w-0 break-words">{children}</span>
+      {onClose && (
+        <button
+          type="button"
+          aria-label="关闭提示"
+          onClick={onClose}
+          className={`shrink-0 rounded-sm px-1 leading-none opacity-70 transition-opacity hover:opacity-100 ${FOCUS}`}
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
  * Inline validation / warning note used inside forms.
  *
  * Distinct from a toast on purpose: this marks a field or a form as currently

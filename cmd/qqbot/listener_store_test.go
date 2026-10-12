@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +43,22 @@ func listenerStore(t *testing.T) (*events.Listener, *store.Store, *service.Servi
 	// The real adapter, exactly as main wires it.
 	l := events.New(func() (string, string) { return "", "" }, bindAdapter{svc})
 	return l, st, svc
+}
+
+// captureLog routes the default logger into a buffer for one test.
+//
+// The listener writes through slog's default logger, which is what the day file
+// receives in production; capturing it lets a test assert on the operator-visible
+// record itself — the only signal that distinguishes "the dispatch ran and
+// failed" from "nothing ran", since the service records the member as its own
+// first step either way.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func groupMessage(groupID, userID int64, raw string, ts int64) []byte {
@@ -83,8 +102,13 @@ func TestListenerRecordsACheckinThroughTheRealAdapter(t *testing.T) {
 }
 
 // A non-matching message records nothing while the command list is non-empty.
+//
+// The member is BOUND deliberately: an unbound member is skipped before the
+// pattern list is consulted, so without the binding this test stayed green with
+// IsCheckinCommand forced to true (found by an independent reviewer).
 func TestListenerIgnoresANonMatchingMessageThroughTheRealAdapter(t *testing.T) {
 	l, st, svc := listenerStore(t)
+	bindMember(t, st, 54321, 7)
 	today, _ := svc.Today()
 
 	l.Handle(groupMessage(1, 54321, "今天天气不错", time.Now().Unix()))
@@ -117,8 +141,13 @@ func TestListenerCountsAnyMessageWhenTheListIsEmpty(t *testing.T) {
 }
 
 // With the path switched off, a matching message records nothing.
+//
+// The member is BOUND deliberately: without it the check-in is refused by the
+// missing binding, so the test stayed green with the master switch no longer
+// gating the path (found by an independent reviewer).
 func TestListenerRecordsNothingWhenTheMessagePathIsOff(t *testing.T) {
 	l, st, svc := listenerStore(t)
+	bindMember(t, st, 54321, 7)
 	s, err := svc.Settings()
 	if err != nil {
 		t.Fatal(err)
@@ -258,14 +287,78 @@ func TestListenerIgnoresAnUnmonitoredGroupThroughTheRealAdapter(t *testing.T) {
 	}
 }
 
-// The bind command reaches the service: with no account configured the bind
-// fails, and the failure must not create a binding.
-func TestListenerBindCommandDoesNotCreateABindingWithoutAnAccount(t *testing.T) {
-	l, st, _ := listenerStore(t)
+// The bind command reaches the service and its OUTCOME is what the operator
+// sees: a bind that cannot resolve an account leaves the member unbound, and a
+// bind that resolves one creates it.
+//
+// The original version only asserted the first half with NO gateway configured,
+// so it stayed green with the whole bind dispatch removed — the assertion was
+// about an effect that could not have occurred (found by an independent
+// reviewer). A real gateway is injected here so the dispatch is load-bearing:
+// with it, the second case proves the command actually reaches the service.
+func TestListenerBindCommandReachesTheService(t *testing.T) {
+	logs := captureLog(t)
+	st := runtimeStore(t)
+	svc := service.New(st, nil, nil)
+	if err := st.UpsertGroups([]store.MonitoredGroup{{GroupID: 1, GroupName: "g"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGroupEnabled(1, true); err != nil {
+		t.Fatal(err)
+	}
+	s, err := svc.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.BindCommandEnabled = true
+	s.BindCommandPatterns = ">>绑定<<"
+	if err := svc.SaveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	l := events.New(func() (string, string) { return "", "" }, bindAdapter{svc})
 
+	// No account is configured, so the bind cannot resolve one.
 	l.Handle(groupMessage(1, 54321, ">>绑定<<", time.Now().Unix()))
-
 	if _, err := st.GetBinding(54321); err == nil {
 		t.Error("a bind with no matching account created a binding")
+	}
+	// The member IS recorded: the command proves they are in the group, which is
+	// the part that must not depend on the account lookup.
+	assertMembership(t, st, 54321, 1)
+
+	// The dispatch itself is what the LOG pins: asserting only on stored state
+	// cannot distinguish "the command was handled" from "nothing ran", because
+	// Service.BindByCommand records the member as its own first step — an
+	// independent reviewer's `IsBindCommand -> return true` mutation survived
+	// the state-only version of this test.
+	//
+	// The records are JSON (the day file's format), so the assertions match the
+	// encoded shape: the service logs 自动绑定失败 with source=command, and the
+	// listener adds its own 绑定指令失败 when the service did not already log.
+	out := logs.String()
+	if !strings.Contains(out, "自动绑定失败") && !strings.Contains(out, "绑定指令失败") {
+		t.Errorf("the bind command was not handled at all (no record): %s", out)
+	}
+	if !strings.Contains(out, `"qq":54321`) {
+		t.Errorf("the record does not name the member: %s", out)
+	}
+	// source=command distinguishes this path from the patrol and join paths.
+	if !strings.Contains(out, `"source":"command"`) {
+		t.Errorf("the record does not say which path bound (want source=command): %s", out)
+	}
+
+	// The REJECT side: an ordinary message is not a bind command, so it must not
+	// reach the dispatch. Without this, forcing IsBindCommand to return true for
+	// every message kept the test green — the accept side alone cannot tell
+	// "this message is a command" from "every message is".
+	before := logs.Len()
+	l.Handle(groupMessage(1, 99999, "今天天气不错", time.Now().Unix()))
+	after := logs.String()[before:]
+	if strings.Contains(after, "自动绑定") || strings.Contains(after, "绑定指令") {
+		t.Errorf("an ordinary message was treated as a bind command: %s", after)
+	}
+	// And it must not have bound that member either.
+	if _, err := st.GetBinding(99999); err == nil {
+		t.Error("an ordinary message created a binding")
 	}
 }
