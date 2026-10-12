@@ -379,12 +379,23 @@ func (c *Client) doWithOrigin(method, path string, body any, out any, origin str
 // parseRetryAfter reads a Retry-After header in seconds. The header may also be
 // an HTTP date, which this gateway does not send; an unparsable value means "no
 // hint" rather than a guess.
+//
+// The seconds form is bounded before the multiply: an int64 seconds value whose
+// nanosecond product wraps modulo 2^64 can land on a POSITIVE duration, and a
+// caller that only rejects `wait <= 0` would then store it verbatim — a hint of
+// 5504833656916111959 ("~292 years") permanently wedged the login lockout. A
+// hint longer than a day is not a hint this service can act on, so it is
+// reported as absent and the caller's own default applies.
 func parseRetryAfter(v string) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0
 	}
 	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		// Compare in seconds, BEFORE the multiply, so the conversion cannot wrap.
+		if int64(secs) > int64(maxRetryAfter/time.Second) {
+			return 0
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
@@ -394,6 +405,11 @@ func parseRetryAfter(v string) time.Duration {
 	}
 	return 0
 }
+
+// maxRetryAfter bounds an accepted hint. A day is far beyond any window this
+// gateway uses (60s for logins) and keeps the nanosecond conversion far from
+// the int64 ceiling.
+const maxRetryAfter = 24 * time.Hour
 
 // Login authenticates the admin account and stores the returned access token.
 func (c *Client) Login(username, password string) error {

@@ -177,6 +177,10 @@ func (m *Manager) syncFromFile() error {
 	if err := m.saveToStore(merged); err != nil {
 		return err
 	}
+	// The file parses again, so a LATER breakage must be reported afresh — even
+	// of the same bytes. Leaving reportedHash set meant break/fix/break-again
+	// stayed silent, the exact gap the record exists to close.
+	m.reportedHash = ""
 	m.lastHash = sum
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -203,7 +204,11 @@ func (l *Listener) session(ctx context.Context, url, token string) error {
 	}
 	defer conn.Close()
 
-	slog.Info("事件 WebSocket 已连接", "url", url)
+	// The URL can carry a token in its query string (NapCat accepts
+	// ?access_token=, and this service stores such URLs), and the day file is
+	// written 0644 for the whole retention period — so the query is dropped and
+	// any userinfo redacted before this reaches the log.
+	slog.Info("事件 WebSocket 已连接", "url", redactURL(url))
 
 	// One huge frame must not be read whole into memory.
 	conn.SetReadLimit(readLimit())
@@ -256,6 +261,24 @@ func (l *Listener) session(ctx context.Context, url, token string) error {
 		// log, and keep the stream alive.
 		l.handleSafely(raw)
 	}
+}
+
+// redactURL strips everything that can carry a secret before a URL is logged.
+//
+// A token may ride in the query string (?access_token=, which NapCat accepts) or
+// in the userinfo, and the day file is kept for the whole retention period and
+// searchable from the panel. An unparsable URL is reported as a placeholder
+// rather than echoed, because the whole point is that this value cannot be
+// trusted to be secret-free.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(无法解析的事件 WebSocket 地址)"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 type handshakeError struct {

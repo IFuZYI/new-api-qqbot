@@ -16,6 +16,7 @@ package newapi
 import (
 	"errors"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,14 @@ const loginAttempts = 3
 // patrol tick and every UI action tries to log in again, each rejection counts
 // against the gateway's limiter, and the window never closes.
 type Lockout struct {
+	// mu guards until and last. Two owners reach this type: the lazy gateway's
+	// client() (which holds its OWN mutex, not this one) and the connection
+	// prober's ProbeGateway, which runs on an HTTP handler goroutine with no
+	// lock at all — measured with -race, that pair produced a real data race on
+	// both fields. A torn `until` can read as "not rate limited" and re-spend
+	// the login budget this type exists to protect.
+	mu sync.Mutex
+
 	// now is injectable so the expiry is testable without sleeping.
 	now func() time.Time
 
@@ -63,6 +72,8 @@ func NewLockout(now func() time.Time) *Lockout {
 // remaining wait, so a caller can surface it verbatim ("需等待约 5 分钟后重试")
 // instead of a generic message.
 func (l *Lockout) Blocked() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.until.IsZero() || !l.now().Before(l.until) {
 		return nil
 	}
@@ -88,6 +99,8 @@ func (l *Lockout) Fail(err error) {
 	if err == nil {
 		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	var rl *RateLimitError
 	if errors.As(err, &rl) {
 		wait := rl.RetryAfter
@@ -109,6 +122,8 @@ func (l *Lockout) Fail(err error) {
 // the operator may have revoked sessions in the meantime — so waiting out a
 // stale window would be wrong.
 func (l *Lockout) Success() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.until = time.Time{}
 	l.last = nil
 }

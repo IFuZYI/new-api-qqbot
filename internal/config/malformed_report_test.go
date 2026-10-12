@@ -113,6 +113,48 @@ func TestMalformedFileIsReportedOnce(t *testing.T) {
 	}
 }
 
+// A re-break of the SAME bytes must be reported too.
+//
+// The original test re-broke with DIFFERENT contents, which is the one case a
+// content-keyed guard handles; leaving reportedHash set after a successful parse
+// meant break -> fix -> break-again-with-the-same-typo stayed silent on the
+// MustLoad path — the exact gap the record exists to close. Found by an
+// independent reviewer.
+func TestARepeatedBreakOfTheSameBytesIsReportedAgain(t *testing.T) {
+	h := captureLogs(t)
+	m, _ := newTestManager(t)
+	if err := m.Save(sample()); err != nil {
+		t.Fatal(err)
+	}
+	broken := []byte("newapi: [unclosed\n")
+
+	if err := os.WriteFile(m.Path(), broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = m.Load()
+
+	// Fix it.
+	if err := os.WriteFile(m.Path(), []byte("newapi:\n  url: https://gateway.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Load(); err != nil {
+		t.Fatalf("a valid file must be adopted: %v", err)
+	}
+	if n := len(h.snapshot()); n != 1 {
+		t.Fatalf("records after the first breakage = %d, want 1", n)
+	}
+
+	// Break it again with the SAME bytes.
+	if err := os.WriteFile(m.Path(), broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = m.Load()
+
+	if n := len(h.snapshot()); n != 2 {
+		t.Errorf("records = %d, want 2: a repeated break of the same bytes was not reported", n)
+	}
+}
+
 // A fixed file clears the state, so a later breakage is reported again.
 func TestAFixedFileClearsTheReport(t *testing.T) {
 	h := captureLogs(t)

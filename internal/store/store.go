@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -144,6 +146,18 @@ type Store struct{ db *gorm.DB }
 // the instant the first holds the write lock (SQLITE_BUSY) and its whole sweep
 // is lost. WAL plus a generous busy timeout lets the writers queue instead.
 func Open(path string) (*Store, error) {
+	// The database holds the session-cookie signing key, the gateway password
+	// and a live gateway session — strictly more than data/config.yaml, which
+	// this codebase already hardens to 0600. SQLite creates the file (and its
+	// -wal/-shm siblings) with the process umask, which on the documented
+	// bare-metal run is world-readable 0644, so every local user could read the
+	// signing key and mint an admin cookie. Create the directory owner-only and
+	// tighten the file as soon as it exists.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create data dir %s: %w", dir, err)
+		}
+	}
 	dsn := path + "?_pragma=busy_timeout(10000)" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
@@ -153,6 +167,12 @@ func Open(path string) (*Store, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
+	}
+	// Owner-only, for the file SQLite just created. The WAL/SHM siblings are
+	// created later by SQLite itself, so they are tightened after the first
+	// migration below.
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("tighten %s: %w", path, err)
 	}
 	if sqlDB, err := db.DB(); err == nil {
 		// One connection is the standard SQLite configuration and it is what
@@ -180,6 +200,15 @@ func Open(path string) (*Store, error) {
 		Updates(map[string]any{"reward_state": "legacy", "reward_drawn": true,
 			"reward_error": "历史领取记录，付款结果未经确认；请核对网关记录，勿直接重发"}).Error; err != nil {
 		return nil, fmt.Errorf("migrate reward state: %w", err)
+	}
+	// The WAL and SHM files carry the same pages as the database and are created
+	// by SQLite on the first write (the migration above), so they are tightened
+	// here rather than at open. A missing sibling is not an error: SQLite may
+	// have checkpointed it away.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("tighten %s: %w", path+suffix, err)
+		}
 	}
 	return &Store{db: db}, nil
 }
