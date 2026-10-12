@@ -121,10 +121,14 @@ func (h attrRenamer) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 func (h attrRenamer) WithGroup(name string) slog.Handler {
-	return attrRenamer{h.Handler.WithGroup(name)}
+	return attrRenamer{h.Handler.WithGroup(sanitizeKey(name))}
 }
 
 // sanitizeAttr prefixes a colliding key, recursing into groups.
+//
+// A GROUP's own key matters as much as a leaf's: slog.Group("level", …) emits
+// `"level":{…}` as a top-level key, so an unsanitised group key produces the
+// same duplicate-key record a leaf would.
 func sanitizeAttr(a slog.Attr) slog.Attr {
 	if a.Value.Kind() == slog.KindGroup {
 		group := a.Value.Group()
@@ -132,13 +136,20 @@ func sanitizeAttr(a slog.Attr) slog.Attr {
 		for i, g := range group {
 			out[i] = sanitizeAttr(g)
 		}
+		a.Key = sanitizeKey(a.Key)
 		a.Value = slog.GroupValue(out...)
 		return a
 	}
-	if isReservedAttr(a.Key) {
-		a.Key = "#" + a.Key
-	}
+	a.Key = sanitizeKey(a.Key)
 	return a
+}
+
+// sanitizeKey prefixes a key that would collide with the record envelope.
+func sanitizeKey(key string) string {
+	if isReservedAttr(key) {
+		return "#" + key
+	}
+	return key
 }
 
 // Logger returns the logger writing to both outputs.
@@ -150,6 +161,10 @@ func (m *Manager) Dir() string { return m.dir }
 // SetLocation changes the calendar the day boundaries follow. It is called once
 // at start-up with the operator's timezone; a record already written stays in
 // the file it was written to, because the day is part of the file's name.
+//
+// Both the day file and the readers (Location, and through it Cleanup and Query)
+// are updated under their own locks, so a caller may invoke it while records are
+// being written and while the panel is querying.
 func (m *Manager) SetLocation(loc *time.Location) {
 	if loc == nil {
 		return
@@ -264,7 +279,7 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 	if keepDays <= 0 {
 		return 0, nil
 	}
-	today := m.now().In(m.loc)
+	today := m.now().In(m.Location())
 	cutoff := time.Date(today.Year(), today.Month(), today.Day()-(keepDays-1), 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
 
 	entries, err := os.ReadDir(m.dir)

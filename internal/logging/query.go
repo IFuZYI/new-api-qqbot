@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,7 +73,7 @@ const maxLine = 1 << 20
 func (m *Manager) Query(q Query) (Result, error) {
 	day := q.Day
 	if day == "" {
-		day = m.now().In(m.loc).Format(time.DateOnly)
+		day = m.now().In(m.Location()).Format(time.DateOnly)
 	}
 	// The day reaches the filesystem, so it must be a date and nothing else.
 	if _, err := time.Parse(time.DateOnly, day); err != nil {
@@ -167,6 +169,27 @@ func scanLevel(line []byte) (string, bool) {
 	return lv, true
 }
 
+// attrText renders one attribute value for searching.
+//
+// Numbers are the reason this exists: JSON decodes them to float64, and fmt's
+// default verb turns a QQ number into "1.23456789e+08", so an operator searching
+// the digits they see in the panel found nothing. An integral value is rendered
+// as an integer (matching how it was written and how it is displayed); anything
+// else keeps fmt's formatting.
+func attrText(v any) string {
+	switch n := v.(type) {
+	case float64:
+		if n == math.Trunc(n) && math.Abs(n) < 1e15 {
+			return strconv.FormatInt(int64(n), 10)
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64)
+	case float32:
+		return attrText(float64(n))
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
 // matchesSearch reports whether a record mentions term (already lowercased) in
 // its message or one of its attribute values.
 //
@@ -184,7 +207,7 @@ func matchesSearch(e Entry, term string) bool {
 		if s, ok := v.(string); ok && strings.Contains(strings.ToLower(s), term) {
 			return true
 		}
-		if s := fmt.Sprint(v); s != "" && strings.Contains(strings.ToLower(s), term) {
+		if s := attrText(v); s != "" && strings.Contains(strings.ToLower(s), term) {
 			return true
 		}
 	}

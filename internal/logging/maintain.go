@@ -39,14 +39,18 @@ func (m *Manager) Apply(p Policy) {
 	}
 }
 
-// Maintain applies policy() at start and then every MaintainInterval, until ctx
-// is done.
+// Maintain applies policy() every MaintainInterval, until ctx is done.
+//
+// It does NOT apply on entry: the caller applies once at start-up, so the level
+// is in force and the retention sweep has run before the server accepts
+// requests. Applying again here would sweep twice within the same second and
+// record two "cleaned up expired logs" lines with different counts for one
+// start-up.
 func (m *Manager) Maintain(ctx context.Context, policy func() Policy) {
 	m.maintain(ctx, MaintainInterval, policy)
 }
 
 func (m *Manager) maintain(ctx context.Context, every time.Duration, policy func() Policy) {
-	m.Apply(policy())
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {

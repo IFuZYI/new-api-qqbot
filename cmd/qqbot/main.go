@@ -117,7 +117,6 @@ func main() {
 		}
 		return logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays}
 	}
-	logs.Apply(logPolicy())
 
 	// The log's calendar is the operator's timezone, the same one that decides
 	// what "today" means for check-ins. With the host on UTC and the operator on
@@ -126,6 +125,10 @@ func main() {
 	// time nobody chose. Applied once at start-up: a timezone change is a
 	// deliberate reconfiguration, and a restart is already required for the
 	// patrol cadence that uses it.
+	//
+	// It must be set BEFORE the first Apply: the apply writes the level record
+	// and runs the retention sweep, and both would otherwise use the host's day
+	// (measured: the sweep kept a day the operator's calendar had expired).
 	if s, err := svc.Settings(); err == nil {
 		if loc, err := time.LoadLocation(s.Timezone); err == nil {
 			logs.SetLocation(loc)
@@ -133,6 +136,7 @@ func main() {
 			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
 		}
 	}
+	logs.Apply(logPolicy())
 
 	var workers sync.WaitGroup
 	workers.Go(func() { sched.Run(ctx) })
