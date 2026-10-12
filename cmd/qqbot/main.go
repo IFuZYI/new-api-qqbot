@@ -30,6 +30,33 @@ import (
 	"qqbot/internal/store"
 )
 
+// applyStartupLogging installs the operator's calendar and applies the stored
+// log policy, in that order.
+//
+// The order is the whole point: Apply writes the level record and runs the
+// retention sweep, and both are day-relative, so a calendar installed afterwards
+// leaves the first record in the host-day file and evaluates retention against a
+// day the operator never chose. Extracted from main so the sequence can be
+// tested against two calendars that are on different dates.
+func applyStartupLogging(logs *logging.Manager, svc *service.Service, dataDir string) {
+	if s, err := svc.Settings(); err == nil {
+		if loc, err := time.LoadLocation(s.Timezone); err == nil {
+			logs.SetLocation(loc)
+		} else {
+			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
+		}
+	}
+	// Logged here, after the calendar is installed: a record written earlier
+	// would land in the host-day file while every later one uses the operator's
+	// day, splitting one start-up across two files.
+	slog.Info("数据目录", "dir", dataDir, "database", "qqbot.db", "config", config.FileName)
+	policy := logging.Policy{Level: logging.LevelInfo}
+	if s, err := svc.Settings(); err == nil {
+		policy = logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays}
+	}
+	logs.Apply(policy)
+}
+
 func main() {
 	var (
 		addr    = flag.String("addr", ":4096", "HTTP listen address for the WebUI")
@@ -125,21 +152,12 @@ func main() {
 	// deliberate reconfiguration, and a restart is already required for the
 	// patrol cadence that uses it.
 	//
-	// It must be set BEFORE the first Apply: the apply writes the level record
-	// and runs the retention sweep, and both would otherwise use the host's day
-	// (measured: the sweep kept a day the operator's calendar had expired).
-	if s, err := svc.Settings(); err == nil {
-		if loc, err := time.LoadLocation(s.Timezone); err == nil {
-			logs.SetLocation(loc)
-		} else {
-			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
-		}
-	}
-	// Logged here, after the calendar is installed: a record written earlier
-	// would land in the host-day file while every later one uses the operator's
-	// day, splitting one start-up across two files.
-	slog.Info("数据目录", "dir", *dataDir, "database", "qqbot.db", "config", config.FileName)
-	logs.Apply(logPolicy())
+	// The whole sequence lives in applyStartupLogging so its ORDER is testable:
+	// it must be set BEFORE the first Apply, because the apply writes the level
+	// record and runs the retention sweep, and both are day-relative (measured:
+	// reversing them kept a day the operator's calendar had expired, and split
+	// one start-up across two files).
+	applyStartupLogging(logs, svc, *dataDir)
 
 	var workers sync.WaitGroup
 	workers.Go(func() { sched.Run(ctx) })
