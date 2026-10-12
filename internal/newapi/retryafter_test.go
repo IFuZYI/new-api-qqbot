@@ -49,11 +49,36 @@ func TestParseRetryAfterBoundaries(t *testing.T) {
 
 	// A value that overflows a time.Duration must never be accepted as a real
 	// wait: the client would sleep on a wrapped-around number.
+	//
+	// Both DIRECTIONS matter, and the wrapping sign is what makes them different
+	// cases: 9223372036854775807 and 9223372037 wrap NEGATIVE (the lockout's
+	// `wait <= 0` branch then substitutes its own default), while
+	// 5504833656916111959 wraps to a *positive* 292 years — a syntactically valid
+	// RFC 7231 delay-seconds that would park the client permanently with no
+	// self-healing until a restart. An earlier version of this test picked only
+	// negative-wrapping values, so the class it claimed to cover was open.
 	if got := parseRetryAfter("9223372036854775807"); got > 0 {
 		t.Errorf("an overflowing Retry-After must not become a wait, got %v", got)
 	}
 	if got := parseRetryAfter("9223372037"); got > 0 {
 		t.Errorf("an overflowing Retry-After must not become a wait, got %v", got)
+	}
+	// 5504833656916111959 * 1s wraps to 9223162257390609920 ns ≈ 292 years.
+	if got := parseRetryAfter("5504833656916111959"); got > 0 {
+		t.Errorf("a positive-wrapping Retry-After must not become a wait, got %v (%v)", got, time.Duration(got))
+	}
+	// 6924913093273118368 * 1s wraps to ≈ 7h34m — small enough to look plausible,
+	// so it must be refused too rather than silently shortening a real wait.
+	if got := parseRetryAfter("6924913093273118368"); got > 0 {
+		t.Errorf("a wrapping Retry-After must not become a wait, got %v", got)
+	}
+	// And the bound is what refuses them, not luck: a hint just past a day is
+	// refused while one just inside it is accepted.
+	if got := parseRetryAfter("86401"); got != 0 {
+		t.Errorf("a hint past the one-day bound must be refused, got %v", got)
+	}
+	if got := parseRetryAfter("86400"); got != 24*time.Hour {
+		t.Errorf("a hint at the one-day bound must be accepted, got %v", got)
 	}
 
 	// The consequence that matters: a hint that cannot be represented must not
