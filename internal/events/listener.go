@@ -14,7 +14,9 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -110,7 +112,7 @@ func (l *Listener) Run(ctx context.Context) {
 		url, token := l.endpoint()
 		if strings.TrimSpace(url) == "" {
 			if !loggedIdle {
-				log.Print("[events] no event WebSocket configured; relying on the patrols only")
+				slog.Info("未配置事件 WebSocket，仅依赖定期巡检")
 				loggedIdle = true
 			}
 			select {
@@ -126,7 +128,7 @@ func (l *Listener) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[events] disconnected: %v; retrying in %s", err, backoff)
+		slog.Warn("事件 WebSocket 断开，稍后重连", "err", err, "retry_in", backoff.String())
 		select {
 		case <-ctx.Done():
 			return
@@ -183,7 +185,7 @@ func (l *Listener) session(ctx context.Context, url, token string) error {
 	}
 	defer conn.Close()
 
-	log.Printf("[events] connected to %s", url)
+	slog.Info("事件 WebSocket 已连接", "url", url)
 
 	// Closing the connection on shutdown unblocks ReadMessage.
 	done := make(chan struct{})
@@ -220,7 +222,7 @@ func (e *handshakeError) Error() string {
 func (l *Listener) handleSafely(raw []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[events] recovered from a panic while handling an event: %v", r)
+			slog.Error("处理事件时发生 panic", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 		}
 	}()
 	l.Handle(raw)
@@ -229,12 +231,31 @@ func (l *Listener) handleSafely(raw []byte) {
 // Handle processes one raw event. It is exported so it can be driven directly
 // from tests and from the WebUI's debug console.
 func (l *Listener) Handle(raw []byte) {
+	// Only the routing fields are decoded here, and the DEBUG trace below uses
+	// the same struct: the raw event is never written to the log, because it
+	// carries the member's message text and nickname and the daily file is kept
+	// for the retention period and searchable from the panel.
 	var head struct {
-		PostType   string `json:"post_type"`
-		NoticeType string `json:"notice_type"`
+		PostType    string `json:"post_type"`
+		NoticeType  string `json:"notice_type"`
+		MessageType string `json:"message_type"`
+		GroupID     int64  `json:"group_id"`
+		UserID      int64  `json:"user_id"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
+		slog.Debug("忽略无法解析的事件", "err", err, "bytes", len(raw))
 		return
+	}
+	// Meta events (heartbeats) arrive every few seconds and say nothing.
+	if head.PostType != "meta_event" {
+		slog.Debug("收到事件",
+			"post_type", head.PostType,
+			"notice_type", head.NoticeType,
+			"message_type", head.MessageType,
+			"group_id", head.GroupID,
+			"user_id", head.UserID,
+			"bytes", len(raw),
+		)
 	}
 
 	switch head.PostType {
@@ -271,9 +292,9 @@ func (l *Listener) handleMessage(raw []byte) {
 	if l.svc.IsBindCommand(text) {
 		if err := l.svc.BindByCommand(ev.GroupID, ev.UserID); err != nil {
 			// The member is not told: this service does not speak in groups.
-			log.Printf("[events] bind command from %d failed: %v", ev.UserID, err)
+			slog.Warn("绑定指令失败", "group_id", ev.GroupID, "qq", ev.UserID, "err", err)
 		} else {
-			log.Printf("[events] bound %d via a bind command", ev.UserID)
+			slog.Info("已通过绑定指令绑定", "group_id", ev.GroupID, "qq", ev.UserID)
 		}
 	}
 
@@ -291,12 +312,12 @@ func (l *Listener) handleMessage(raw []byte) {
 		res, err := l.svc.CheckinByMessage(ev.GroupID, ev.UserID)
 		switch {
 		case err != nil:
-			log.Printf("[events] check-in for %d failed: %v", ev.UserID, err)
+			slog.Warn("消息签到失败", "group_id", ev.GroupID, "qq", ev.UserID, "err", err)
 		case res.Recorded:
-			log.Printf("[events] recorded check-in for %d", ev.UserID)
+			slog.Info("已记录消息签到", "group_id", ev.GroupID, "qq", ev.UserID)
 		case res.Unbound:
 			// Not an error: the member simply has to bind first.
-			log.Printf("[events] check-in for %d skipped: no account bound", ev.UserID)
+			slog.Debug("消息签到跳过：未绑定账号", "group_id", ev.GroupID, "qq", ev.UserID)
 		}
 	}
 }
@@ -320,10 +341,10 @@ func (l *Listener) handleGroupIncrease(raw []byte) {
 		return
 	}
 	if err := l.svc.EnsureMember(ev.GroupID, ev.UserID, ""); err != nil {
-		log.Printf("[events] recording new member %d in %d failed: %v", ev.UserID, ev.GroupID, err)
+		slog.Error("记录新成员失败", "group_id", ev.GroupID, "qq", ev.UserID, "err", err)
 		return
 	}
-	log.Printf("[events] new member %d recorded in group %d", ev.UserID, ev.GroupID)
+	slog.Info("已记录新成员", "group_id", ev.GroupID, "qq", ev.UserID)
 
 	// Binding is a separate switch, and its failure must not undo the
 	// recording above: the member is known either way, and the patrol retries.
@@ -331,16 +352,16 @@ func (l *Listener) handleGroupIncrease(raw []byte) {
 		return
 	}
 	if err := l.svc.BindMember(ev.GroupID, ev.UserID); err != nil {
-		log.Printf("[events] binding new member %d failed: %v", ev.UserID, err)
+		slog.Warn("进群自动绑定失败", "group_id", ev.GroupID, "qq", ev.UserID, "err", err)
 		return
 	}
-	log.Printf("[events] new member %d bound on join", ev.UserID)
+	slog.Info("进群自动绑定成功", "group_id", ev.GroupID, "qq", ev.UserID)
 }
 
 func (l *Listener) monitored(groupID int64) bool {
 	ok, err := l.svc.IsMonitoredGroup(groupID)
 	if err != nil {
-		log.Printf("[events] group check failed for %d: %v", groupID, err)
+		slog.Error("查询监测群失败", "group_id", groupID, "err", err)
 		return false
 	}
 	return ok

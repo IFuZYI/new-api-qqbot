@@ -72,6 +72,45 @@ export interface Settings {
   reward_min: number
   reward_max: number
   timezone: string
+
+  // Logging. 'info' keeps failures and state changes; 'debug' adds the
+  // per-request and per-event detail. retention_days counts today, 0 = keep
+  // every file.
+  log_level: 'info' | 'debug'
+  log_retention_days: number
+}
+
+/** One decoded log record. */
+export interface LogEntry {
+  time: string
+  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+  msg: string
+  attrs?: Record<string, unknown>
+}
+
+/** One day's file on disk. */
+export interface LogDay {
+  day: string
+  size: number
+}
+
+export interface LogQuery {
+  /** YYYY-MM-DD; omitted means today. */
+  day?: string
+  /** Minimum level to include. */
+  level?: 'debug' | 'info' | 'warn' | 'error'
+  q?: string
+  limit?: number
+}
+
+export interface LogResponse {
+  day: string
+  entries: LogEntry[]
+  /** Per-level totals for the whole day, regardless of the filter. */
+  counts: Record<string, number>
+  truncated: boolean
+  /** IANA name of the timezone the day boundaries follow (the operator's). */
+  tz?: string
 }
 
 /** One patrol's health, as the scheduler reports it. */
@@ -410,6 +449,17 @@ export const api = {
     req<Settings>('/api/settings', { method: 'POST', body: JSON.stringify(s) }),
   /** Patrol health plus the switches, so the UI can tell stopped from broken. */
   status: () => req<StatusResponse>('/api/status'),
+
+  logs: (q: LogQuery = {}) => {
+    const p = new URLSearchParams()
+    if (q.day) p.set('day', q.day)
+    if (q.level) p.set('level', q.level)
+    if (q.q) p.set('q', q.q)
+    if (q.limit) p.set('limit', String(q.limit))
+    const qs = p.toString()
+    return req<LogResponse>(`/api/logs${qs ? `?${qs}` : ''}`)
+  },
+  logDays: () => req<{ days: LogDay[]; dir: string; tz?: string }>('/api/logs/days'),
 
   rules: () => req<{ items: Rule[] }>('/api/rules'),
   ruleMeta: () => req<RuleMeta>('/api/rules/meta'),

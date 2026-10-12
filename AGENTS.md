@@ -27,6 +27,7 @@ internal/newapi/    new-api admin API client
 internal/napcat/    OneBot HTTP client + NapCat WebUI bridge
 internal/events/    OneBot WebSocket listener (commands, joins, message check-ins)
 internal/scheduler/ periodic sweeps, one loop per path
+internal/logging/   log files, levels, retention and the panel's log queries
 internal/api/       HTTP API + static file serving
 internal/config/    connection settings stored in the database, plus the env file
 web/src/features/   one module per feature area of the panel
@@ -127,6 +128,39 @@ below) and never as part of `go test`.
   step are separable: an operator running message check-ins with the board
   patrol off must still be paid. Gating the whole loop on the board switch
   silently stopped every reward — do not re-merge the two.
+- **Every failure is a structured, leveled record, and DEBUG is a level, not a
+  build.** `internal/logging` owns both outputs: one JSON file per day under
+  `<data>/logs/` and the same records as text on stderr. The level lives in the
+  settings and is applied to the *running* logger the moment it is saved —
+  restarting to turn DEBUG on would destroy the state being debugged. Failures
+  carry attributes (`patrol`+`err`, or `path`/`status`/`err` for a 5xx) because
+  "the button did nothing" is answered by fields, not by a sentence. A 4xx is
+  DEBUG: it is the caller's input, and letting it fill the ERROR view hides the
+  real faults.
+- **The log's day is the operator's day, not the host's.** `Options.Location` is the
+  timezone from the settings (the same one `Service.Today` uses), applied at
+  start-up; the file name, the retention boundary and the panel's default day
+  all follow it, and the API returns `tz` so the UI renders times in it. On a
+  UTC host with an Asia/Shanghai operator, using the host's day files everything
+  written before 08:00 Beijing under the previous day.
+- **The log never carries group message content.** The DEBUG event trace records
+  the event's shape (`post_type`/`group_id`/`user_id`/byte count), never the raw
+  JSON: the file is kept for the retention period and searchable from the panel,
+  so quoting `raw_message`/`sender.nickname` would put chat content on disk.
+- **An attribute must not collide with slog's own keys** (`time`/`level`/`msg`/
+  `source`): a duplicate JSON key makes the record decode to a different record,
+  and a `level` attribute makes it vanish from the panel. `attrRenamer` renames
+  the attribute instead (to `#level`).
+- **A log query never decodes a line it will not return.** The level is read with
+  a byte scan (the counts need every line's level), and the full decode happens
+  only for lines that pass the filter; the search matches the decoded message and
+  attributes, never the raw line (which would match timestamps and level names).
+- **A log sweep deletes only files it wrote, and the date comes from the name.**
+  `log_retention_days` counts today on the operator's calendar (0 = keep forever);
+  the sweep runs at start-up and hourly, matching `qqbot-YYYY-MM-DD.log` with a
+  parseable date and nothing else, so an operator's own files in that directory
+  survive. Copying the directory resets mtimes, so a file's day is its name,
+  never its mtime.
 - **An invalid command pattern is refused at save time** (`command.Parse`), with
   a 400 naming the problem. A pattern that can never match is the hardest failure
   of this feature to notice, so it must not be storable.
@@ -194,6 +228,10 @@ below) and never as part of `go test`.
   `napcat.ErrNoSigninBoard` so a sweep can ignore it without hiding real errors.
   A board's `rank` is fractional (NapCat computes `(rank-1)/2+1`), so it is
   decoded as a float and rounded for storage; an int field loses the whole page.
+- **The daily log file is the panel's source; filtering stays server-side.**
+  Query filtering (day, minimum level, keyword) runs on the server because a
+  DEBUG day runs to tens of megabytes, and the result carries the whole day's
+  per-level counts so a filtered list still reports "3 errors today".
 - **The user search is paginated.** `FindUserByEmail` pages through
   `/api/user/search` because a real exact match can sort past the first page, and
   reading only page 1 reports the member as unbound forever.
@@ -201,6 +239,11 @@ below) and never as part of `go test`.
   from separate goroutines; with two connections they can each hold a read lock
   and then both try to upgrade, which deadlocks and `busy_timeout` does not
   cover. Serialising at the pool (plus WAL) removes that path.
+- **The standard library's `log` and slog's default logger are redirected into
+  the daily file at startup** (`logging.InstallDefault`), so a stray `log.Printf`
+  still lands where the panel can find it — but new call sites must use leveled
+  `slog` (`Error`/`Warn`/`Info`/`Debug`), or a failure is recorded at INFO and
+  disappears from the ERROR view the operator filters on.
 - **NapCat's OneBot config can be rewritten live** over the WebUI
   (`/api/OB11Config/SetConfig` → save + reload), so enabling an adapter needs no
   restart — do not claim otherwise.

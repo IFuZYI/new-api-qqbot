@@ -6,6 +6,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/rand"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"qqbot/internal/command"
+	"qqbot/internal/logging"
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
 	"qqbot/internal/store"
@@ -75,6 +77,13 @@ type Settings struct {
 
 	// Timezone used to decide what "today" means for check-ins.
 	Timezone string `json:"timezone"`
+
+	// LogLevel is info or debug. WARN and ERROR are always recorded; DEBUG
+	// adds the per-request detail an operator turns on to chase a problem.
+	LogLevel string `json:"log_level"`
+	// LogRetentionDays keeps today plus the days before it; 0 keeps every
+	// file. It is a choice, not a missing value, so it is never repaired.
+	LogRetentionDays int `json:"log_retention_days"`
 }
 
 // DefaultSettings returns the shipped defaults.
@@ -97,10 +106,17 @@ func DefaultSettings() Settings {
 		RewardMin: 100,
 		RewardMax: 200,
 		Timezone:  "Asia/Shanghai",
+
+		LogLevel:         logging.LevelInfo,
+		LogRetentionDays: 7,
 	}
 }
 
 const settingsKey = "settings"
+
+// MaxLogRetentionDays bounds the retention setting to ten years: beyond that
+// the number is a typo, and 0 already means "keep forever".
+const MaxLogRetentionDays = 3650
 
 // MaxIntervalMinutes is the largest minute count convertible to time.Duration.
 // Settings and rule validation share this bound with their scheduling loops.
@@ -183,6 +199,12 @@ func withDefaults(in Settings) Settings {
 	if in.Timezone == "" {
 		in.Timezone = d.Timezone
 	}
+	if in.LogLevel == "" {
+		in.LogLevel = d.LogLevel
+	}
+	if in.LogRetentionDays < 0 {
+		in.LogRetentionDays = d.LogRetentionDays
+	}
 	if in.BindPatrolMinutes < 0 {
 		in.BindPatrolMinutes = d.BindPatrolMinutes
 	}
@@ -198,6 +220,9 @@ func withDefaults(in Settings) Settings {
 func (s *Service) SaveSettings(in Settings) error {
 	if in.RewardMin < 0 || in.RewardMax < 0 {
 		return errors.New("reward values must not be negative")
+	}
+	if in.LogRetentionDays < 0 || in.LogRetentionDays > MaxLogRetentionDays {
+		return fmt.Errorf("日志保留天数必须在 0 到 %d 之间（0 = 永久保留）", MaxLogRetentionDays)
 	}
 	for name, minutes := range map[string]int{
 		"member_sync_minutes":  in.MemberSyncMinutes,
@@ -215,6 +240,10 @@ func (s *Service) SaveSettings(in Settings) error {
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
 		return fmt.Errorf("unknown timezone %q: %w", in.Timezone, err)
 	}
+	if _, err := logging.ParseLevel(in.LogLevel); err != nil {
+		return err
+	}
+
 	// A broken expression must be refused here, by the operator who typed it,
 	// rather than silently becoming a pattern that never matches - the failure
 	// mode this whole feature is easiest to get wrong.
@@ -481,9 +510,17 @@ func (s *Service) bindQQ(qq int64, source string, cache *qqDataCache) (*store.Bi
 
 	u, err := s.gw.FindUserByEmail(qqEmail(qq))
 	if err != nil {
+		// The counters say how many failed; only the record says which member
+		// and why, which is what the operator needs to fix it.
+		if errors.Is(err, newapi.ErrAmbiguousEmail) {
+			slog.Warn("自动绑定：匹配到多个账号，需人工确认", "qq", qq, "source", source, "err", err)
+		} else {
+			slog.Warn("自动绑定失败", "qq", qq, "source", source, "err", err)
+		}
 		return nil, bindSkipped, err
 	}
 	if u == nil {
+		slog.Debug("自动绑定：暂无对应账号", "qq", qq, "source", source)
 		return nil, bindNoAccount, nil
 	}
 	b := store.Binding{
@@ -498,6 +535,7 @@ func (s *Service) bindQQ(qq int64, source string, cache *qqDataCache) (*store.Bi
 		return saved, bindSkipped, nil
 	}
 	b = *saved
+	slog.Info("已绑定账号", "qq", qq, "source", source, "user_id", u.ID, "username", u.Username)
 	// Apply the binding-triggered rules now, so the member's group changes
 	// immediately instead of at the next sweep. A rule failure must not fail
 	// the binding that already succeeded, so it is reported alongside it.
@@ -740,18 +778,24 @@ func (s *Service) Award(date string) (AwardResult, error) {
 				// failure direction).
 				if newapi.IsAmbiguousWrite(err) {
 					res.Ambiguous++
+					// The write may or may not have landed; the operator has to
+					// reconcile it by hand, so the amount and the reason are
+					// recorded with the member.
+					slog.Warn("奖励发放结果不明，待核对", "qq", c.QQ, "date", c.Date, "amount", amount, "user_id", b.NewAPIUserID, "err", err)
 					if err := s.st.FinishReward(c.QQ, c.Date, "ambiguous", err.Error(), time.Now()); err != nil {
 						return res, err
 					}
 					continue
 				}
 				res.Failed++
+				slog.Error("奖励发放失败", "qq", c.QQ, "date", c.Date, "amount", amount, "user_id", b.NewAPIUserID, "err", err)
 				if err := s.st.FinishReward(c.QQ, c.Date, "pending", err.Error(), time.Now()); err != nil {
 					return res, err
 				}
 				continue
 			}
 		}
+		slog.Info("已发放签到奖励", "qq", c.QQ, "date", c.Date, "amount", amount, "user_id", b.NewAPIUserID)
 		if err := s.st.FinishReward(c.QQ, c.Date, "paid", "", time.Now()); err != nil {
 			res.Failed++
 			return res, err

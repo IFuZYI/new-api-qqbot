@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 	"qqbot/internal/api"
 	"qqbot/internal/config"
 	"qqbot/internal/events"
+	"qqbot/internal/logging"
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
 	"qqbot/internal/scheduler"
@@ -39,13 +41,26 @@ func main() {
 		log.Fatalf("create data dir: %v", err)
 	}
 
+	// The log is opened before anything else can fail, and installed as the
+	// process default, so every record from here on - including the standard
+	// library's and any dependency's - lands in the daily file as well as on
+	// stderr. Nothing reads the operator's level yet: the settings live in the
+	// database, which is opened a few lines below.
+	logs, err := logging.Open(logging.Options{Dir: filepath.Join(*dataDir, logging.DirName)})
+	if err != nil {
+		log.Fatalf("open log directory: %v", err)
+	}
+	defer logs.Close()
+	logs.InstallDefault()
+
 	// The environment (.env in the data directory, or the process environment)
 	// is read first: it carries both the admin credential and the listen port.
 	// Reading it before the server starts means a fresh instance is never
 	// briefly open to whoever reaches it first.
 	env, err := config.LoadEnv(*dataDir)
 	if err != nil {
-		log.Fatalf("read env file (refusing to start): %v", err)
+		slog.Error("读取环境文件失败，拒绝启动", "err", err)
+		os.Exit(1)
 	}
 
 	// Precedence for the listen address: an explicit -addr flag wins, then
@@ -66,7 +81,8 @@ func main() {
 
 	st, err := store.Open(filepath.Join(*dataDir, "qqbot.db"))
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		slog.Error("打开数据库失败", "err", err)
+		os.Exit(1)
 	}
 	defer st.Close()
 
@@ -74,9 +90,9 @@ func main() {
 	// instance is one directory to back up or move.
 	cfgMgr := config.NewManager(filepath.Join(*dataDir, config.FileName), st)
 	if err := cfgMgr.EnsureFile(); err != nil {
-		log.Printf("warning: could not create %s: %v", cfgMgr.Path(), err)
+		slog.Warn("无法创建配置文件", "path", cfgMgr.Path(), "err", err)
 	}
-	log.Printf("data directory: %s (database: qqbot.db, config: %s)", *dataDir, config.FileName)
+	slog.Info("数据目录", "dir", *dataDir, "database", "qqbot.db", "config", config.FileName)
 
 	// The gateway and NapCat clients are rebuilt per call from the stored
 	// configuration, so editing either in the WebUI takes effect immediately
@@ -90,8 +106,37 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Apply the stored log settings and keep doing so: the level is what the
+	// operator sets from the panel, and retention is what keeps the directory
+	// from growing without bound. A settings read failure leaves the logger at
+	// its default rather than failing startup.
+	logPolicy := func() logging.Policy {
+		s, err := svc.Settings()
+		if err != nil {
+			return logging.Policy{Level: logging.LevelInfo}
+		}
+		return logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays}
+	}
+	logs.Apply(logPolicy())
+
+	// The log's calendar is the operator's timezone, the same one that decides
+	// what "today" means for check-ins. With the host on UTC and the operator on
+	// Asia/Shanghai, using the host's day would file every record written before
+	// 08:00 Beijing under the previous day and roll the retention boundary at a
+	// time nobody chose. Applied once at start-up: a timezone change is a
+	// deliberate reconfiguration, and a restart is already required for the
+	// patrol cadence that uses it.
+	if s, err := svc.Settings(); err == nil {
+		if loc, err := time.LoadLocation(s.Timezone); err == nil {
+			logs.SetLocation(loc)
+		} else {
+			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
+		}
+	}
+
 	var workers sync.WaitGroup
 	workers.Go(func() { sched.Run(ctx) })
+	workers.Go(func() { logs.Maintain(ctx, logPolicy) })
 
 	// The event listener only shortens reaction time (binding commands); the
 	// sweeps above remain the source of truth, so a missing event stream is
@@ -111,6 +156,8 @@ func main() {
 	// The patrol card's 测试一次 button runs a sweep through the same scheduler,
 	// so a manual run and a timed run cannot behave differently.
 	router.SetPatrolRunner(sched)
+	// The 日志 page reads these files, and a settings save re-levels through it.
+	router.SetLogs(logs)
 
 	// The admin credential was read from the environment above. Provisioning it
 	// before the server accepts requests means a fresh instance is never
@@ -118,9 +165,10 @@ func main() {
 	// first-run form creates the admin as before.
 	if creds := config.AdminCredsFromEnv(env); creds.Set {
 		if err := router.EnsureAdminFromEnv(creds); err != nil {
-			log.Fatalf("configure admin from %s: %v", config.EnvAdminPassword, err)
+			slog.Error("从环境变量配置管理员失败", "env", config.EnvAdminPassword, "err", err)
+			os.Exit(1)
 		}
-		log.Printf("admin %q configured from the environment", creds.Username)
+		slog.Info("已从环境变量配置管理员", "username", creds.Username)
 	}
 
 	srv := &http.Server{
@@ -130,14 +178,15 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("qqbot listening on %s (data: %s)", *addr, *dataDir)
+		slog.Info("服务已启动", "addr", *addr, "data", *dataDir)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("serve: %v", err)
+			slog.Error("HTTP 服务退出", "err", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Print("shutting down")
+	slog.Info("正在关闭")
 	shutdownRuntime(srv, &workers, 10*time.Second)
 }
 
@@ -583,7 +632,7 @@ func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool
 	// A failed revoke is not worth failing the probe over: the credential check
 	// already succeeded, so it is reported as a warning by the caller.
 	if logoutErr := c.Logout(); logoutErr != nil {
-		log.Printf("new-api 连接测试：已登录但未能撤销测试会话（%v）；该会话会在 30 天后过期", logoutErr)
+		slog.Warn("new-api 连接测试：已登录但未能撤销测试会话，该会话会在 30 天后过期", "err", logoutErr)
 	}
 	return u, false, err
 }

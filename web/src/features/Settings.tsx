@@ -380,6 +380,48 @@ export default function SettingsView({
         </div>
       </Card>
 
+      <Card
+        title="日志"
+        description="服务把每一条记录同时写到按天切分的文件和进程控制台（docker logs / journalctl）。等级切换立即生效，无需重启。"
+      >
+        <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
+          <Field
+            label="日志等级"
+            hint="INFO 记录状态变化与失败；DEBUG 额外记录每一次请求与事件，排查问题时才打开"
+          >
+            <Select
+              value={s.log_level}
+              onChange={(v) => setS({ ...s, log_level: v as Settings['log_level'] })}
+              ariaLabel="日志等级"
+              className="w-56"
+            >
+              <option value="info">INFO（默认）</option>
+              <option value="debug">DEBUG（详细）</option>
+            </Select>
+          </Field>
+          <Field label="保留天数" hint="含今天；0 = 永久保留。超出的旧文件由服务每天自动删除">
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={0}
+                max={3650}
+                value={s.log_retention_days}
+                onChange={(v) => {
+                  const n = Number(v)
+                  setS({ ...s, log_retention_days: Number.isFinite(n) ? Math.max(0, n) : 0 })
+                }}
+                ariaLabel="日志保留天数"
+                className="w-24"
+              />
+              <span className="text-xs whitespace-nowrap text-muted-foreground">天</span>
+            </div>
+          </Field>
+        </div>
+        <p className="text-2xs text-muted-foreground">
+          记录内容在「日志」页查看；保留天数只影响磁盘上的旧文件，不改变记录的内容。
+        </p>
+      </Card>
+
       <FeatureCard
         title="签到奖励"
         description="签到成功后按区间随机发放额度，单位是 new-api 的 quota；同一天同一人只发一次。"

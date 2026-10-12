@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, SESSION_EXPIRED, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type Member, type MembersResponse, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
+import LogsView from './features/Logs'
 import SettingsView from './features/Settings'
 import { ThemeToggle } from './theme'
 import { Badge, Button, Card, Cell, Combobox, ConfirmDialog, Empty, ErrorNote, Field, FieldAction, Fieldset, Input, Modal, Row, Select, Switch, Table, useToast, WarnNote } from './ui'
 
-type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'connection'
+type Tab = 'overview' | 'groups' | 'users' | 'rules' | 'settings' | 'logs' | 'connection'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: '概览' },
@@ -14,6 +15,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'users', label: '用户管理' },
   { id: 'rules', label: '分组转换' },
   { id: 'settings', label: '监测设置' },
+  { id: 'logs', label: '日志' },
   { id: 'connection', label: '连接配置' },
 ]
 
@@ -246,6 +248,7 @@ export default function App() {
         {tab === 'users' && <Users onDone={flash} onFail={fail} onRefresh={refresh} />}
         {tab === 'rules' && <Rules onDone={flash} onFail={fail} />}
         {tab === 'settings' && <SettingsView onDone={flash} onFail={fail} onRefresh={refresh} />}
+        {tab === 'logs' && <LogsView onFail={fail} />}
         {tab === 'connection' && (
           <Connection onDone={flash} onFail={fail} onRefresh={refresh} username={auth.username} />
         )}

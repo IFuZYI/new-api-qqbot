@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -286,12 +286,7 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 				timer.Reset(patrolDisabledCheck)
 				continue
 			}
-			if err := s.safely(name, fn); err != nil {
-				s.record(name, err)
-				log.Printf("[%s] sweep failed: %v", name, err)
-			} else {
-				s.record(name, nil)
-			}
+			s.record(name, s.safely(name, fn))
 			d := every()
 			if d <= 0 {
 				d = patrolDisabledCheck
@@ -313,7 +308,14 @@ func (s *Scheduler) safely(name string, fn func() error) (err error) {
 	return fn()
 }
 
+// record stores a sweep's outcome and logs it. Logging here, rather than in the
+// loop, is what puts a failed 测试一次 run in the log too: both paths record.
 func (s *Scheduler) record(name string, err error) {
+	if err != nil {
+		slog.Error("巡检失败", "patrol", name, "err", err)
+	} else {
+		slog.Debug("巡检完成", "patrol", name)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastRun[name] = time.Now()

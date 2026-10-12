@@ -288,3 +288,4 @@ properties of null (reading 'length')` → nav/main/body 全空）。
 - `docs/adr/0007-user-directory-both-keys.md` — 用户目录以 QQ 与 new-api 账号双键取并集
 - `docs/adr/0008-connection-config-split-and-napcat-autoconfig.md` — 连接配置分区块保存，NapCat 按 WebUI 地址自动配置
 - `docs/adr/0009-bind-and-checkin-paths-are-modular.md` — 绑定与签到按来源拆分，每条路径独立开关
+- `docs/adr/0010-logging-levels-and-retention.md` — 日志分等级写入按天文件，按保留天数自动清理

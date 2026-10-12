@@ -62,6 +62,7 @@ type testEnv struct {
 	st     *store.Store
 	client *http.Client
 	cfg    *config.Manager
+	router *Router
 }
 
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store, *http.Client) {
@@ -112,7 +113,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("setup failed with %d", resp.StatusCode)
 	}
 
-	return &testEnv{srv: srv, st: st, client: client, cfg: cfgMgr}
+	return &testEnv{srv: srv, st: st, client: client, cfg: cfgMgr, router: router}
 }
 
 func getJSON(t *testing.T, url string, out any) int {

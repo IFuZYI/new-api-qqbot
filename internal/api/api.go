@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"qqbot/internal/config"
+	"qqbot/internal/logging"
 	"qqbot/internal/napcat"
 	"qqbot/internal/newapi"
 	"qqbot/internal/scheduler"
@@ -48,6 +49,10 @@ type Router struct {
 	// the same reason as patrols: without a scheduler there is nothing to run,
 	// and the endpoint says so instead of pretending.
 	patrolRunner PatrolRunner
+
+	// logs is the daily log files, for the 日志 page and for applying the log
+	// settings the moment they are saved. Optional (see SetLogs).
+	logs *logging.Manager
 
 	// setupMu serialises first-run setup (see auth.go).
 	setupMu sync.Mutex
@@ -115,7 +120,12 @@ func (r *Router) SetPatrolRunner(p PatrolRunner) { r.patrolRunner = p }
 // recovery. csrfProtection sits outside the mux so a route added later inherits
 // it without being listed; recoverPanics is outermost so a panic inside either
 // layer still yields a response instead of a dropped connection.
-func (r *Router) Handler() http.Handler { return recoverPanics(r.csrfProtection(r.mux)) }
+//
+// traceRequests sits inside recoverPanics, so a request that panicked is logged
+// once (as the panic, with its stack) rather than also as a bare 500.
+func (r *Router) Handler() http.Handler {
+	return recoverPanics(traceRequests(r.csrfProtection(r.mux)))
+}
 
 func (r *Router) routes() {
 	// Authentication. These must be reachable without a session: the UI needs
@@ -170,6 +180,10 @@ func (r *Router) routes() {
 
 	r.mux.HandleFunc("GET /api/checkins", r.requireAuth(r.listCheckins))
 
+	// Logs: one day's records (filtered) and the list of days on disk.
+	r.mux.HandleFunc("GET /api/logs", r.requireAuth(r.listLogs))
+	r.mux.HandleFunc("GET /api/logs/days", r.requireAuth(r.listLogDays))
+
 	// Group-conversion rules
 	r.mux.HandleFunc("GET /api/rules", r.requireAuth(r.listRules))
 	r.mux.HandleFunc("POST /api/rules", r.requireAuth(r.createRule))
@@ -198,7 +212,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 		// The status line is already on the wire, so this cannot become an
 		// error response; without the log the operator just sees a truncated
 		// body and has nothing to correlate it with.
-		log.Printf("[api] encoding the response failed: %v", err)
+		slog.Error("编码响应失败", "err", err)
 	}
 }
 
@@ -213,6 +227,7 @@ func (e *bodyTooLargeError) Error() string {
 }
 
 func writeErr(w http.ResponseWriter, code int, err error) {
+	noteErr(w, err)
 	var tooLarge *bodyTooLargeError
 	if errors.As(err, &tooLarge) {
 		writeJSON(w, code, map[string]any{"error": tooLarge.Error()})
@@ -229,7 +244,9 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 // process, and hiding them would make the panel unusable.
 func writeAuthErr(w http.ResponseWriter, code int, err error) {
 	if code >= 500 {
-		log.Printf("[api] request failed: %v", err)
+		// The real error is attached to the request's log record (the ERROR
+		// traceRequests writes for this 5xx); the client gets a generic line.
+		noteErr(w, err)
 		writeJSON(w, code, map[string]any{"error": "服务器内部错误，请查看服务端日志"})
 		return
 	}
@@ -247,7 +264,7 @@ func recoverPanics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[api] panic handling %s %s: %v\n%s", req.Method, req.URL.Path, r, debug.Stack())
+				slog.Error("请求处理时发生 panic", "method", req.Method, "path", req.URL.Path, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 				writeJSON(w, 500, map[string]any{"error": "服务器内部错误，请查看服务端日志"})
 			}
 		}()
@@ -720,6 +737,12 @@ func (r *Router) saveSettings(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err)
 		return
+	}
+	// Apply the log settings now rather than at the next maintenance tick: an
+	// operator switching to DEBUG wants the very next request traced, and a
+	// shortened retention should take effect when they press 保存.
+	if r.logs != nil {
+		r.logs.Apply(logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays})
 	}
 	writeJSON(w, 200, s)
 }

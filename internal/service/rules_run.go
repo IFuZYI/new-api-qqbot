@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"qqbot/internal/napcat"
@@ -210,6 +211,7 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 		res := RuleRunResult{RuleID: rule.ID, RuleName: rule.Name}
 		if rule.NeedsQQData() && qqErr != nil {
 			res.Error = qqErr.Error()
+			slog.Warn("分组转换：读取 QQ 数据失败", "rule", rule.Name, "err", qqErr)
 		}
 		for _, b := range bindings {
 			if rule.NeedsQQData() && qqErr != nil {
@@ -221,6 +223,7 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 				u, err = s.gw.GetUser(b.NewAPIUserID)
 				if err != nil {
 					res.Failed++
+					slog.Warn("分组转换：读取账号失败", "rule", rule.Name, "qq", b.QQ, "user_id", b.NewAPIUserID, "err", err)
 					continue
 				}
 				accounts[b.NewAPIUserID] = u
@@ -234,6 +237,7 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 			if err := rule.checkinError(ctx); err != nil {
 				res.Failed++
 				res.Error = err.Error()
+				slog.Warn("分组转换：条件求值失败", "rule", rule.Name, "qq", b.QQ, "err", err)
 				continue
 			}
 
@@ -345,17 +349,21 @@ func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResul
 		if rule.NeedsQQData() && qqErr != nil {
 			res.Failed++
 			res.Error = qqErr.Error()
+			slog.Warn("分组转换：读取 QQ 数据失败", "rule", rule.Name, "qq", qq, "err", qqErr)
 		} else if err := rule.checkinError(*ctx); err != nil {
 			res.Failed++
 			res.Error = err.Error()
+			slog.Warn("分组转换：条件求值失败", "rule", rule.Name, "qq", qq, "err", err)
 		} else if !rule.Matches(*ctx) || u.Group == rule.TargetGroup {
 			res.Skipped++
 		} else if err := s.gw.SetGroup(u, rule.TargetGroup); err != nil {
 			res.Failed++
 			res.Error = err.Error()
+			slog.Warn("分组转换失败", "rule", rule.Name, "qq", qq, "user_id", u.ID, "target", rule.TargetGroup, "err", err)
 		} else {
 			u.Group = rule.TargetGroup
 			res.Promoted++
+			slog.Info("分组转换完成", "rule", rule.Name, "qq", qq, "user_id", u.ID, "target", rule.TargetGroup)
 		}
 
 		if err := s.st.MarkRuleRun(rule.ID, now, res.Error); err != nil {

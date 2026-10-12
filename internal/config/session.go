@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -123,7 +123,7 @@ func (m *Manager) SessionFingerprint() string {
 
 	var secret string
 	if err := m.st.GetSetting(fingerprintSecretSetting, &secret); err != nil {
-		log.Printf("无法读取设备指纹密钥（%v）；本次运行将不带指纹", err)
+		slog.Warn("无法读取设备指纹密钥，本次运行将不带指纹", "err", err)
 		return ""
 	}
 	if secret != "" {
@@ -131,7 +131,7 @@ func (m *Manager) SessionFingerprint() string {
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		log.Printf("无法生成设备指纹密钥（%v）；本次运行将不带指纹", err)
+		slog.Warn("无法生成设备指纹密钥，本次运行将不带指纹", "err", err)
 		return ""
 	}
 	secret = hex.EncodeToString(raw)
@@ -139,7 +139,7 @@ func (m *Manager) SessionFingerprint() string {
 	// identity is worse than an unpersisted one, and the next start simply
 	// generates another.
 	if err := m.st.PutSetting(fingerprintSecretSetting, secret); err != nil {
-		log.Printf("无法保存设备指纹密钥（%v）；重启后指纹会变", err)
+		slog.Warn("无法保存设备指纹密钥，重启后指纹会变", "err", err)
 	}
 	return secret
 }
