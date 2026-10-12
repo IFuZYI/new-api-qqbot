@@ -24,6 +24,12 @@ type fakeNewAPI struct {
 	failQuota error
 	failFind  error
 
+	// findCalls counts FindUserByEmail invocations, and failFindAfter makes the
+	// fake fail only from the Nth call on: a sweep's stop-on-rate-limit guard
+	// must be visible without relying on the first call failing.
+	findCalls     int
+	failFindAfter int
+
 	// failSetFor fails SetGroup for specific account ids, so a batch can be
 	// exercised with one protected account among successful ones.
 	failSetFor map[int]error
@@ -54,7 +60,8 @@ func newFakeNewAPI() *fakeNewAPI {
 }
 
 func (f *fakeNewAPI) FindUserByEmail(addr string) (*newapi.User, error) {
-	if f.failFind != nil {
+	f.findCalls++
+	if f.failFind != nil && (f.failFindAfter == 0 || f.findCalls > f.failFindAfter) {
 		return nil, f.failFind
 	}
 	if f.ambig[addr] {

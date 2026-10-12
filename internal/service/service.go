@@ -423,7 +423,22 @@ func (s *Service) SyncMembers(groupID int64) error {
 	return s.st.UpsertMembers(groupID, out)
 }
 
-// SyncAllMembers sweeps every enabled group.
+// shouldAbortSweep reports whether err means "stop the whole sweep".
+//
+// Two conditions get WORSE with every additional attempt: the gateway's rate
+// limiter and its 50-session cap. Retrying either once per member/group spends
+// the budget that has to recover, and the lockout only covers logins, so the
+// sweep itself has to stop. Every other failure is per-item (no account yet, one
+// protected account, a transient error) and must not stop the rest.
+func shouldAbortSweep(err error) bool {
+	return newapi.IsRateLimited(err) || newapi.IsSessionLimit(err)
+}
+
+// SyncAllMembers reads every enabled group's roster.
+//
+// A rate limit or the session cap stops the sweep at the first refusal: the
+// remaining groups would each make another request against a gateway that is
+// already refusing us, and each attempt counts against its limiter.
 func (s *Service) SyncAllMembers() error {
 	gs, err := s.st.EnabledGroups()
 	if err != nil {
@@ -433,6 +448,9 @@ func (s *Service) SyncAllMembers() error {
 	for _, g := range gs {
 		if err := s.SyncMembers(g.GroupID); err != nil {
 			errs = append(errs, fmt.Errorf("group %d: %w", g.GroupID, err))
+			if shouldAbortSweep(err) {
+				break
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -613,6 +631,14 @@ func (s *Service) AutoBind() (BindResult, error) {
 	cache := newQQDataCache(s.st, s.qq)
 	for _, m := range ms {
 		_, outcome, err := s.bindQQ(m.QQ, "auto", cache)
+		if shouldAbortSweep(err) {
+			// The gateway is refusing us, and every further member would be
+			// another attempt against its limiter. Report what was done and
+			// stop; the next sweep resumes where this one left off.
+			res.Failed++
+			slog.Warn("自动绑定提前结束：网关限流或会话数已满", "done", res.Bound, "err", err)
+			break
+		}
 		switch {
 		case errors.Is(err, newapi.ErrAmbiguousEmail):
 			res.Ambiguous++
