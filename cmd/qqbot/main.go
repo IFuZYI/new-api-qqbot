@@ -38,22 +38,25 @@ import (
 // leaves the first record in the host-day file and evaluates retention against a
 // day the operator never chose. Extracted from main so the sequence can be
 // tested against two calendars that are on different dates.
+//
+// main also installs the calendar earlier, as soon as the settings are readable,
+// so records that describe a FAILURE to start land in the operator's file too;
+// setting it here as well keeps this function self-contained and correct on its
+// own (the test drives it directly).
 func applyStartupLogging(logs *logging.Manager, svc *service.Service, dataDir string) {
+	policy := logging.Policy{Level: logging.LevelInfo}
 	if s, err := svc.Settings(); err == nil {
 		if loc, err := time.LoadLocation(s.Timezone); err == nil {
 			logs.SetLocation(loc)
 		} else {
 			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
 		}
+		policy = logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays}
 	}
 	// Logged here, after the calendar is installed: a record written earlier
 	// would land in the host-day file while every later one uses the operator's
 	// day, splitting one start-up across two files.
 	slog.Info("数据目录", "dir", dataDir, "database", "qqbot.db", "config", config.FileName)
-	policy := logging.Policy{Level: logging.LevelInfo}
-	if s, err := svc.Settings(); err == nil {
-		policy = logging.Policy{Level: s.LogLevel, RetentionDays: s.LogRetentionDays}
-	}
 	logs.Apply(policy)
 }
 
@@ -113,6 +116,22 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	// Install the operator's calendar as soon as the settings are readable, so
+	// every record from here on — including the ones below, which can describe a
+	// FAILURE to start — lands in the operator's day file. The records written
+	// before this point (the env-file read and the database open) use the host
+	// calendar by necessity: their settings are not readable yet. A failure to
+	// start is exactly the kind of record an operator goes looking for, and
+	// splitting one start-up across two day files is what this ordering exists
+	// to prevent.
+	if s, err := service.New(st, nil, nil).Settings(); err == nil {
+		if loc, err := time.LoadLocation(s.Timezone); err == nil {
+			logs.SetLocation(loc)
+		} else {
+			slog.Warn("日志使用系统时区：设置里的时区无法加载", "timezone", s.Timezone, "err", err)
+		}
+	}
 
 	// Connection settings live in the data directory as well, so the whole
 	// instance is one directory to back up or move.
