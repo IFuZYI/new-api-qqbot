@@ -274,17 +274,69 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 	return results, nil
 }
 
-// RunScheduledRules applies the rules that opt into the periodic sweep.
+// RunScheduledRules applies the rules whose own interval has elapsed.
+//
+// The patrol is a single loop whose TICK is the shortest enabled rule interval
+// (so a newly added short rule starts promptly), but each rule is gated on its
+// own interval here: without this gate a rule configured at 1440 minutes ran on
+// every 5-minute tick — 288x the gateway traffic the operator budgeted, and
+// accounts converted as soon as they first matched rather than on the schedule
+// the panel shows. A rule that has never run (LastRunAt == 0) runs immediately.
+//
+// This is the AUTOMATIC path. An operator's explicit 测试一次 / promote click
+// must not be silently skipped by a rule's interval, so it goes through
+// RunScheduledRulesNow instead — the same distinction the scheduler makes for a
+// switched-off patrol.
 func (s *Service) RunScheduledRules() ([]RuleRunResult, error) {
+	return s.runScheduledRules(false)
+}
+
+// RunScheduledRulesNow applies every enabled scheduled rule, ignoring each
+// rule's interval. It is what a manual action calls: the operator asked for one
+// run, and a rule that is inside its interval is exactly what they may be
+// testing.
+func (s *Service) RunScheduledRulesNow() ([]RuleRunResult, error) {
+	return s.runScheduledRules(true)
+}
+
+func (s *Service) runScheduledRules(ignoreInterval bool) ([]RuleRunResult, error) {
 	rows, err := s.st.ScheduledRules()
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
 	rules := make([]Rule, 0, len(rows))
 	for _, r := range rows {
-		rules = append(rules, ruleFromStore(r))
+		rule := ruleFromStore(r)
+		if ignoreInterval || due(rule, now) {
+			rules = append(rules, rule)
+		}
+	}
+	if len(rules) == 0 {
+		// Every scheduled rule is inside its own interval: nothing to do, and no
+		// gateway traffic. Returning an empty slice (not an error) keeps the
+		// patrol's log line honest — "ran, moved nothing" is a real outcome.
+		return nil, nil
 	}
 	return s.ApplyRules(rules)
+}
+
+// due reports whether a scheduled rule is allowed to run now.
+//
+// A zero LastRunAt means it has never run, which is always due. The comparison
+// is on the rule's own interval_minutes, so a long-interval rule is skipped on
+// the ticks it does not own.
+func due(rule Rule, now time.Time) bool {
+	if rule.IntervalMinutes <= 0 {
+		// A rule with no interval is not scheduled at all (ScheduledRules
+		// filters these), so reaching here means "run" rather than "never".
+		return true
+	}
+	if rule.LastRunAt == 0 {
+		return true
+	}
+	elapsed := now.Sub(time.Unix(rule.LastRunAt, 0))
+	return elapsed >= time.Duration(rule.IntervalMinutes)*time.Minute
 }
 
 // ApplyOnBindRules runs the rules triggered by a binding, for one member. It is

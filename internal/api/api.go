@@ -807,7 +807,10 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 	case "promote":
 		// Kept as an alias so an old bookmark still works; it now runs the
 		// configured rules rather than a blanket promotion.
-		res, err := r.svc.RunScheduledRules()
+		// The operator's explicit click bypasses each rule's own interval: they
+		// asked for one run, and a rule inside its interval is what they may be
+		// testing (the same rule the scheduler applies to a switched-off patrol).
+		res, err := r.svc.RunScheduledRulesNow()
 		if err != nil {
 			writeErr(w, 502, err)
 			return
@@ -815,7 +818,7 @@ func (r *Router) action(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, 200, map[string]any{"rules": res})
 
 	case "rules":
-		res, err := r.svc.RunScheduledRules()
+		res, err := r.svc.RunScheduledRulesNow()
 		if err != nil {
 			writeErr(w, 502, err)
 			return
