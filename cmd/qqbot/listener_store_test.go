@@ -150,16 +150,81 @@ func TestListenerRejectsAYesterdayTimestampThroughTheRealAdapter(t *testing.T) {
 	}
 }
 
-// A join event records the membership, which is what makes the roster patrol
+// A join event records the MEMBERSHIP, which is what makes the roster patrol
 // optional (ADR-0003's revision).
+//
+// The assertion is on the membership (member_groups), not merely on the member
+// row existing: Service.BindMember — the next step of this same handler — calls
+// EnsureMember itself, so asserting "the member exists" stayed green with the
+// join's own recording removed (found by an independent reviewer's mutation).
 func TestListenerRecordsAJoinThroughTheRealAdapter(t *testing.T) {
 	l, st, _ := listenerStore(t)
-	// The join path records the member only for a monitored group; the helper
-	// registers and enables group 1. A member with no nickname is stored with an
-	// empty one and filled in by the next roster patrol (the event carries none).
 	raw, _ := json.Marshal(map[string]any{
 		"post_type": "notice", "notice_type": "group_increase",
 		"group_id": 1, "user_id": 54321,
+	})
+	l.Handle(raw)
+
+	assertMembership(t, st, 54321, 1)
+}
+
+// The join's own recording is the ONLY writer when the bind-on-join switch is
+// off, which is the configuration that makes it load-bearing.
+//
+// With the switch on (the default) the handler's next step, BindMember, calls
+// EnsureMember itself — so removing the join's own call is behaviourally
+// equivalent there and an independent reviewer's mutation survived. With the
+// switch off, nothing else records the member, so this is where the join's
+// recording is pinned.
+func TestListenerRecordsAJoinWhenBindingIsOff(t *testing.T) {
+	l, st, svc := listenerStore(t)
+	s, err := svc.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.BindOnJoinEnabled = false
+	if err := svc.SaveSettings(s); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _ := json.Marshal(map[string]any{
+		"post_type": "notice", "notice_type": "group_increase",
+		"group_id": 1, "user_id": 54321,
+	})
+	l.Handle(raw)
+
+	assertMembership(t, st, 54321, 1)
+}
+
+// assertMembership fails unless qq is recorded as a member OF groupID.
+func assertMembership(t *testing.T, st *store.Store, qq, groupID int64) {
+	t.Helper()
+	ms, err := st.ListMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.QQ != qq {
+			continue
+		}
+		for _, g := range m.GroupIDs {
+			if g == groupID {
+				return
+			}
+		}
+		t.Errorf("the join recorded the member but NOT the membership: %+v", m)
+		return
+	}
+	t.Errorf("the join was not recorded: members = %+v", ms)
+}
+
+// A join for an UNMONITORED group records nothing — the reject side of the
+// monitored() gate on the join path.
+func TestListenerIgnoresAJoinInAnUnmonitoredGroup(t *testing.T) {
+	l, st, _ := listenerStore(t)
+	raw, _ := json.Marshal(map[string]any{
+		"post_type": "notice", "notice_type": "group_increase",
+		"group_id": 999, "user_id": 54321,
 	})
 	l.Handle(raw)
 
@@ -169,15 +234,21 @@ func TestListenerRecordsAJoinThroughTheRealAdapter(t *testing.T) {
 	}
 	for _, m := range ms {
 		if m.QQ == 54321 {
-			return
+			t.Errorf("a join in an unmonitored group recorded the member: %+v", m)
 		}
 	}
-	t.Errorf("the join was not recorded: members = %+v", ms)
 }
 
 // A message in an unmonitored group records nothing.
+//
+// The member is BOUND first, deliberately: an unbound member's check-in is
+// skipped by CheckinByMessage before the group gate is reached, so the original
+// version of this test passed with the monitored() gate removed entirely
+// (found by an independent reviewer's mutation). Binding the member makes the
+// group gate the only thing that can refuse the check-in.
 func TestListenerIgnoresAnUnmonitoredGroupThroughTheRealAdapter(t *testing.T) {
 	l, st, svc := listenerStore(t)
+	bindMember(t, st, 54321, 7)
 	today, _ := svc.Today()
 
 	l.Handle(groupMessage(999, 54321, "/签到", time.Now().Unix()))
