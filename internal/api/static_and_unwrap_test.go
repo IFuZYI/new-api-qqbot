@@ -5,41 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// exists picks the default static directory, so it must answer for a real file
-// and for a path that is not there - without creating anything.
-func TestExistsReportsFilePresence(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "present.html"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// exists resolves relative to the process working directory (os.DirFS(".")),
-	// which is what the default-static-dir check does at start-up.
-	t.Chdir(dir)
-
-	if !exists("present.html") {
-		t.Error("exists reported a present file as missing")
-	}
-	if exists("absent.html") {
-		t.Error("exists reported a file that is not there")
-	}
-	if exists(filepath.Join("no-such-dir", "x.html")) {
-		t.Error("exists reported a file under a missing directory")
-	}
-	// A directory is "present" too: the check is about a path existing, and the
-	// caller (a default-dir pick) is the one that decides what it wants.
-	if !exists("sub") {
-		t.Error("exists reported a directory as missing")
-	}
-}
 
 // statusRecorder.Unwrap is what lets http.ResponseController reach the real
 // writer through the tracing wrapper. Without it, a handler that needs an

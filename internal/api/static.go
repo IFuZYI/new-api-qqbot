@@ -1,7 +1,6 @@
 package api
 
 import (
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -105,10 +104,4 @@ func assetCacheControl(cleanPath string) string {
 		return hashedAssetCacheControl
 	}
 	return indexCacheControl
-}
-
-// exists reports whether a path is present, used to pick a default static dir.
-func exists(path string) bool {
-	_, err := fs.Stat(os.DirFS("."), path)
-	return err == nil
 }
