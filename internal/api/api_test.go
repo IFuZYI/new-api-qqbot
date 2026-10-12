@@ -81,13 +81,21 @@ func newTestServerWithConfig(t *testing.T) (*httptest.Server, *store.Store, *htt
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
+	return newEnvWithStubs(t, fakeGateway{}, fakeQQ{})
+}
+
+// newEnvWithStubs is newTestEnv with the two external systems replaced, so a
+// test can make the gateway or QQ fail and assert how the API maps it (a
+// failure on the far side of the service is a 502, not a 500).
+func newEnvWithStubs(t *testing.T, gw service.Gateway, qq service.QQ) *testEnv {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	svc := service.New(st, fakeGateway{}, fakeQQ{})
+	svc := service.New(st, gw, qq)
 	cfgMgr := config.NewManager(filepath.Join(t.TempDir(), config.FileName), st)
 	router := NewRouter(st, svc, cfgMgr, t.TempDir())
 	// The scheduler is not started in tests, so its status is injected: the

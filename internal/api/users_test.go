@@ -177,6 +177,78 @@ func TestSetUserGroupEndpoint(t *testing.T) {
 	}
 }
 
+// The account id comes from the path and is the caller's to get right: a
+// non-numeric segment or a zero is a 400, not a gateway call and not a 500.
+func TestSetUserGroupRejectsABadPathID(t *testing.T) {
+	srv, _, cl, _ := newUserTestEnv(t)
+
+	for _, id := range []string{"abc", "0", "-3"} {
+		var out struct {
+			Error string `json:"error"`
+		}
+		code := postJSONWith(t, cl, srv.URL+"/api/users/"+id+"/group",
+			map[string]any{"group": "vip"}, &out)
+		if code != 400 {
+			t.Errorf("id %q: status %d, want 400", id, code)
+		}
+		if !strings.Contains(out.Error, "invalid new-api user id") {
+			t.Errorf("id %q: unexpected message %q", id, out.Error)
+		}
+	}
+}
+
+// A malformed body is a 400 for the same reason, and must not reach the gateway.
+func TestSetUserGroupRejectsAMalformedBody(t *testing.T) {
+	srv, _, cl, gw := newUserTestEnv(t)
+
+	code, _ := post(t, cl, srv.URL+"/api/users/1/group", "{not json")
+	if code != 400 {
+		t.Fatalf("malformed body = %d, want 400", code)
+	}
+	if gw.users[1].Group != "default" {
+		t.Errorf("the account moved despite the bad request: %q", gw.users[1].Group)
+	}
+}
+
+// A gateway that refuses the change is a 502 carrying the gateway's own message:
+// "No permission to access users of same or higher level" is exactly what the
+// operator needs to read, and it is not this service's fault.
+func TestSetUserGroupMapsGatewayFailureTo502(t *testing.T) {
+	srv, _, cl, gw := newUserTestEnv(t)
+	postJSONWith(t, cl, srv.URL+"/api/users/sync", map[string]any{}, nil)
+	gw.fail[1] = errString("No permission to access users of same or higher level")
+
+	var out struct {
+		Error string `json:"error"`
+	}
+	if code := postJSONWith(t, cl, srv.URL+"/api/users/1/group",
+		map[string]any{"group": "vip"}, &out); code != 502 {
+		t.Fatalf("status %d, want 502", code)
+	}
+	if !strings.Contains(out.Error, "No permission") {
+		t.Errorf("the gateway's message must be surfaced: %q", out.Error)
+	}
+}
+
+// The success body echoes what was written, so the row can update in place.
+func TestSetUserGroupReportsWhatItWrote(t *testing.T) {
+	srv, _, cl, _ := newUserTestEnv(t)
+	postJSONWith(t, cl, srv.URL+"/api/users/sync", map[string]any{}, nil)
+
+	var out struct {
+		OK           bool   `json:"ok"`
+		NewAPIUserID int    `json:"newapi_user_id"`
+		Group        string `json:"group"`
+	}
+	if code := postJSONWith(t, cl, srv.URL+"/api/users/1/group",
+		map[string]any{"group": "  vip  "}, &out); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	if !out.OK || out.NewAPIUserID != 1 || out.Group != "vip" {
+		t.Errorf("unexpected body: %+v", out)
+	}
+}
+
 func TestSetUserGroupsEndpointReportsFailures(t *testing.T) {
 	srv, _, cl, gw := newUserTestEnv(t)
 	postJSONWith(t, cl, srv.URL+"/api/users/sync", map[string]any{}, nil)
