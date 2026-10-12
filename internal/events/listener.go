@@ -63,6 +63,7 @@ type CheckinOutcome struct {
 
 // MessageEvent is the OneBot message event the listener cares about.
 type MessageEvent struct {
+	Time        *int64 `json:"time"`
 	PostType    string `json:"post_type"`
 	MessageType string `json:"message_type"`
 	GroupID     int64  `json:"group_id"`
@@ -254,7 +255,9 @@ func (l *Listener) handleMessage(raw []byte) {
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return
 	}
-	if ev.GroupID == 0 || ev.UserID == 0 {
+	// Legacy producers omitted message_type; explicitly non-group messages
+	// must never gain group privileges.
+	if ev.GroupID <= 0 || ev.UserID <= 0 || (ev.MessageType != "" && ev.MessageType != "group") {
 		return
 	}
 	if !l.monitored(ev.GroupID) {
@@ -276,6 +279,14 @@ func (l *Listener) handleMessage(raw []byte) {
 
 	// A check-in is evaluated separately from the bind command: the operator can
 	// switch either path on without the other.
+	// Missing timestamps retain legacy behaviour. A supplied timestamp needs the
+	// service's configured calendar, not the listener host's timezone.
+	if ev.Time != nil {
+		calendar, ok := l.svc.(interface{ MessageIsToday(int64) bool })
+		if !ok || *ev.Time <= 0 || !calendar.MessageIsToday(*ev.Time) {
+			return
+		}
+	}
 	if l.svc.CheckinByAnyMessage() || l.svc.IsCheckinCommand(text) {
 		res, err := l.svc.CheckinByMessage(ev.GroupID, ev.UserID)
 		switch {
@@ -302,7 +313,7 @@ func (l *Listener) handleGroupIncrease(raw []byte) {
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return
 	}
-	if ev.GroupID == 0 || ev.UserID == 0 {
+	if ev.GroupID <= 0 || ev.UserID <= 0 {
 		return
 	}
 	if !l.monitored(ev.GroupID) {

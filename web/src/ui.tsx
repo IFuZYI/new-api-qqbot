@@ -1185,6 +1185,7 @@ export function Modal({
   onClose,
   wide,
   closeLabel = '关闭',
+  busy = false,
 }: {
   title: string
   children: ReactNode
@@ -1192,6 +1193,7 @@ export function Modal({
   onClose: () => void
   wide?: boolean
   closeLabel?: string
+  busy?: boolean
 }) {
   const panel = useRef<HTMLDivElement>(null)
   const titleID = useId()
@@ -1214,7 +1216,7 @@ export function Modal({
     (e: React.KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
-        onClose()
+        if (!busy) onClose()
         return
       }
       if (e.key !== 'Tab') return
@@ -1231,7 +1233,7 @@ export function Modal({
         last.focus()
       }
     },
-    [onClose],
+    [onClose, busy],
   )
 
   // Lock the page behind the overlay.
@@ -1247,7 +1249,7 @@ export function Modal({
     <div
       className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/50 p-4 backdrop-blur-[1px]"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose()
+        if (!busy && e.target === e.currentTarget) onClose()
       }}
       onKeyDown={onKeyDown}
     >
@@ -1266,6 +1268,7 @@ export function Modal({
             <button
               type="button"
               aria-label={closeLabel}
+              disabled={busy}
               onClick={onClose}
               className={`-m-1 shrink-0 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground ${FOCUS}`}
             >

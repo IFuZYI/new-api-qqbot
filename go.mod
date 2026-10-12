@@ -1,6 +1,6 @@
 module qqbot
 
-go 1.27
+go 1.27.2
 
 require (
 	github.com/glebarez/sqlite v1.11.0

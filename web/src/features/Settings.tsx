@@ -87,6 +87,7 @@ export default function SettingsView({
   onRefresh: () => Promise<void>
 }) {
   const [s, setS] = useState<Settings | null>(null)
+  const [anyMessage, setAnyMessage] = useState(false)
   const [patrols, setPatrols] = useState<Record<string, PatrolState>>({})
   const [busy, setBusy] = useState(false)
   const [loadErr, setLoadErr] = useState('')
@@ -100,6 +101,7 @@ export default function SettingsView({
     try {
       const r = await api.status()
       setS(r.settings)
+      setAnyMessage(r.settings.checkin_patterns.trim() === '')
       setPatrols(r.patrols ?? {})
       setLoadErr('')
     } catch (e) {
@@ -147,20 +149,20 @@ export default function SettingsView({
   const bool = (k: keyof Settings) => (v: boolean) => setS({ ...s, [k]: v } as Settings)
   // "Any message counts" is expressed as an empty pattern list, which is how the
   // server reads it too: there is then no message that fails to match.
-  const anyMessage = s.checkin_patterns.trim() === ''
+  const emptyCommand = !anyMessage && !s.checkin_patterns.trim()
 
   const save = async () => {
+    if (busy || emptyCommand) return
     setBusy(true)
     try {
-      setS(await api.saveSettings(s))
+      const saved = await api.saveSettings({ ...s, checkin_patterns: anyMessage ? '' : s.checkin_patterns })
+      setS({ ...saved, checkin_patterns: s.checkin_patterns })
       onDone('设置已保存')
       await onRefresh()
-      await load()
+      await refreshHealth()
     } catch (e) {
       onFail(e)
-      // A rejected save (a bad regex, say) leaves the server's copy untouched:
-      // reload so the form shows what is actually stored.
-      await load()
+      // Keep the draft so validation failures can be corrected in place.
     } finally {
       setBusy(false)
     }
@@ -195,7 +197,7 @@ export default function SettingsView({
         title="监测设置"
         description="每一类自动化都有独立的开关；关掉的功能不会产生任何请求。保存后立即生效。"
         actions={
-          <Button kind="primary" disabled={busy} onClick={save}>
+          <Button kind="primary" disabled={busy || emptyCommand} onClick={save}>
             {busy ? '保存中…' : '保存'}
           </Button>
         }
@@ -243,7 +245,10 @@ export default function SettingsView({
         >
           <Select
             value={anyMessage ? 'any' : 'command'}
-            onChange={(v) => setS({ ...s, checkin_patterns: v === 'any' ? '' : DEFAULT_CHECKIN_PATTERNS })}
+            onChange={(v) => {
+              setAnyMessage(v === 'any')
+              if (v === 'command' && !s.checkin_patterns) setS({ ...s, checkin_patterns: DEFAULT_CHECKIN_PATTERNS })
+            }}
             ariaLabel="签到触发方式"
             className="w-56"
           >
@@ -251,6 +256,7 @@ export default function SettingsView({
             <option value="command">按指令</option>
           </Select>
         </Field>
+        {emptyCommand && <ErrorNote>请填写至少一条签到指令，或明确选择「任意消息」。</ErrorNote>}
         {anyMessage ? (
           <p className="text-2xs text-muted-foreground">
             当前配置下，群里的任意一条消息都会为发送者记录当天签到。

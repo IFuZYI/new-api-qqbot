@@ -74,7 +74,7 @@ func TestSearchUserByEmailRequiresExactMatch(t *testing.T) {
 				{"id": 7, "username": "seven", "email": "x54321@qq.com", "group": "default", "role": 1},
 				{"id": 8, "username": "eight", "email": "54321@QQ.com", "group": "default", "role": 1},
 			},
-			"total": 2,
+			"page": json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 2,
 		})))
 	}))
 	defer srv.Close()
@@ -93,7 +93,7 @@ func TestFindUserByEmailReturnsNilWhenAbsent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(okEnvelope(map[string]any{
 			"items": []map[string]any{{"id": 1, "username": "a", "email": "nope@qq.com"}},
-			"total": 1,
+			"page":  json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 1,
 		})))
 	}))
 	defer srv.Close()
@@ -115,7 +115,7 @@ func TestFindUserByEmailRejectsAmbiguousMatches(t *testing.T) {
 				{"id": 1, "username": "a", "email": "54321@qq.com"},
 				{"id": 2, "username": "b", "email": "54321@qq.com"},
 			},
-			"total": 2,
+			"page": json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 2,
 		})))
 	}))
 	defer srv.Close()
@@ -268,12 +268,12 @@ func TestFindUserByEmailScansAllPages(t *testing.T) {
 					"id": i + 100, "username": "decoy", "email": "decoy@qq.com",
 				})
 			}
-			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "total": 101})))
+			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "page": json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 101})))
 			return
 		}
 		_, _ = w.Write([]byte(okEnvelope(map[string]any{
 			"items": []map[string]any{{"id": 8, "username": "eight", "email": "54321@qq.com"}},
-			"total": 101,
+			"page":  json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 101,
 		})))
 	}))
 	defer srv.Close()
@@ -296,7 +296,7 @@ func TestFindUserByEmailStopsAtShortPage(t *testing.T) {
 		calls++
 		_, _ = w.Write([]byte(okEnvelope(map[string]any{
 			"items": []map[string]any{{"id": 1, "username": "a", "email": "a@qq.com"}},
-			"total": 1,
+			"page":  json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 1,
 		})))
 	}))
 	defer srv.Close()
@@ -329,12 +329,12 @@ func TestListUsersPagesThroughEveryAccount(t *testing.T) {
 					"id": i + 1, "username": "u", "group": "default",
 				})
 			}
-			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "total": searchPageSize + 1})))
+			_, _ = w.Write([]byte(okEnvelope(map[string]any{"items": items, "page": json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": searchPageSize + 1})))
 			return
 		}
 		_, _ = w.Write([]byte(okEnvelope(map[string]any{
 			"items": []map[string]any{{"id": 999, "username": "last", "group": "vip"}},
-			"total": searchPageSize + 1,
+			"page":  json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": searchPageSize + 1,
 		})))
 	}))
 	defer srv.Close()
@@ -363,7 +363,7 @@ func TestListUsersStopsAtShortPage(t *testing.T) {
 		calls++
 		_, _ = w.Write([]byte(okEnvelope(map[string]any{
 			"items": []map[string]any{{"id": 1, "username": "a", "group": "default"}},
-			"total": 1,
+			"page":  json.Number(r.URL.Query().Get("p")), "page_size": 100, "total": 1,
 		})))
 	}))
 	defer srv.Close()

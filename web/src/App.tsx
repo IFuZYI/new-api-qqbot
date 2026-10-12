@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type Member, type MembersResponse, type UserFilter, type UserRow, type UsersResponse } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, SESSION_EXPIRED, type AuthState, type Bootstrap, type CheckResult, type Config, type ConfigRevisions, type Group, type Member, type MembersResponse, type UserFilter, type UserRow, type UsersResponse } from './api'
 import Login from './Login'
 import Rules from './Rules'
 import SettingsView from './features/Settings'
@@ -93,6 +93,15 @@ export default function App() {
       // operator retries — a toast would expire while they read it.
       setAuthError(e instanceof Error ? e.message : String(e))
     }
+  }, [])
+
+  useEffect(() => {
+    const expire = () => {
+      setBoot(null)
+      setAuth({ needs_setup: false, authenticated: false, username: '' })
+    }
+    window.addEventListener(SESSION_EXPIRED, expire)
+    return () => window.removeEventListener(SESSION_EXPIRED, expire)
   }, [])
 
   const refresh = useCallback(async () => {
@@ -291,7 +300,8 @@ function Overview({
   const total = members?.total ?? 0
   const bound = members?.items.filter((m) => m.bound).length ?? 0
   const checked = members?.items.filter((m) => m.checked_today).length ?? 0
-  const awarded = members?.items.filter((m) => m.reward_today > 0).length ?? 0
+  const awarded = members?.items.filter((m) => m.reward_state === 'paid').length ?? 0
+  const uncertain = members?.items.filter((m) => ['claimed', 'ambiguous', 'legacy'].includes(m.reward_state ?? '')).length ?? 0
 
   return (
     <>
@@ -306,6 +316,14 @@ function Overview({
           <span>统计日期 {members?.date ?? '-'}</span>
           <span aria-hidden="true">·</span>
           <span>监测群 {boot?.groups?.filter((g) => g.enabled).length ?? 0} 个</span>
+          {uncertain > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="text-destructive">
+                {uncertain} 笔奖励待确认（正在处理、结果不明或历史记录；不会自动重复发放。若长期未结算，请先核对网关记录）
+              </span>
+            </>
+          )}
         </p>
       </Card>
 
@@ -421,6 +439,7 @@ function ManualCheckin({
 
   return (
     <Modal
+      busy={busy}
       title="手动记录签到"
       onClose={onClose}
       actions={
@@ -490,15 +509,21 @@ function Groups({
   onRefresh: () => Promise<void>
 }) {
   const [groups, setGroups] = useState<Group[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
+      setLoaded(false)
+      setLoadError('')
       const res = await api.groups()
       setGroups(res.items ?? [])
       setSelected(new Set((res.items ?? []).filter((g) => g.enabled).map((g) => g.group_id)))
+      setLoaded(true)
     } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
       onFail(e)
     }
   }, [onFail])
@@ -513,6 +538,8 @@ function Groups({
       const gs = await api.refreshGroups()
       setGroups(gs ?? [])
       setSelected(new Set((gs ?? []).filter((g) => g.enabled).map((g) => g.group_id)))
+      setLoaded(true)
+      setLoadError('')
       onDone('群列表已从 QQ 刷新')
       await onRefresh()
     } catch (e) {
@@ -523,6 +550,7 @@ function Groups({
   }
 
   const save = async () => {
+    if (!loaded || busy) return
     setBusy(true)
     try {
       const gs = await api.saveGroups([...selected])
@@ -554,13 +582,14 @@ function Groups({
           <Button disabled={busy} onClick={refresh}>
             从 QQ 刷新
           </Button>
-          <Button kind="primary" disabled={busy} onClick={save}>
+          <Button kind="primary" disabled={busy || !loaded} onClick={save}>
             保存
           </Button>
         </>
       }
     >
-      {groups.length === 0 ? (
+      {loadError && <><ErrorNote>{loadError}</ErrorNote><Button onClick={load}>重试</Button></>}
+      {!loaded && !loadError ? <Empty>载入中…</Empty> : groups.length === 0 ? (
         <Empty>还没有群。点「从 QQ 刷新」读取机器人账号所在的群。</Empty>
       ) : (
         <Table head={['监测', '群号', '群名', '人数']}>
@@ -612,6 +641,7 @@ function Users({
 
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [batchGroup, setBatchGroup] = useState('')
+  const groupWrite = useRef(false)
 
   useEffect(() => {
     const t = window.setTimeout(() => setKeyword(q.trim()), 300)
@@ -619,12 +649,15 @@ function Users({
   }, [q])
 
   const filter: UserFilter = { bound, in_group: inGroup, kind, group, q: keyword }
+  const directoryGeneration = useRef(0)
 
   const load = useCallback(async () => {
+    const generation = ++directoryGeneration.current
     try {
-      setData(await api.users(filter))
+      const result = await api.users(filter)
+      if (generation === directoryGeneration.current) setData(result)
     } catch (e) {
-      onFail(e)
+      if (generation === directoryGeneration.current) onFail(e)
     }
     // filter is rebuilt each render; depend on its fields instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -632,6 +665,7 @@ function Users({
 
   useEffect(() => {
     void load()
+    return () => { directoryGeneration.current++ }
   }, [load])
 
   useEffect(() => {
@@ -654,7 +688,7 @@ function Users({
   }, [data])
 
   const items = data?.items ?? []
-  const selectable = items.filter((r) => r.newapi_user_id)
+  const selectable = [...new Set(items.flatMap((r) => r.newapi_user_id ? [r.newapi_user_id] : []))]
 
   const toggle = (id: number) =>
     setSelected((prev) => {
@@ -666,7 +700,7 @@ function Users({
 
   const toggleAll = () =>
     setSelected((prev) =>
-      prev.size === selectable.length ? new Set() : new Set(selectable.map((r) => r.newapi_user_id!)),
+      prev.size === selectable.length ? new Set() : new Set(selectable),
     )
 
   const sync = async () => {
@@ -683,11 +717,12 @@ function Users({
   }
 
   const applyBatch = async () => {
-    if (selected.size === 0) return
+    if (selected.size === 0 || groupWrite.current || busy) return
     if (!batchGroup) {
       onFail(new Error('请先选择目标分组'))
       return
     }
+    groupWrite.current = true
     setBusy(true)
     try {
       const res = await api.setUserGroups([...selected], batchGroup)
@@ -703,6 +738,7 @@ function Users({
     } catch (e) {
       onFail(e)
     } finally {
+      groupWrite.current = false
       setBusy(false)
     }
   }
@@ -892,9 +928,12 @@ function Users({
                   {m.newapi_user_id ? (
                     <Select
                       value={m.newapi_group ?? ''}
+                      disabled={busy}
                       ariaLabel={`账号 #${m.newapi_user_id} 的分组`}
                       onChange={async (v) => {
-                        if (!v || v === m.newapi_group) return
+                        if (!v || v === m.newapi_group || busy || groupWrite.current) return
+                        groupWrite.current = true
+                        setBusy(true)
                         try {
                           await api.setUserGroup(m.newapi_user_id!, v)
                           onDone(`已把 #${m.newapi_user_id} 调整到「${v}」`)
@@ -902,6 +941,9 @@ function Users({
                           await onRefresh()
                         } catch (e) {
                           onFail(e)
+                        } finally {
+                          groupWrite.current = false
+                          setBusy(false)
                         }
                       }}
                     >
@@ -934,7 +976,17 @@ function Users({
                   )}
                 </Cell>
                 <Cell className="tabular-nums">{m.checkin_days}</Cell>
-                <Cell className="tabular-nums">{m.reward_today || '—'}</Cell>
+                <Cell className="tabular-nums">
+                  {['claimed', 'ambiguous', 'legacy'].includes(m.reward_state ?? '') ? (
+                    <span className="text-destructive" title={m.reward_error || undefined}>
+                      {m.reward_today || 0}（{m.reward_state === 'claimed' ? '处理中／待确认' : m.reward_state === 'legacy' ? '历史记录待核对' : '待核对'}）
+                    </span>
+                  ) : m.reward_state === 'paid' ? (
+                    m.reward_today || '—'
+                  ) : (
+                    m.reward_today || '—'
+                  )}
+                </Cell>
                 <Cell sticky>
                   <div className="flex justify-end gap-1.5">
                     <Button kind="ghost" size="sm" onClick={() => setEditing(m)}>
@@ -961,7 +1013,6 @@ function Users({
       {editing && (
         <RebindDialog
           member={editing}
-          members={items}
           onClose={() => setEditing(null)}
           onDone={async (msg) => {
             setEditing(null)
@@ -1006,19 +1057,17 @@ function Users({
  *
  * It works from either side, because the operator arrives from whichever row
  * showed the problem: an unbound member (pick the account) or an account nobody
- * has joined with (pick the QQ). Both sides are dropdowns built from the rows
- * already on screen, so the operator selects real values instead of typing an
+ * has joined with (pick the QQ). Candidates come from the full directory, not
+ * the table filter, so the operator selects real values instead of typing an
  * account id they would have to look up in new-api's own admin page.
  */
 function RebindDialog({
   member,
-  members,
   onClose,
   onDone,
   onFail,
 }: {
   member: UserRow
-  members: UserRow[]
   onClose: () => void
   onDone: (m: string) => void
   onFail: (e: unknown) => void
@@ -1027,6 +1076,23 @@ function RebindDialog({
   // sides start from whatever it carries and are editable either way.
   const [qq, setQQ] = useState(member.qq ? String(member.qq) : '')
   const [accountID, setAccountID] = useState(member.newapi_user_id ? String(member.newapi_user_id) : '')
+  const [busy, setBusy] = useState(false)
+  const saving = useRef(false)
+  const [members, setMembers] = useState<UserRow[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let active = true
+    setLoaded(false)
+    setLoadError('')
+    api.users().then((res) => {
+      if (active) { setMembers(res.items); setLoaded(true) }
+    }).catch((e: unknown) => {
+      if (active) setLoadError(e instanceof Error ? e.message : String(e))
+    })
+    return () => { active = false }
+  }, [attempt])
 
   // QQ candidates: every known member/left row, plus the row itself. keywords
   // carry the nickname so the operator can search by name instead of the number
@@ -1067,37 +1133,45 @@ function RebindDialog({
         : ''
 
   const save = async () => {
+    if (!loaded || saving.current) return
     if (problem) {
       onFail(new Error(problem))
       return
     }
+    saving.current = true
+    setBusy(true)
     try {
-      await api.createBinding({ qq: qqNum, newapi_user_id: accNum })
-      onDone(`已把 QQ ${qqNum} 绑定到 new-api 账号 #${accNum}`)
+      const result = await api.createBinding({ qq: qqNum, newapi_user_id: accNum })
+      onDone(`已把 QQ ${qqNum} 绑定到 new-api 账号 #${accNum}${result.rule_error ? `；分组转换失败：${result.rule_error}` : ''}`)
     } catch (e) {
       onFail(e)
+    } finally {
+      saving.current = false
+      setBusy(false)
     }
   }
 
   return (
     <Modal
+      busy={busy}
       title={member.bound ? `换绑 QQ ${member.qq || '—'}` : '绑定 QQ 与 new-api 账号'}
       onClose={onClose}
       actions={
         <>
-          <Button onClick={onClose}>取消</Button>
-          <Button kind="primary" disabled={problem !== ''} onClick={save}>
+          <Button onClick={onClose} disabled={busy}>取消</Button>
+          <Button kind="primary" disabled={busy || !loaded || problem !== ''} onClick={save}>
             保存
           </Button>
         </>
       }
     >
       <div className="space-y-4">
+        {!loaded && (loadError ? <><ErrorNote>{loadError}</ErrorNote><Button onClick={() => setAttempt((n) => n + 1)}>重试</Button></> : <p>正在读取绑定候选…</p>)}
         <Field label="QQ 号" hint="从群成员里选择">
-          <Combobox value={qq} onChange={setQQ} options={qqOptions} ariaLabel="选择 QQ 号" placeholder="搜索 QQ 号或昵称" emptyText="没有匹配的群成员" className="w-full" />
+          <Combobox disabled={busy || !loaded} value={qq} onChange={setQQ} options={qqOptions} ariaLabel="选择 QQ 号" placeholder="搜索 QQ 号或昵称" emptyText="没有匹配的群成员" className="w-full" />
         </Field>
         <Field label="new-api 账号" hint="从已同步的账号里选择；账号邮箱是 qq@qq.com 时通常可自动绑定">
-          <Combobox value={accountID} onChange={setAccountID} options={accountOptions} ariaLabel="选择 new-api 账号" placeholder="搜索用户名、账号 ID 或邮箱" emptyText="没有匹配的账号" className="w-full" />
+          <Combobox disabled={busy || !loaded} value={accountID} onChange={setAccountID} options={accountOptions} ariaLabel="选择 new-api 账号" placeholder="搜索用户名、账号 ID 或邮箱" emptyText="没有匹配的账号" className="w-full" />
         </Field>
         {accountOptions.length <= 1 && (
           <p className="text-2xs text-muted-foreground">
@@ -1165,6 +1239,31 @@ function Connection({
     setRevs(r.revisions)
     setLoadErr('')
   }, [])
+
+  // saveSection response handler: adopt only the section that was saved. The
+  // response carries the stored copy of the other half, and adopting it would
+  // discard an unsaved edit the operator is still typing in that card.
+  // isConflict recognizes the server's stale-revision refusal, which is the one
+  // save failure where reloading is right (the form's values are known stale).
+  const isConflict = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    return msg.includes('409') || msg.includes('已被修改')
+  }
+
+  const applySection = useCallback(
+    (r: { config: Config; revisions: ConfigRevisions }, section: 'newapi' | 'napcat') => {
+      setC((prev) =>
+        prev
+          ? section === 'newapi'
+            ? { ...prev, newapi: r.config.newapi }
+            : { ...prev, napcat: r.config.napcat }
+          : r.config,
+      )
+      setRevs((prev) => ({ ...prev, [section]: r.revisions[section] }))
+      setLoadErr('')
+    },
+    [],
+  )
 
   const load = useCallback(() => {
     // Report the failure BOTH ways: a toast says what went wrong now, and the
@@ -1248,14 +1347,17 @@ function Connection({
         section === 'newapi'
           ? await api.saveNewAPIConfig(c, revs.newapi)
           : await api.saveNapCatConfig(c, revs.napcat)
-      apply(r)
+      applySection(r, section)
       onDone(`${label}已保存`)
       await onRefresh()
     } catch (e) {
       onFail(e)
-      // The section changed underneath us (a hand edit or another tab): reload
-      // so the operator sees the current values before deciding what to do.
-      load()
+      // A rejected save (a validation error, a stale revision) must leave every
+      // unsaved edit in place so the operator can fix the one field that is
+      // wrong; reloading here would silently discard the rest of the form.
+      // The 409 path below reloads explicitly, where the values really are
+      // stale and there is nothing to preserve.
+      if (isConflict(e)) void load()
     } finally {
       setBusy('')
     }
@@ -1381,7 +1483,9 @@ function Connection({
           revision={revs.napcat}
           onClose={() => setAutoOpen(false)}
           onDone={(r) => {
-            apply(r)
+            // Auto-configure only writes the NapCat section, so the gateway
+            // card's unsaved draft must survive it.
+            applySection(r, 'napcat')
             setAutoOpen(false)
             onDone('NapCat 已自动配置：OneBot 适配器已开启，连接信息已保存')
             onRefresh()
@@ -1480,6 +1584,7 @@ function AutoConfigureNapCat({
 
   return (
     <Modal
+      busy={busy}
       title="自动配置 NapCat"
       onClose={onClose}
       actions={

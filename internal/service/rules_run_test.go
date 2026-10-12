@@ -230,7 +230,9 @@ func TestApplyRulesRecordsGatewayError(t *testing.T) {
 	}
 }
 
-// A missing binding is normal, not a failure.
+// A member with no binding is not a sweep candidate at all: the sweep walks
+// bindings (see TestRulesSweepIncludesOrphanBindings), so an unbound member
+// simply produces no row instead of a per-rule "skipped".
 func TestApplyRulesSkipsUnbound(t *testing.T) {
 	svc, st, _, nc := newTestService(t)
 	nc.members[1] = []napcat.GroupMember{{QQ: 111, Nickname: "a"}}
@@ -243,8 +245,8 @@ func TestApplyRulesSkipsUnbound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0].Promoted != 0 || res[0].Skipped != 1 {
-		t.Errorf("unbound member should be skipped: %+v", res[0])
+	if res[0].Promoted != 0 || res[0].Skipped != 0 {
+		t.Errorf("unbound member should not be visited: %+v", res[0])
 	}
 }
 

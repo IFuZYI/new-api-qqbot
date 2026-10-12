@@ -8,7 +8,9 @@
 # 数据（SQLite 库 + config.yaml）保存在命名卷 qqbot-data 里，容器重建不丢。
 # 库里同时保存着 new-api 的登录会话与设备指纹密钥，所以**保留这个卷**就意味着重启/重建后
 # 不必重新登录 new-api（省下一个 30 天有效的会话名额，默认上限 50）；备份它即备份了这两样。
-# 备份：docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar czf /b/qqbot-data.tgz -C /d .
+# qqbot-data 是逻辑名，实际名受 Compose 项目名影响（通常 <项目名>_qqbot-data）。
+# 勿新增固定 name: 或改项目名以迁就备份命令，否则会挂到空卷。
+# 离线备份/恢复须先停止服务，通过 qqbot 服务挂载读写实际卷；完整命令见 README。
 #
 # NapCat 在宿主机上时，容器内填的地址要用 host.docker.internal（见 README
 # 「Docker 下的 NapCat 地址」），并且 OneBot 适配器必须绑 0.0.0.0——容器访问不到

@@ -183,6 +183,9 @@ func (r *Router) EnsureAdminFromEnv(c config.AdminCreds) error {
 	if len(c.Password) < minPasswordLength {
 		return fmt.Errorf("%s 至少 %d 位", config.EnvAdminPassword, minPasswordLength)
 	}
+	if len(c.Password) > 72 {
+		return fmt.Errorf("%s 最多 72 字节", config.EnvAdminPassword)
+	}
 
 	r.setupMu.Lock()
 	defer r.setupMu.Unlock()
@@ -219,7 +222,7 @@ func (r *Router) EnsureAdminFromEnv(c config.AdminCreds) error {
 	}
 }
 
-func (r *Router) setSessionCookie(w http.ResponseWriter, key []byte, username string) error {
+func (r *Router) setSessionCookie(w http.ResponseWriter, req *http.Request, key []byte, username string) error {
 	gen, err := r.generation()
 	if err != nil {
 		return err
@@ -231,6 +234,8 @@ func (r *Router) setSessionCookie(w http.ResponseWriter, key []byte, username st
 		Path:     "/",
 		Expires:  expiry,
 		HttpOnly: true,
+		// Forwarded headers are untrusted without an explicit proxy policy.
+		Secure:   req.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
@@ -290,6 +295,9 @@ func (r *Router) authState(w http.ResponseWriter, req *http.Request) {
 // setup creates the first WebUI admin. It is refused once an admin exists, so
 // it cannot be used to take over an installed instance.
 func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
+	if !r.admitAuthAttempt(w, req) {
+		return
+	}
 	// The whole setup is serialised and the "is setup needed" check is repeated
 	// inside the lock. Without this, a burst of concurrent requests all observe
 	// "no admin yet" and each creates one, which lets an attacker plant an
@@ -324,6 +332,10 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, fmt.Errorf("密码至少 %d 位", minPasswordLength))
 		return
 	}
+	if len(in.Password) > 72 {
+		writeErr(w, 400, errors.New("密码最多 72 字节"))
+		return
+	}
 	hash, err := hashPassword(in.Password)
 	if err != nil {
 		writeAuthErr(w, 500, err)
@@ -339,7 +351,7 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 		writeAuthErr(w, 500, err)
 		return
 	}
-	if err := r.setSessionCookie(w, key, in.Username); err != nil {
+	if err := r.setSessionCookie(w, req, key, in.Username); err != nil {
 		writeAuthErr(w, 500, err)
 		return
 	}
@@ -347,6 +359,9 @@ func (r *Router) setup(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) login(w http.ResponseWriter, req *http.Request) {
+	if !r.admitAuthAttempt(w, req) {
+		return
+	}
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -356,6 +371,10 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Verification and generation issuance are one critical section shared with
+	// password changes, provisioning and logout. Ordinary API reads stay unlocked.
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
 	a, err := r.st.GetAdmin(strings.TrimSpace(in.Username))
 	hash := ""
 	if err == nil && a != nil {
@@ -375,7 +394,7 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 		writeAuthErr(w, 500, err)
 		return
 	}
-	if err := r.setSessionCookie(w, key, a.Username); err != nil {
+	if err := r.setSessionCookie(w, req, key, a.Username); err != nil {
 		writeAuthErr(w, 500, err)
 		return
 	}
@@ -383,6 +402,8 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) logout(w http.ResponseWriter, req *http.Request) {
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
 	// Clearing the cookie only affects this browser; bumping the generation is
 	// what actually revokes the token, so a copy captured elsewhere stops
 	// working too.
@@ -398,18 +419,13 @@ func (r *Router) logout(w http.ResponseWriter, req *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+		Secure: req.TLS != nil, SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // changePassword updates the signed-in admin's password.
 func (r *Router) changePassword(w http.ResponseWriter, req *http.Request) {
-	username := r.currentUser(req)
-	a, err := r.st.GetAdmin(username)
-	if err != nil {
-		writeErr(w, 401, errors.New("未登录"))
-		return
-	}
 	var in struct {
 		Current string `json:"current"`
 		Next    string `json:"next"`
@@ -418,12 +434,27 @@ func (r *Router) changePassword(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
+	// Everything from the credential check to the generation bump is one
+	// critical section: it shares the lock with login, so a request that
+	// verified the OLD password can no longer acquire the generation issued
+	// after this change and walk away with a valid session.
+	r.setupMu.Lock()
+	defer r.setupMu.Unlock()
+	a, err := r.st.GetAdmin(r.currentUser(req))
+	if err != nil {
+		writeErr(w, 401, errors.New("未登录"))
+		return
+	}
 	if !checkPassword(a.PasswordHash, in.Current) {
 		writeErr(w, 400, errors.New("当前密码不正确"))
 		return
 	}
 	if len(in.Next) < minPasswordLength {
 		writeErr(w, 400, fmt.Errorf("新密码至少 %d 位", minPasswordLength))
+		return
+	}
+	if len(in.Next) > 72 {
+		writeErr(w, 400, errors.New("新密码最多 72 字节"))
 		return
 	}
 	hash, err := hashPassword(in.Next)

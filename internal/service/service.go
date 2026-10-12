@@ -102,6 +102,10 @@ func DefaultSettings() Settings {
 
 const settingsKey = "settings"
 
+// MaxIntervalMinutes is the largest minute count convertible to time.Duration.
+// Settings and rule validation share this bound with their scheduling loops.
+const MaxIntervalMinutes = int(math.MaxInt64 / int64(time.Minute))
+
 // Gateway is the subset of the new-api client the service needs.
 type Gateway interface {
 	FindUserByEmail(addr string) (*newapi.User, error)
@@ -126,6 +130,9 @@ type Service struct {
 	st *store.Store
 	gw Gateway
 	qq QQ
+
+	// groupMu serializes rule and manual account-group read/decide/write paths.
+	groupMu sync.Mutex
 
 	// rndMu guards rnd: Award runs from both the scheduler goroutine and HTTP
 	// handler goroutines, and *rand.Rand is not safe for concurrent use.
@@ -189,10 +196,19 @@ func withDefaults(in Settings) Settings {
 
 // SaveSettings validates and stores settings.
 func (s *Service) SaveSettings(in Settings) error {
-	in = withDefaults(in)
 	if in.RewardMin < 0 || in.RewardMax < 0 {
 		return errors.New("reward values must not be negative")
 	}
+	for name, minutes := range map[string]int{
+		"member_sync_minutes":  in.MemberSyncMinutes,
+		"checkin_sync_minutes": in.CheckinSyncMinutes,
+		"bind_patrol_minutes":  in.BindPatrolMinutes,
+	} {
+		if minutes < 0 || minutes > MaxIntervalMinutes {
+			return fmt.Errorf("%s must be between 0 and %d", name, MaxIntervalMinutes)
+		}
+	}
+	in = withDefaults(in)
 	if in.RewardMin > in.RewardMax {
 		return fmt.Errorf("reward min (%d) must not exceed max (%d)", in.RewardMin, in.RewardMax)
 	}
@@ -474,9 +490,14 @@ func (s *Service) bindQQ(qq int64, source string, cache *qqDataCache) (*store.Bi
 		QQ: qq, NewAPIUserID: u.ID, NewAPIUsername: u.Username,
 		NewAPIEmail: u.Email, Source: source,
 	}
-	if err := s.st.SetBinding(b); err != nil {
+	saved, inserted, err := s.st.InsertBindingIfAbsent(b)
+	if err != nil {
 		return nil, bindSkipped, err
 	}
+	if !inserted {
+		return saved, bindSkipped, nil
+	}
+	b = *saved
 	// Apply the binding-triggered rules now, so the member's group changes
 	// immediately instead of at the next sweep. A rule failure must not fail
 	// the binding that already succeeded, so it is reported alongside it.
@@ -663,9 +684,12 @@ type AwardResult struct {
 	Awarded int `json:"awarded"`
 	Unbound int `json:"unbound"`
 	Failed  int `json:"failed"`
+	// Ambiguous counts rewards whose gateway outcome could not be read: the
+	// claim stays held and they need operator reconciliation, not a retry.
+	Ambiguous int `json:"ambiguous"`
 }
 
-// Award pays the daily check-in reward for date. Each (qq, date) is paid at
+// Award pays pending daily check-in rewards through date. Each (qq, date) is paid at
 // most once: the amount is drawn from the configured range and the claim is
 // recorded before the gateway call, so a crash mid-sweep cannot double-pay,
 // and a gateway failure releases the claim for the next sweep to retry.
@@ -676,7 +700,7 @@ func (s *Service) Award(date string) (AwardResult, error) {
 		return res, err
 	}
 
-	checkins, err := s.st.CheckinsOn(date)
+	checkins, err := s.st.PendingRewardsThrough(date)
 	if err != nil {
 		return res, err
 	}
@@ -697,7 +721,7 @@ func (s *Service) Award(date string) (AwardResult, error) {
 		// Claim the slot and record the amount in one statement. Doing these
 		// separately lets a losing concurrent sweep overwrite reward_quota with
 		// an amount it never paid (the claim still prevents double payment).
-		claimed, err := s.st.ClaimReward(c.QQ, date, amount, time.Now())
+		claimedRow, claimed, err := s.st.ClaimPendingReward(c.QQ, c.Date, amount, time.Now())
 		if err != nil {
 			return res, err
 		}
@@ -705,13 +729,32 @@ func (s *Service) Award(date string) (AwardResult, error) {
 			continue
 		}
 
-		if err := s.gw.AddQuota(b.NewAPIUserID, amount); err != nil {
-			// Release the claim so the next sweep retries.
-			if err := s.st.ReleaseReward(c.QQ, date); err != nil {
-				return res, err
+		amount = claimedRow.RewardQuota
+		// Zero is a completed draw, not a gateway mutation (which may reject it).
+		if amount != 0 {
+			if err := s.gw.AddQuota(b.NewAPIUserID, amount); err != nil {
+				// An unreadable acknowledgement may already have credited the
+				// account, and the gateway has no idempotency key to ask. Keep
+				// the claim held and mark it for reconciliation instead of
+				// retrying, which could pay twice (the operator's chosen
+				// failure direction).
+				if newapi.IsAmbiguousWrite(err) {
+					res.Ambiguous++
+					if err := s.st.FinishReward(c.QQ, c.Date, "ambiguous", err.Error(), time.Now()); err != nil {
+						return res, err
+					}
+					continue
+				}
+				res.Failed++
+				if err := s.st.FinishReward(c.QQ, c.Date, "pending", err.Error(), time.Now()); err != nil {
+					return res, err
+				}
+				continue
 			}
+		}
+		if err := s.st.FinishReward(c.QQ, c.Date, "paid", "", time.Now()); err != nil {
 			res.Failed++
-			continue
+			return res, err
 		}
 		res.Awarded++
 	}
@@ -725,5 +768,10 @@ func (s *Service) draw(cfg Settings) int {
 	}
 	s.rndMu.Lock()
 	defer s.rndMu.Unlock()
+	// The inclusive full-int range has MaxInt+1 outcomes, which cannot be
+	// represented as Intn's argument. Int already samples exactly that range.
+	if cfg.RewardMin == 0 && cfg.RewardMax == math.MaxInt {
+		return s.rnd.Int()
+	}
 	return cfg.RewardMin + s.rnd.Intn(cfg.RewardMax-cfg.RewardMin+1)
 }

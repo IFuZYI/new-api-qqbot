@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime/debug"
@@ -110,9 +111,11 @@ func (r *Router) SetPatrolStatus(p PatrolStatus) { r.patrols = p }
 // SetPatrolRunner installs the on-demand patrol runner.
 func (r *Router) SetPatrolRunner(p PatrolRunner) { r.patrolRunner = p }
 
-// Handler returns the root handler: the mux with panic recovery wrapped around
-// it, so the pattern matching inside the mux is untouched.
-func (r *Router) Handler() http.Handler { return recoverPanics(r.mux) }
+// Handler returns the router wrapped in the cross-origin boundary and panic
+// recovery. csrfProtection sits outside the mux so a route added later inherits
+// it without being listed; recoverPanics is outermost so a panic inside either
+// layer still yields a response instead of a dropped connection.
+func (r *Router) Handler() http.Handler { return recoverPanics(r.csrfProtection(r.mux)) }
 
 func (r *Router) routes() {
 	// Authentication. These must be reachable without a session: the UI needs
@@ -265,6 +268,13 @@ func decode(r *http.Request, out any) error {
 		}
 		return err
 	}
+	// Exactly one document: trailing content means the caller and this service
+	// disagree about what the body is (a proxy appending a second object, a
+	// truncated-then-continued upload), and silently using the first document
+	// would act on a request that was never sent that way.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("请求体必须是单个 JSON 文档")
+	}
 	return nil
 }
 
@@ -294,14 +304,7 @@ func (r *Router) getConfig(w http.ResponseWriter, _ *http.Request) {
 	// edit to the file, or another tab) before it overwrites it. There is one
 	// per section, so editing the gateway does not make an open NapCat card
 	// look stale (and vice versa).
-	writeJSON(w, 200, map[string]any{
-		"config":   r.cfg.MustLoad().Redacted(),
-		"revision": r.cfg.Revision(),
-		"revisions": map[string]string{
-			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
-			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
-		},
-	})
+	writeJSON(w, 200, r.configResponse(r.cfg.MustLoad()))
 }
 
 func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
@@ -314,41 +317,35 @@ func (r *Router) saveConfig(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Refuse a save based on a stale view: without this, a long-lived tab that
-	// only edits one field writes every other field back from its own copy and
-	// silently discards a hand edit made to the file in the meantime.
-	if in.Revision != "" && in.Revision != r.cfg.Revision() {
-		writeErr(w, http.StatusConflict, errors.New(
-			"配置已被修改（可能是你手改了 config.yaml，或另一个页面保存过）。请重新载入后再保存。"))
-		return
-	}
-
-	cfgIn := in.Config
-	cfgIn = cfgIn.Merge(r.cfg.MustLoad())
-
-	if err := cfgIn.NewAPI.Validate(); err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-	if err := cfgIn.NapCat.Validate(); err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-	if err := r.cfg.Save(cfgIn); err != nil {
-		writeErr(w, 500, err)
+	cfgIn, err := r.cfg.SaveCAS(in.Config, in.Revision)
+	if err != nil {
+		writeConfigErr(w, err)
 		return
 	}
 	writeJSON(w, 200, r.configResponse(cfgIn))
+}
+
+// writeConfigErr distinguishes stale forms, invalid input and persistence errors.
+func writeConfigErr(w http.ResponseWriter, err error) {
+	var validation *config.ValidationError
+	switch {
+	case errors.Is(err, config.ErrConflict):
+		writeErr(w, http.StatusConflict, err)
+	case errors.As(err, &validation):
+		writeErr(w, http.StatusBadRequest, err)
+	default:
+		writeErr(w, http.StatusInternalServerError, err)
+	}
 }
 
 // configResponse is the shape the connection page reads back after a save.
 func (r *Router) configResponse(c config.Config) map[string]any {
 	return map[string]any{
 		"config":   c.Redacted(),
-		"revision": r.cfg.Revision(),
+		"revision": c.Revision(),
 		"revisions": map[string]string{
-			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
-			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
+			config.SectionNewAPI: c.SectionRevision(config.SectionNewAPI),
+			config.SectionNapCat: c.SectionRevision(config.SectionNapCat),
 		},
 	}
 }
@@ -384,16 +381,12 @@ func (r *Router) saveSection(
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
-	if in.Revision != "" && in.Revision != r.cfg.SectionRevision(section) {
-		writeErr(w, http.StatusConflict, errors.New(
-			"这部分配置已被修改（可能是你手改了 config.yaml，或另一个页面保存过）。请重新载入后再保存。"))
+	c, err := r.cfg.SaveSectionCAS(section, pick(in.Config), in.Revision)
+	if err != nil {
+		writeConfigErr(w, err)
 		return
 	}
-	if err := r.cfg.SaveSection(section, pick(in.Config)); err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-	writeJSON(w, 200, r.configResponse(r.cfg.MustLoad()))
+	writeJSON(w, 200, r.configResponse(c))
 }
 
 // autoConfigureNapCat takes the WebUI address and token the operator typed,
@@ -424,68 +417,48 @@ func (r *Router) autoConfigureNapCat(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	cur := r.cfg.MustLoad()
-	// A blank token in the form means "use the stored one", so the operator does
-	// not have to retype the WebUI token to re-run auto-configuration.
-	token := in.WebUIToken
-	if token == "" || token == config.RedactedPassword {
-		token = cur.NapCat.WebUIToken
-	}
-	webuiURL := strings.TrimSpace(in.WebUIURL)
-	if webuiURL == "" {
-		webuiURL = cur.NapCat.WebUIURL
-	}
-	if webuiURL == "" || token == "" {
-		writeErr(w, 400, errors.New("请先填写 NapCat WebUI 地址与 Token"))
-		return
-	}
-	if err := (config.NapCat{WebUIURL: webuiURL, WebUIToken: token}).Validate(); err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-
-	res, err := r.napcatAdmin.EnsureAdapters(webuiURL, token, napcat.AdapterOptions{
-		// Reuse the token this service already uses for its adapters, so a
-		// re-run does not rotate it out from under the running patrols.
-		Token:       cur.NapCat.OneBotToken,
-		ConnectHost: napcat.WebUIHost(webuiURL),
-		BindHost:    strings.TrimSpace(in.BindHost),
-		HTTPPort:    in.HTTPPort,
-		WSPort:      in.WSPort,
+	var res *napcat.AdapterResult
+	var upstreamErr error
+	c, err := r.cfg.UpdateSectionCAS(config.SectionNapCat, in.Revision, func(cur config.Config) (config.Config, error) {
+		token := in.WebUIToken
+		if token == "" || token == config.RedactedPassword {
+			token = cur.NapCat.WebUIToken
+		}
+		webuiURL := strings.TrimSpace(in.WebUIURL)
+		if webuiURL == "" {
+			webuiURL = cur.NapCat.WebUIURL
+		}
+		if webuiURL == "" || token == "" {
+			return config.Config{}, &config.ValidationError{Err: errors.New("请先填写 NapCat WebUI 地址与 Token")}
+		}
+		if err := (config.NapCat{WebUIURL: webuiURL, WebUIToken: token}).Validate(); err != nil {
+			return config.Config{}, &config.ValidationError{Err: err}
+		}
+		res, upstreamErr = r.napcatAdmin.EnsureAdapters(webuiURL, token, napcat.AdapterOptions{
+			Token:       cur.NapCat.OneBotToken,
+			ConnectHost: napcat.WebUIHost(webuiURL),
+			BindHost:    strings.TrimSpace(in.BindHost),
+			HTTPPort:    in.HTTPPort, WSPort: in.WSPort,
+		})
+		if upstreamErr != nil {
+			return config.Config{}, upstreamErr
+		}
+		cur.NapCat.WebUIURL, cur.NapCat.WebUIToken = webuiURL, token
+		cur.NapCat.OneBotURL, cur.NapCat.OneBotToken = res.OneBotURL, res.Token
+		cur.NapCat.EventWSURL, cur.NapCat.EventWSToken = res.EventWSURL, res.Token
+		return cur, nil
 	})
 	if err != nil {
-		writeErr(w, 502, fmt.Errorf("配置 NapCat 失败：%w", err))
+		if upstreamErr != nil {
+			writeErr(w, 502, fmt.Errorf("配置 NapCat 失败：%w", err))
+		} else {
+			writeConfigErr(w, err)
+		}
 		return
 	}
-
-	// Persist what we just wired up, together with the WebUI settings that made
-	// it possible. The revision guard is applied here too so a concurrent hand
-	// edit is not silently discarded.
-	if in.Revision != "" && in.Revision != r.cfg.SectionRevision(config.SectionNapCat) {
-		writeErr(w, http.StatusConflict, errors.New(
-			"NapCat 配置已被修改，请重新载入后再试。"))
-		return
-	}
-	updated := cur.NapCat
-	updated.WebUIURL = webuiURL
-	updated.WebUIToken = token
-	updated.OneBotURL = res.OneBotURL
-	updated.OneBotToken = res.Token
-	updated.EventWSURL = res.EventWSURL
-	updated.EventWSToken = res.Token
-	if err := r.cfg.SaveSection(config.SectionNapCat, config.Config{NapCat: updated}); err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{
-		"config":   r.cfg.MustLoad().Redacted(),
-		"revision": r.cfg.Revision(),
-		"revisions": map[string]string{
-			config.SectionNewAPI: r.cfg.SectionRevision(config.SectionNewAPI),
-			config.SectionNapCat: r.cfg.SectionRevision(config.SectionNapCat),
-		},
-		"napcat": res,
-	})
+	out := r.configResponse(c)
+	out["napcat"] = res
+	writeJSON(w, 200, out)
 }
 
 func (r *Router) listGroups(w http.ResponseWriter, _ *http.Request) {
@@ -551,6 +524,11 @@ type memberView struct {
 	CheckedToday bool    `json:"checked_today"`
 	CheckinDays  int     `json:"checkin_days"`
 	RewardToday  int     `json:"reward_today"`
+	// RewardState is pending, claimed, ambiguous or paid. Only paid means the
+	// quota is confirmed granted; ambiguous needs operator reconciliation
+	// because the gateway may or may not have credited it.
+	RewardState string `json:"reward_state,omitempty"`
+	RewardError string `json:"reward_error,omitempty"`
 }
 
 func (r *Router) listMembers(w http.ResponseWriter, _ *http.Request) {
@@ -578,6 +556,8 @@ func (r *Router) listMembers(w http.ResponseWriter, _ *http.Request) {
 		if c, err := r.st.GetCheckin(m.QQ, date); err == nil {
 			v.CheckedToday = true
 			v.RewardToday = c.RewardQuota
+			v.RewardState = c.RewardState
+			v.RewardError = c.RewardError
 		}
 		if n, err := r.st.CountCheckins(m.QQ); err == nil {
 			v.CheckinDays = n
@@ -615,12 +595,12 @@ func (r *Router) createBinding(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
-	if in.QQ == 0 {
-		writeErr(w, 400, errors.New("qq is required"))
+	if in.QQ <= 0 {
+		writeErr(w, 400, errors.New("qq 必须是正整数"))
 		return
 	}
-	if in.NewAPIUserID == 0 {
-		writeErr(w, 400, errors.New("newapi_user_id is required"))
+	if in.NewAPIUserID <= 0 {
+		writeErr(w, 400, errors.New("newapi_user_id 必须是正整数"))
 		return
 	}
 	// Fill the account's identity from the cache rather than trusting the form:

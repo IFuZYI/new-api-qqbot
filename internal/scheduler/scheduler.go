@@ -26,7 +26,8 @@ var ErrUnknownPatrol = errors.New("未知的巡检")
 
 // Scheduler drives the sweeps on independent timers.
 type Scheduler struct {
-	svc *service.Service
+	svc          *service.Service
+	initialDelay time.Duration
 
 	mu      sync.Mutex
 	lastRun map[string]time.Time
@@ -36,9 +37,10 @@ type Scheduler struct {
 // New builds a Scheduler.
 func New(svc *service.Service) *Scheduler {
 	return &Scheduler{
-		svc:     svc,
-		lastRun: map[string]time.Time{},
-		lastErr: map[string]string{},
+		svc:          svc,
+		initialDelay: 20 * time.Second,
+		lastRun:      map[string]time.Time{},
+		lastErr:      map[string]string{},
 	}
 }
 
@@ -99,15 +101,21 @@ func (s *Scheduler) sweeps() []sweep {
 	}
 }
 
-// Run starts the loops and blocks until ctx is cancelled.
+// Run blocks until cancellation and all owned sweeps have finished. Their
+// callbacks may still use the database after cancellation, so callers must join.
 func (s *Scheduler) Run(ctx context.Context) {
+	var workers sync.WaitGroup
 	for _, sw := range s.sweeps() {
-		go s.loop(ctx, sw.name, sw.every, func() error {
-			_, err := sw.body()
-			return err
-		})
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			s.loop(ctx, sw.name, sw.every, func() error {
+				_, err := sw.body()
+				return err
+			})
+		}()
 	}
-	<-ctx.Done()
+	workers.Wait()
 }
 
 // RunNow runs one patrol's sweep immediately and records the outcome, so the
@@ -178,6 +186,20 @@ func (s *Scheduler) runCheckinSweep() (any, error) {
 	return res, syncErr
 }
 
+// intervalMinutes converts a configured minute count to a Duration, clamping
+// out-of-range values. A value that would overflow is treated as "very long"
+// rather than wrapping negative — a negative period reads as a disabled patrol,
+// so an overflow would silently switch the feature off.
+func intervalMinutes(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 0
+	}
+	if minutes > service.MaxIntervalMinutes {
+		return time.Duration(service.MaxIntervalMinutes) * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 // bindInterval returns 0 when the bind patrol is switched off or its interval
 // is 0, which is what makes the loop idle instead of running.
 func (s *Scheduler) bindInterval() time.Duration {
@@ -188,7 +210,7 @@ func (s *Scheduler) bindInterval() time.Duration {
 	if !cfg.BindPatrolEnabled || cfg.BindPatrolMinutes <= 0 {
 		return 0
 	}
-	return time.Duration(cfg.BindPatrolMinutes) * time.Minute
+	return intervalMinutes(cfg.BindPatrolMinutes)
 }
 
 // memberInterval returns 0 when the roster patrol is switched off.
@@ -200,7 +222,7 @@ func (s *Scheduler) memberInterval() time.Duration {
 	if !cfg.MemberPatrolEnabled {
 		return 0
 	}
-	return time.Duration(cfg.MemberSyncMinutes) * time.Minute
+	return intervalMinutes(cfg.MemberSyncMinutes)
 }
 
 // ruleInterval is the shortest configured rule interval, so every rule is
@@ -225,7 +247,7 @@ func (s *Scheduler) ruleInterval() time.Duration {
 		// rule starts running without a restart.
 		return 30 * time.Minute
 	}
-	return time.Duration(best) * time.Minute
+	return intervalMinutes(best)
 }
 
 // checkinInterval returns 0 when there is nothing for the check-in loop to do.
@@ -242,7 +264,7 @@ func (s *Scheduler) checkinInterval() time.Duration {
 	if !cfg.CheckinPatrolEnabled && !cfg.CheckinByMessageEnabled {
 		return 0
 	}
-	return time.Duration(cfg.CheckinSyncMinutes) * time.Minute
+	return intervalMinutes(cfg.CheckinSyncMinutes)
 }
 
 // loop runs fn every interval, re-reading the interval each tick so a settings
@@ -250,7 +272,7 @@ func (s *Scheduler) checkinInterval() time.Duration {
 func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Duration, fn func() error) {
 	// A short initial delay lets the process finish starting and avoids a
 	// burst of traffic the moment it comes up.
-	timer := time.NewTimer(20 * time.Second)
+	timer := time.NewTimer(s.initialDelay)
 	defer timer.Stop()
 
 	for {
@@ -261,7 +283,6 @@ func (s *Scheduler) loop(ctx context.Context, name string, every func() time.Dur
 			// A zero interval means the patrol is switched off: idle and keep
 			// re-checking, so re-enabling it takes effect without a restart.
 			if d := every(); d <= 0 {
-				s.record(name, nil)
 				timer.Reset(patrolDisabledCheck)
 				continue
 			}

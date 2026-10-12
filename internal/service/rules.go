@@ -137,6 +137,9 @@ func (r Rule) Validate() error {
 	if r.IntervalMinutes < 0 {
 		return errors.New("巡检周期不能为负")
 	}
+	if r.IntervalMinutes > MaxIntervalMinutes {
+		return fmt.Errorf("巡检周期过大（上限 %d 分钟）", MaxIntervalMinutes)
+	}
 	for _, g := range r.SourceGroups {
 		if strings.TrimSpace(g) == "" {
 			return errors.New("源分组不能为空")
@@ -200,21 +203,27 @@ type MemberContext struct {
 	// "<"/"<=" condition would match them - a mass-mis-promotion path. A
 	// QQ-side condition therefore does not match when this is false.
 	HasQQData bool
+	// UnknownJoinTime distinguishes missing NapCat data from a real zero-day
+	// membership. Explicitly constructed contexts retain their supplied days.
+	UnknownJoinTime bool
 
 	Level       int // 群等级
 	QQLevel     int // QQ 账号等级
 	JoinDays    int
 	CheckinDays int
+	// A failed query is unknown, never a real zero-day count.
+	CheckinError error
 }
 
 // ContextFromMember builds the QQ-side part of a context. `now` is a Unix time,
 // passed in so the caller controls the clock.
 func ContextFromMember(m napcat.GroupMember, now int64) MemberContext {
 	ctx := MemberContext{
-		QQ:        m.QQ,
-		HasQQData: true,
-		Level:     int(m.Level),
-		QQLevel:   int(m.QQLevel),
+		QQ:              m.QQ,
+		HasQQData:       true,
+		Level:           int(m.Level),
+		QQLevel:         int(m.QQLevel),
+		UnknownJoinTime: m.JoinTime <= 0,
 	}
 	// 0 means NapCat did not report a join time; do not report decades of
 	// membership for it.
@@ -285,8 +294,14 @@ func (c Condition) satisfiedBy(ctx MemberContext) bool {
 	case CondQQLevel:
 		actual = ctx.QQLevel
 	case CondJoinDays:
+		if ctx.UnknownJoinTime {
+			return false
+		}
 		actual = ctx.JoinDays
 	case CondCheckinDays:
+		if ctx.CheckinError != nil {
+			return false
+		}
 		actual = ctx.CheckinDays
 	case CondQuota:
 		if ctx.User == nil {

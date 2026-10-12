@@ -95,12 +95,16 @@ func (c *Client) ImportSession(raw string) error {
 		return fmt.Errorf("client URL: %w", err)
 	}
 	// The gateway scopes its refresh cookie to /api/user/auth; mirroring that
-	// keeps the cookie from being attached to any other request.
+	// keeps the cookie from being attached to any other request. Secure is
+	// inferred from the gateway scheme: the upstream sets Secure on an HTTPS
+	// deployment, and re-importing it without Secure would let a downgrade
+	// redirect carry the session in cleartext.
 	c.http.Jar.SetCookies(u, []*http.Cookie{{
 		Name:     refreshCookieName,
 		Value:    raw,
 		Path:     authPath,
 		HttpOnly: true,
+		Secure:   u.Scheme == "https",
 	}})
 	return nil
 }

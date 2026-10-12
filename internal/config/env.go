@@ -123,9 +123,6 @@ func EnvFileCandidates(dataDir string) []string {
 func LoadEnv(dataDir string) (map[string]string, error) {
 	out := map[string]string{}
 	fileVals, err := loadFirstEnvFile(EnvFileCandidates(dataDir))
-	if err != nil {
-		return nil, err
-	}
 	for k, v := range fileVals {
 		out[k] = v
 	}
@@ -134,7 +131,7 @@ func LoadEnv(dataDir string) (map[string]string, error) {
 			out[k] = v
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 // loadFirstEnvFile reads the first candidate that exists.
@@ -166,7 +163,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return ParseEnv(f), nil
+	return parseEnv(f)
 }
 
 // ParseEnv reads KEY=VALUE lines.
@@ -176,6 +173,13 @@ func LoadEnvFile(path string) (map[string]string, error) {
 // "export", surrounding whitespace and single/double quotes. A '#' only starts
 // a comment at the start of a line, so a password containing '#' survives.
 func ParseEnv(r io.Reader) map[string]string {
+	out, _ := parseEnv(r)
+	return out
+}
+
+// parseEnv rejects partial credentials if the file cannot be read completely.
+// Startup uses the error-returning path; ParseEnv keeps its legacy signature.
+func parseEnv(r io.Reader) (map[string]string, error) {
 	out := map[string]string{}
 	sc := bufio.NewScanner(r)
 	// A long password or token should not be truncated at the default 64K.
@@ -198,7 +202,10 @@ func ParseEnv(r io.Reader) map[string]string {
 		}
 		out[key] = unquoteEnvValue(strings.TrimSpace(value))
 	}
-	return out
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // unquoteEnvValue strips a matching pair of surrounding quotes and, inside

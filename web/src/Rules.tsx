@@ -70,7 +70,7 @@ export default function Rules({
             <Button disabled={busy} onClick={run}>
               {busy ? '执行中…' : '立即执行巡检'}
             </Button>
-            <Button kind="primary" onClick={() => setEditing(blankRule())}>
+            <Button kind="primary" disabled={groups.length === 0 || !!groupsErr} onClick={() => setEditing(blankRule())}>
               新建规则
             </Button>
           </>
@@ -78,7 +78,7 @@ export default function Rules({
       >
         {groupsErr && (
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-            <span className="min-w-0 break-all">读取 new-api 分组失败：{groupsErr}（源/目标分组需手动填写）</span>
+            <span className="min-w-0 break-all">读取 new-api 分组失败：{groupsErr}（暂不能新建规则，请重试）</span>
             <Button kind="ghost" size="sm" onClick={loadGroups}>
               重试
             </Button>
@@ -223,22 +223,6 @@ function blankRule(): Rule {
   }
 }
 
-/**
- * TriggerKind is the trigger as the operator thinks of it. The stored shape is
- * two independent fields (on_bind + interval_minutes), and the two checkboxes
- * edit exactly those — so there is no derived value to keep in sync.
- */
-type TriggerKind = 'bind' | 'interval' | 'both'
-
-/** triggerKind reads the stored pair back as one label, for the rule table and
- * for the 未勾选 case (a rule stored before a trigger was required). */
-function triggerKind(r: Rule): TriggerKind | '' {
-  if (r.on_bind && r.interval_minutes > 0) return 'both'
-  if (r.on_bind) return 'bind'
-  if (r.interval_minutes > 0) return 'interval'
-  return ''
-}
-
 /** TRIGGER_HINT explains what each trigger actually does. It is attached to the
  * checkbox rather than shown for a selected kind, because both can be on at once
  * and each needs its own explanation. */
@@ -272,14 +256,14 @@ function RuleDialog({
   onFail: (e: unknown) => void
 }) {
   const [r, setR] = useState<Rule>(rule)
+  const [patrolEnabled, setPatrolEnabled] = useState(rule.interval_minutes > 0)
+  const [interval, setInterval] = useState(String(rule.interval_minutes || DEFAULT_INTERVAL_MINUTES))
   const [busy, setBusy] = useState(false)
 
   const set = (patch: Partial<Rule>) => setR((prev) => ({ ...prev, ...patch }))
 
-  // The trigger is two independent fields in the API; the form edits them
-  // directly, while the table and the "nothing ticked" check read the stored
-  // pair back through triggerKind.
-  const kind = triggerKind(r)
+  // Empty text while editing must not silently turn the patrol off.
+  const intervalMinutes = patrolEnabled ? Number(interval) : 0
 
   const addCondition = () =>
     set({
@@ -300,8 +284,8 @@ function RuleDialog({
   const problem = (): string => {
     if (!r.name.trim()) return '请填写规则名称'
     if (!r.target_group.trim()) return '请选择目标分组'
-    if (kind === '') return '至少勾选一种触发方式：绑定成功时，或按巡检周期'
-    if (r.interval_minutes < 0) return '巡检周期不能为负'
+    if (!r.on_bind && !patrolEnabled) return '至少勾选一种触发方式：绑定成功时，或按巡检周期'
+    if (patrolEnabled && (!interval.trim() || !Number.isSafeInteger(intervalMinutes) || intervalMinutes < 1)) return '巡检周期必须为正整数'
     if (r.source_groups.includes(r.target_group)) return '源分组与目标分组不能相同'
     return ''
   }
@@ -311,7 +295,8 @@ function RuleDialog({
     if (problemText) return
     setBusy(true)
     try {
-      const saved = r.id ? await api.updateRule(r) : await api.createRule(r)
+      const payload = { ...r, interval_minutes: intervalMinutes }
+      const saved = r.id ? await api.updateRule(payload) : await api.createRule(payload)
       onDone(`已保存规则「${saved.name}」`)
     } catch (e) {
       onFail(e)
@@ -328,12 +313,13 @@ function RuleDialog({
 
   return (
     <Modal
+      busy={busy}
       wide
       title={r.id ? `编辑规则：${rule.name}` : '新建规则'}
       onClose={onClose}
       actions={
         <>
-          <Button onClick={onClose}>取消</Button>
+          <Button onClick={onClose} disabled={busy}>取消</Button>
           <Button kind="primary" disabled={busy || problemText !== ''} onClick={save}>
             保存
           </Button>
@@ -376,15 +362,13 @@ function RuleDialog({
           />
 
           <CheckboxRow
-            checked={r.interval_minutes > 0}
-            onChange={(v) =>
-              set({ interval_minutes: v ? r.interval_minutes || DEFAULT_INTERVAL_MINUTES : 0 })
-            }
+            checked={patrolEnabled}
+            onChange={setPatrolEnabled}
             label="按巡检周期"
             hint={TRIGGER_HINT.interval}
           />
 
-          {r.interval_minutes > 0 && (
+          {patrolEnabled && (
             <div className="pl-6.5">
               <Field
                 label="巡检周期"
@@ -394,8 +378,8 @@ function RuleDialog({
                   <Input
                     type="number"
                     min={1}
-                    value={r.interval_minutes}
-                    onChange={(v) => set({ interval_minutes: Number(v) })}
+                    value={interval}
+                    onChange={setInterval}
                     ariaLabel="巡检周期（分钟）"
                     className="w-20"
                     inputMode="numeric"

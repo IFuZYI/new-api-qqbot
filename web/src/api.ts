@@ -105,6 +105,10 @@ export interface Member {
   checked_today: boolean
   checkin_days: number
   reward_today: number
+  /** Reward lifecycle: pending | claimed | ambiguous | paid | legacy. */
+  reward_state?: string
+  /** Why a reward is not settled; present for ambiguous rows. */
+  reward_error?: string
 }
 
 export interface MembersResponse {
@@ -134,6 +138,10 @@ export interface UserRow {
   checkin_source?: 'board' | 'message'
   checkin_days: number
   reward_today: number
+  /** Reward lifecycle: pending | claimed | ambiguous | paid | legacy. */
+  reward_state?: string
+  /** Why a reward is not settled; present for ambiguous rows. */
+  reward_error?: string
 }
 
 export interface UserSummary {
@@ -201,6 +209,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 const TIMEOUT_MESSAGE =
   '请求超时：30 秒内未收到后端响应，已中断。通常是后端或上游服务（new-api / NapCat）卡住，而不是网络断开。'
 
+export const SESSION_EXPIRED = 'qqbot:session-expired'
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const ctl = new AbortController()
   // Distinguishes our deadline from a caller-side cancellation: both surface
@@ -225,6 +235,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       signal: ctl.signal,
       headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     })
+    // Authentication endpoints may reject incorrect credentials without expiring
+    // an existing panel session. All protected endpoints share this boundary.
+    if (res.status === 401 && !['/api/auth/state', '/api/auth/login', '/api/auth/setup', '/api/auth/logout'].includes(path)) {
+      window.dispatchEvent(new Event(SESSION_EXPIRED))
+    }
     const text = await res.text()
     let body: unknown = null
     try {
@@ -386,7 +401,7 @@ export const api = {
 
   bindings: () => req<{ items: Binding[] }>('/api/bindings'),
   createBinding: (b: { qq: number; newapi_user_id: number; newapi_username?: string; newapi_email?: string }) =>
-    req<Binding>('/api/bindings', { method: 'POST', body: JSON.stringify(b) }),
+    req<{ binding: Binding; rules: { rule_id: number; rule_name: string; promoted: number; skipped: number; failed: number; error?: string }[]; rule_error?: string }>('/api/bindings', { method: 'POST', body: JSON.stringify(b) }),
   deleteBinding: (qq: number) =>
     req<{ ok: boolean }>(`/api/bindings/${qq}/delete`, { method: 'POST', body: '{}' }),
 

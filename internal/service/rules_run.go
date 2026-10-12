@@ -132,6 +132,8 @@ func ruleFromStore(row store.PromotionRule) Rule {
 			// showing the one broken rule. `DecodeError` is what carries
 			// "unusable"; the field itself does not need to be null to say so.
 			r.DecodeError = fmt.Sprintf("source_groups unreadable: %v", err)
+		} else if r.SourceGroups == nil {
+			r.DecodeError = "source_groups unreadable: expected array, got null"
 		}
 	}
 	if r.SourceGroups == nil {
@@ -144,6 +146,8 @@ func ruleFromStore(row store.PromotionRule) Rule {
 			// decode into one. The rule is refused via DecodeError, and the
 			// slice stays an array for the same wire-format reason.
 			r.DecodeError = fmt.Sprintf("conditions unreadable: %v", err)
+		} else if r.Conditions == nil {
+			r.DecodeError = "conditions unreadable: expected array, got null"
 		}
 	}
 	if r.Conditions == nil {
@@ -162,7 +166,8 @@ type RuleRunResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// ApplyRules runs the given rules over every member. A rule that cannot read
+// ApplyRules runs the given rules over every binding, including manually bound
+// QQs with no member row. A rule that cannot read
 // the gateway records its error and the other rules still run, so one bad rule
 // does not stall the sweep.
 func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
@@ -170,8 +175,14 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 	if len(rules) == 0 {
 		return results, nil
 	}
+	// Serialise the read-decide-write against the manual group-change paths:
+	// two rules (or a rule and an operator edit) that both read the account
+	// before either writes would each pass their own source-group gate and the
+	// final group would be whichever wrote last.
+	s.groupMu.Lock()
+	defer s.groupMu.Unlock()
 
-	members, err := s.st.ListMembers()
+	bindings, err := s.st.ListBindings()
 	if err != nil {
 		return nil, err
 	}
@@ -187,11 +198,9 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 		}
 	}
 	groupMembers := map[int64]MemberContext{}
+	var qqErr error
 	if needQQData {
-		groupMembers, err = s.rosterByQQ()
-		if err != nil {
-			return nil, err
-		}
+		groupMembers, qqErr = s.rosterByQQ()
 	}
 
 	now := time.Now().Unix()
@@ -199,17 +208,14 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 
 	for _, rule := range rules {
 		res := RuleRunResult{RuleID: rule.ID, RuleName: rule.Name}
-		for _, m := range members {
-			b, err := s.st.GetBinding(m.QQ)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					res.Skipped++
-					continue
-				}
-				res.Error = err.Error()
-				break
+		if rule.NeedsQQData() && qqErr != nil {
+			res.Error = qqErr.Error()
+		}
+		for _, b := range bindings {
+			if rule.NeedsQQData() && qqErr != nil {
+				res.Failed++
+				continue
 			}
-
 			u, ok := accounts[b.NewAPIUserID]
 			if !ok {
 				u, err = s.gw.GetUser(b.NewAPIUserID)
@@ -220,12 +226,15 @@ func (s *Service) ApplyRules(rules []Rule) ([]RuleRunResult, error) {
 				accounts[b.NewAPIUserID] = u
 			}
 
-			ctx := groupMembers[m.QQ]
-			ctx.QQ = m.QQ
+			ctx := groupMembers[b.QQ]
+			ctx.QQ = b.QQ
 			ctx.Bound = true
 			ctx.User = u
-			if days, err := s.st.CountCheckins(m.QQ); err == nil {
-				ctx.CheckinDays = days
+			ctx.CheckinDays, ctx.CheckinError = s.st.CountCheckins(b.QQ)
+			if err := rule.checkinError(ctx); err != nil {
+				res.Failed++
+				res.Error = err.Error()
+				continue
 			}
 
 			if !rule.Matches(ctx) {
@@ -279,6 +288,8 @@ func (s *Service) RunScheduledRules() ([]RuleRunResult, error) {
 // read per group instead of one per member. A nil cache reads its own, which is
 // what a one-off caller (the in-group command) wants.
 func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResult, error) {
+	s.groupMu.Lock()
+	defer s.groupMu.Unlock()
 	rows, err := s.st.OnBindRules()
 	if err != nil {
 		return nil, err
@@ -308,19 +319,21 @@ func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResul
 	}
 
 	if needQQData && cache == nil {
-		groups, err := s.st.EnabledGroups()
-		if err != nil {
-			return nil, err
-		}
 		cache = newQQDataCache(s.st, s.qq)
-		if err := cache.load(groups); err != nil {
-			return nil, err
-		}
 	}
 
-	ctx, err := s.memberContext(qq, u, needQQData, cache)
+	ctx, err := s.memberContext(qq, u, false, nil)
 	if err != nil {
 		return nil, err
+	}
+	var qqErr error
+	if needQQData {
+		var qqCtx MemberContext
+		qqCtx, qqErr = cache.contextFor(qq)
+		qqCtx.Bound, qqCtx.User, qqCtx.QQ = ctx.Bound, ctx.User, qq
+		qqCtx.CheckinDays = ctx.CheckinDays
+		qqCtx.CheckinError = ctx.CheckinError
+		ctx = &qqCtx
 	}
 
 	results := make([]RuleRunResult, 0, len(rows))
@@ -329,7 +342,13 @@ func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResul
 		rule := ruleFromStore(row)
 		res := RuleRunResult{RuleID: rule.ID, RuleName: rule.Name}
 
-		if !rule.Matches(*ctx) || u.Group == rule.TargetGroup {
+		if rule.NeedsQQData() && qqErr != nil {
+			res.Failed++
+			res.Error = qqErr.Error()
+		} else if err := rule.checkinError(*ctx); err != nil {
+			res.Failed++
+			res.Error = err.Error()
+		} else if !rule.Matches(*ctx) || u.Group == rule.TargetGroup {
 			res.Skipped++
 		} else if err := s.gw.SetGroup(u, rule.TargetGroup); err != nil {
 			res.Failed++
@@ -359,9 +378,7 @@ func (s *Service) ApplyOnBindRules(qq int64, cache *qqDataCache) ([]RuleRunResul
 // trigger and the patrol cannot disagree about a member in several groups.
 func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool, cache *qqDataCache) (*MemberContext, error) {
 	ctx := MemberContext{QQ: qq, Bound: u != nil, User: u}
-	if days, err := s.st.CountCheckins(qq); err == nil {
-		ctx.CheckinDays = days
-	}
+	ctx.CheckinDays, ctx.CheckinError = s.st.CountCheckins(qq)
 	if !needQQData {
 		return &ctx, nil
 	}
@@ -374,7 +391,18 @@ func (s *Service) memberContext(qq int64, u *newapi.User, needQQData bool, cache
 	ctx.Level = qqCtx.Level
 	ctx.QQLevel = qqCtx.QQLevel
 	ctx.JoinDays = qqCtx.JoinDays
+	ctx.UnknownJoinTime = qqCtx.UnknownJoinTime
 	return &ctx, nil
+}
+
+// A local check-in outage must not block unrelated gateway/QQ conditions.
+func (r Rule) checkinError(ctx MemberContext) error {
+	for _, c := range r.Conditions {
+		if c.ConditionType == CondCheckinDays && ctx.CheckinError != nil {
+			return fmt.Errorf("QQ %d check-in count: %w", ctx.QQ, ctx.CheckinError)
+		}
+	}
+	return nil
 }
 
 // qqDataCache reads each monitored group's roster at most once, and resolves
@@ -398,6 +426,7 @@ type qqDataCache struct {
 	// loaded records that the group list has been read, so an empty result is
 	// not re-fetched on every lookup.
 	loaded  bool
+	loadErr error
 	byGroup map[int64][]napcat.GroupMember
 	// merged is the per-member context, resolved on first use.
 	merged map[int64]MemberContext
@@ -412,7 +441,7 @@ func newQQDataCache(st *store.Store, qq QQ) *qqDataCache {
 // caller already has avoids a second lookup; passing nil reads them here.
 func (c *qqDataCache) load(enabled []store.MonitoredGroup) error {
 	if c.loaded {
-		return nil
+		return c.loadErr
 	}
 	if enabled == nil {
 		var err error
@@ -425,12 +454,13 @@ func (c *qqDataCache) load(enabled []store.MonitoredGroup) error {
 	for _, g := range enabled {
 		ms, err := c.qq.GetGroupMemberList(g.GroupID)
 		if err != nil {
-			// A group that cannot be read is skipped; the rest still apply.
+			// A partial maximum can wrongly satisfy an upper-bound condition.
+			c.loadErr = errors.Join(c.loadErr, fmt.Errorf("QQ group %d: %w", g.GroupID, err))
 			continue
 		}
 		c.byGroup[g.GroupID] = ms
 	}
-	return nil
+	return c.loadErr
 }
 
 // contextFor resolves one member's QQ-side context from the cached rosters. It
@@ -484,6 +514,7 @@ func mergeContext(acc, add MemberContext) MemberContext {
 	if add.JoinDays > acc.JoinDays {
 		acc.JoinDays = add.JoinDays
 	}
+	acc.UnknownJoinTime = acc.UnknownJoinTime || add.UnknownJoinTime
 	return acc
 }
 

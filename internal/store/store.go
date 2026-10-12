@@ -83,6 +83,13 @@ type Checkin struct {
 	Rank        int    `json:"rank"`
 	RewardQuota int    `json:"reward_quota"`
 	RewardedAt  int64  `json:"rewarded_at"`
+	// RewardDrawn distinguishes a persisted zero award from an undrawn amount.
+	RewardDrawn bool `gorm:"not null;default:false" json:"reward_drawn"`
+	// RewardState is pending, claimed, ambiguous, paid, or legacy.
+	// Only confirmed new payments set RewardedAt; legacy timestamps are preserved.
+	RewardState     string `gorm:"not null;default:pending;index" json:"reward_state"`
+	RewardError     string `json:"reward_error"`
+	RewardClaimedAt int64  `json:"reward_claimed_at"`
 
 	// Source records how the check-in was learned: board or message. The
 	// default keeps rows written before this column existed reading as board
@@ -164,6 +171,15 @@ func Open(path string) (*Store, error) {
 		&NewAPIUser{},
 	); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	// Old rewarded_at markers were written BEFORE the gateway request. They
+	// cannot prove payment, but must remain excluded from automatic retries.
+	// Keep their original timestamp and amount under an explicit legacy state.
+	if err := db.Model(&Checkin{}).
+		Where("rewarded_at <> 0 AND reward_state = ?", "pending").
+		Updates(map[string]any{"reward_state": "legacy", "reward_drawn": true,
+			"reward_error": "历史领取记录，付款结果未经确认；请核对网关记录，勿直接重发"}).Error; err != nil {
+		return nil, fmt.Errorf("migrate reward state: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -391,6 +407,26 @@ func (s *Store) SetBinding(b Binding) error {
 	return s.db.Save(&existing).Error
 }
 
+// InsertBindingIfAbsent atomically creates an automatic binding. A loser reads
+// the winner in the same transaction and must not run on-bind side effects.
+func (s *Store) InsertBindingIfAbsent(b Binding) (*Binding, bool, error) {
+	inserted := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		b.CreatedAt = now()
+		b.UpdatedAt = b.CreatedAt
+		res := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "qq"}}, DoNothing: true}).Create(&b)
+		if res.Error != nil {
+			return res.Error
+		}
+		inserted = res.RowsAffected == 1
+		if !inserted {
+			return tx.First(&b, "qq = ?", b.QQ).Error
+		}
+		return nil
+	})
+	return &b, inserted, err
+}
+
 // GetBinding loads one binding by QQ.
 func (s *Store) GetBinding(qq int64) (*Binding, error) {
 	var b Binding
@@ -531,6 +567,54 @@ func (s *Store) CheckinTotalsByQQ() (map[int64]int, error) {
 	return out, nil
 }
 
+// ClaimPendingReward atomically claims a pending row and returns its persisted
+// first draw. A retry never changes that draw, including an explicit zero.
+// Claimed rows are not automatically retried: a crash may follow a remote credit.
+func (s *Store) ClaimPendingReward(qq int64, date string, amount int, at time.Time) (*Checkin, bool, error) {
+	var c Checkin
+	claimed := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&Checkin{}).Where("qq = ? AND date = ? AND rewarded_at = 0 AND reward_state = ?", qq, date, "pending").Updates(map[string]any{
+			"reward_quota": gorm.Expr("CASE WHEN reward_drawn THEN reward_quota ELSE ? END", amount),
+			"reward_drawn": true, "reward_state": "claimed", "reward_claimed_at": at.Unix(), "reward_error": "",
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		claimed = res.RowsAffected == 1
+		if !claimed {
+			return nil
+		}
+		return tx.First(&c, "qq = ? AND date = ?", qq, date).Error
+	})
+	return &c, claimed, err
+}
+
+// FinishReward transitions only a held claim. A failed database write leaves it
+// held, so neither a credit nor an uncertain result can cause automatic repayment.
+// pending means a definite rejection; ambiguous requires operator reconciliation.
+func (s *Store) FinishReward(qq int64, date, state, message string, at time.Time) error {
+	if state != "paid" && state != "pending" && state != "ambiguous" {
+		return fmt.Errorf("invalid reward state %q", state)
+	}
+	paidAt := int64(0)
+	if state == "paid" {
+		paidAt = at.Unix()
+	}
+	res := s.db.Model(&Checkin{}).Where("qq = ? AND date = ? AND reward_state = ?", qq, date, "claimed").Updates(map[string]any{
+		"reward_state": state, "reward_error": message, "rewarded_at": paidAt,
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("reward claim missing for %d on %s", qq, date)
+	}
+	return nil
+}
+
+// ClaimReward is the legacy claim API. New reward flows use ClaimPendingReward
+// and FinishReward to retain the first draw and distinguish paid from uncertain.
 // ClaimReward claims the one-time reward for a (qq, date) and records the amount
 // in the same statement, returning false if it was already claimed. Combining
 // them keeps the recorded amount equal to the amount actually paid even when two
@@ -551,6 +635,13 @@ func (s *Store) ReleaseReward(qq int64, date string) error {
 	return s.db.Model(&Checkin{}).
 		Where("qq = ? AND date = ?", qq, date).
 		Updates(map[string]any{"rewarded_at": 0, "reward_quota": 0}).Error
+}
+
+// PendingRewardsThrough includes missed days, but never future or held claims.
+func (s *Store) PendingRewardsThrough(date string) ([]Checkin, error) {
+	var out []Checkin
+	err := s.db.Where("date <= ? AND rewarded_at = 0 AND reward_state = ?", date, "pending").Order("date, qq").Find(&out).Error
+	return out, err
 }
 
 // CheckinsOn returns every check-in recorded for a date.
@@ -607,17 +698,11 @@ func (s *Store) PutSetting(key string, value any) error {
 	if err != nil {
 		return fmt.Errorf("marshal setting %s: %w", key, err)
 	}
-	var existing Setting
-	err = s.db.First(&existing, "key = ?", key).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return s.db.Create(&Setting{Key: key, Value: string(raw), UpdatedAt: now()}).Error
-	}
-	if err != nil {
-		return err
-	}
-	existing.Value = string(raw)
-	existing.UpdatedAt = now()
-	return s.db.Save(&existing).Error
+	// A single upsert also makes simultaneous first writes safe.
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+	}).Create(&Setting{Key: key, Value: string(raw), UpdatedAt: now()}).Error
 }
 
 // GetSettingRaw returns a setting's stored JSON without decoding it. Callers

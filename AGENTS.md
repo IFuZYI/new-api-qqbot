@@ -102,7 +102,11 @@ below) and never as part of `go test`.
 - **A check-in is idempotent per `(qq, date)`.** The sign-in board is today-only
   and polled repeatedly, so re-recording must never re-randomise the reward or
   re-award it. The reward amount is persisted *before* the gateway call, and the
-  claim is released only when that call fails. A message-driven check-in writes
+  claim returns to pending only after a definite refusal, retaining its first
+  drawn amount. Unknown outcomes remain claimed/ambiguous and are never retried
+  automatically; only paid confirms success. Legacy nonzero markers migrate to
+  legacy, preserve their timestamp and amount, and require reconciliation rather
+  than being presented as confirmed payment. A message-driven check-in writes
   the same row through `RecordMessageCheckin`, which only ever inserts: a day
   already recorded (by the board or by an earlier message) is left exactly as it
   is, and the board upgrades a message-sourced row because it knows the rank and
@@ -136,8 +140,10 @@ below) and never as part of `go test`.
   sitting in the rule's source groups. Re-read the account by id before writing:
   new-api's `PUT /api/user/` replaces the fields it accepts, so a sparse object
   blanks `display_name`.
-- **Polling is the source of truth.** The event listener only shortens reaction
-  time; nothing may depend on it (see `docs/adr/0003-polling-authoritative-events-optional.md`).
+- **Polling is authoritative for rosters and sign-in boards.** Bind commands and
+  message check-ins require the event stream; polling cannot replay lost messages.
+  Group-increase events also record membership independently of path switches
+  (see the revision in `docs/adr/0003-polling-authoritative-events-optional.md`).
 - **The user directory is a union of both sides, keyed on QQ *and* new-api
   account.** The table exists to answer "谁没进群": a new-api account no member
   has joined with, and a QQ member with no account, both appear. A bound account

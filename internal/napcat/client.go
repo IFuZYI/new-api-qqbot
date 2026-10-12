@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +78,7 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameOriginRedirect},
 	}
 }
 
@@ -148,7 +150,7 @@ func Failover[T any](primary, fallback func() (T, error)) (T, error) {
 // obEnvelope is NapCat's OneBot response envelope.
 type obEnvelope struct {
 	Status  string          `json:"status"`
-	Retcode int             `json:"retcode"`
+	Retcode *int            `json:"retcode"`
 	Data    json.RawMessage `json:"data"`
 	Message string          `json:"message"`
 	Wording string          `json:"wording"`
@@ -179,6 +181,9 @@ func (c *Client) Call(action string, params map[string]any, out any) error {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: HTTP %d", action, resp.StatusCode)
+	}
 
 	body, err := readBody(resp.Body)
 	if err != nil {
@@ -205,9 +210,12 @@ var noSigninBoardMarkers = []string{
 func decodeAction(action string, body []byte, out any) error {
 	var env obEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return fmt.Errorf("%s: unexpected response (HTTP body): %.200s", action, body)
+		return fmt.Errorf("%s: invalid OneBot response", action)
 	}
-	if env.Retcode != 0 {
+	if env.Retcode == nil || env.Status == "" {
+		return fmt.Errorf("%s: incomplete OneBot envelope", action)
+	}
+	if *env.Retcode != 0 || env.Status != "ok" {
 		msg := env.Message
 		if msg == "" {
 			msg = env.Wording
@@ -217,9 +225,12 @@ func decodeAction(action string, body []byte, out any) error {
 				return fmt.Errorf("%s: %w", action, ErrNoSigninBoard)
 			}
 		}
-		return fmt.Errorf("%s: retcode %d: %s", action, env.Retcode, msg)
+		return fmt.Errorf("%s: retcode %d: %s", action, *env.Retcode, msg)
 	}
-	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
+	if len(env.Data) == 0 || (out != nil && string(env.Data) == "null") {
+		return fmt.Errorf("%s: missing OneBot data", action)
+	}
+	if out != nil {
 		if err := json.Unmarshal(env.Data, out); err != nil {
 			return fmt.Errorf("%s: decode data: %w", action, err)
 		}
@@ -303,7 +314,7 @@ func NewWebUI(baseURL, token string) *WebUI {
 	return &WebUI{
 		baseURL: NormalizeWebUIURL(baseURL),
 		token:   token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameOriginRedirect},
 	}
 }
 
@@ -360,7 +371,7 @@ func (w *WebUI) Credential() string {
 }
 
 type webuiEnvelope struct {
-	Code    int             `json:"code"`
+	Code    *int            `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 }
@@ -391,6 +402,9 @@ func (w *WebUI) do(path string, body any, out any) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return classifyWebUIError(&httpStatusError{status: resp.StatusCode, path: path})
+	}
 	raw, err := readBody(resp.Body)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -398,12 +412,18 @@ func (w *WebUI) do(path string, body any, out any) error {
 
 	var env webuiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("%s: unexpected response: %.200s", path, raw)
+		return fmt.Errorf("%s: invalid WebUI response", path)
 	}
-	if env.Code != 0 {
-		return fmt.Errorf("%s: %s (code %d)", path, env.Message, env.Code)
+	if env.Code == nil {
+		return fmt.Errorf("%s: missing WebUI code", path)
 	}
-	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
+	if *env.Code != 0 {
+		return classifyWebUIError(fmt.Errorf("%s: %s (code %d)", path, env.Message, *env.Code))
+	}
+	if out != nil {
+		if len(env.Data) == 0 || bytes.Equal(bytes.TrimSpace(env.Data), []byte("null")) {
+			return fmt.Errorf("%s: missing WebUI data", path)
+		}
 		if err := json.Unmarshal(env.Data, out); err != nil {
 			return fmt.Errorf("%s: decode data: %w", path, err)
 		}
@@ -493,8 +513,12 @@ func (w *WebUI) GetOneBotConfig() (*OneBotConfig, error) {
 		return nil, err
 	}
 	cfg := &OneBotConfig{Raw: raw, Network: map[string]json.RawMessage{}}
-	if n, ok := raw["network"]; ok {
-		_ = json.Unmarshal(n, &cfg.Network)
+	n, ok := raw["network"]
+	if !ok || json.Unmarshal(n, &cfg.Network) != nil || cfg.Network == nil {
+		return nil, fmt.Errorf("invalid OneBot network: expected object")
+	}
+	if err := validateNetwork(cfg.Network); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -527,12 +551,16 @@ func (w *WebUI) EnableWebSocketServer(name, host string, port int, token string)
 	if err != nil {
 		return err
 	}
-	adapters := []map[string]any{{
+	adapters, err := decodeAdapters(cfg.Network["websocketServers"])
+	if err != nil {
+		return err
+	}
+	adapters = upsertAdapter(adapters, name, map[string]any{
 		"name": name, "enable": true, "host": host, "port": port,
 		"messagePostFormat": "array", "reportSelfMessage": false,
 		"token": token, "enableForcePushEvent": true, "debug": false,
 		"heartInterval": 30000,
-	}}
+	})
 	raw, err := json.Marshal(adapters)
 	if err != nil {
 		return err
@@ -547,11 +575,15 @@ func (w *WebUI) EnableHTTPServer(name, host string, port int, token string) erro
 	if err != nil {
 		return err
 	}
-	adapters := []map[string]any{{
+	adapters, err := decodeAdapters(cfg.Network["httpServers"])
+	if err != nil {
+		return err
+	}
+	adapters = upsertAdapter(adapters, name, map[string]any{
 		"name": name, "enable": true, "port": port, "host": host,
 		"enableCors": true, "enableWebsocket": false,
 		"messagePostFormat": "array", "token": token, "debug": false,
-	}}
+	})
 	raw, err := json.Marshal(adapters)
 	if err != nil {
 		return err
@@ -611,6 +643,11 @@ type AdapterResult struct {
 func (w *WebUI) EnsureAdapters(opts AdapterOptions) (*AdapterResult, error) {
 	if opts.BindHost == "" {
 		opts.BindHost = "127.0.0.1"
+		// Keep the default private, but match an IPv6 connection address:
+		// an IPv4-only listener cannot be reached through ::1.
+		if ip := net.ParseIP(strings.Trim(opts.ConnectHost, "[]")); ip != nil && ip.To4() == nil {
+			opts.BindHost = "::1"
+		}
 	}
 	if opts.ConnectHost == "" {
 		// The bind host is not always usable as a connect host: 0.0.0.0 means
@@ -618,6 +655,9 @@ func (w *WebUI) EnsureAdapters(opts AdapterOptions) (*AdapterResult, error) {
 		// is what a same-host deployment (the default) wants.
 		if isWildcardHost(opts.BindHost) {
 			opts.ConnectHost = "127.0.0.1"
+			if opts.BindHost == "::" || opts.BindHost == "[::]" {
+				opts.ConnectHost = "::1"
+			}
 		} else {
 			opts.ConnectHost = opts.BindHost
 		}
@@ -679,20 +719,30 @@ func (w *WebUI) EnsureAdapters(opts AdapterOptions) (*AdapterResult, error) {
 	}
 	return &AdapterResult{
 		Token:      token,
-		OneBotURL:  fmt.Sprintf("http://%s:%d", opts.ConnectHost, opts.HTTPPort),
-		EventWSURL: fmt.Sprintf("ws://%s:%d", opts.ConnectHost, opts.WSPort),
+		OneBotURL:  "http://" + net.JoinHostPort(opts.ConnectHost, strconv.Itoa(opts.HTTPPort)),
+		EventWSURL: "ws://" + net.JoinHostPort(opts.ConnectHost, strconv.Itoa(opts.WSPort)),
 	}, nil
 }
 
 // decodeAdapters reads one adapter list. A missing or empty list is not an
 // error: the group simply has no adapters of that kind yet.
 func decodeAdapters(raw json.RawMessage) ([]map[string]any, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 {
 		return nil, nil
 	}
 	var out []map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber() // Preserve unknown integers beyond float64 precision.
+	if err := decoder.Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode adapters: %w", err)
+	}
+	if out == nil {
+		return nil, fmt.Errorf("decode adapters: expected array, not null")
+	}
+	for _, adapter := range out {
+		if adapter == nil {
+			return nil, fmt.Errorf("decode adapters: expected object, not null")
+		}
 	}
 	return out, nil
 }
@@ -702,7 +752,10 @@ func decodeAdapters(raw json.RawMessage) ([]map[string]any, error) {
 func upsertAdapter(list []map[string]any, name string, want map[string]any) []map[string]any {
 	for i, a := range list {
 		if s, _ := a["name"].(string); s == name {
-			list[i] = want
+			for key, value := range want {
+				a[key] = value
+			}
+			list[i] = a
 			return list
 		}
 	}

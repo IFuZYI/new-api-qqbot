@@ -120,6 +120,12 @@ func retryableLoginError(err error) bool {
 		"Password login has been disabled",
 		"Turnstile",
 		"the gateway returned no access token", // 2FA challenge
+		// The gateway answers this when password encryption is enabled and the
+		// client sent a plaintext password (reference/new-api controller/user.go
+		// under PasswordLoginEncryptionEnabled). It is a configuration
+		// incompatibility: the same request can never succeed, so retrying only
+		// spends three slots of the CriticalRateLimit budget.
+		"Invalid parameters",
 	} {
 		if strings.Contains(msg, decision) || strings.Contains(lower, decision) {
 			return false
@@ -133,8 +139,8 @@ func retryableLoginError(err error) bool {
 // IsAuthFailure reports whether err means the session is no longer usable, which
 // is the only case where throwing away a cached client is right.
 //
-// It keys on the gateway's machine-readable codes for a dead session, never on
-// a bare HTTP status and never on a loose substring: the gateway answers a
+// It prefers typed machine-readable codes, falling back to a bare 401 only
+// when no code identifies an incurable refusal. The gateway answers a
 // permission denial (AUTH_INSUFFICIENT_PRIVILEGE) and a disabled account
 // (AUTH_USER_DISABLED) with 403 and 401 respectively, and neither is fixed by
 // logging in again. Invalidating on those forces a re-login that spends the
@@ -146,6 +152,17 @@ func IsAuthFailure(err error) bool {
 	}
 	if IsRateLimited(err) || IsSessionLimit(err) {
 		return false
+	}
+	var response *HTTPError
+	if errors.As(err, &response) {
+		switch response.Code {
+		case "AUTH_ORIGIN_FORBIDDEN", "AUTH_USER_DISABLED", "AUTH_INSUFFICIENT_PRIVILEGE":
+			return false
+		case "AUTH_UNAUTHORIZED", "AUTH_TOKEN_EXPIRED", "AUTH_SESSION_REVOKED", "AUTH_TOKEN_INVALID":
+			return true
+		}
+		// Unknown codes fall back to the old status rule: a 401 is a dead session.
+		return response.StatusCode == 401
 	}
 	msg := err.Error()
 	// A dead session: the token is gone, expired, revoked or invalid. These are

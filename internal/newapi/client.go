@@ -102,6 +102,8 @@ type User struct {
 	Quota        int    `json:"quota"`
 	UsedQuota    int    `json:"used_quota"`
 	RequestCount int    `json:"request_count"`
+	// Upstream gorm.DeletedAt marshals as null or an RFC3339 timestamp.
+	DeletedAt *time.Time `json:"DeletedAt,omitempty"`
 }
 
 // Client talks to one new-api instance.
@@ -132,6 +134,11 @@ func New(baseURL string) *Client {
 			// and the client silently falls back to a full login — a new session
 			// every 15 minutes, which is what walks into the session cap.
 			Jar: newCookieJar(),
+			// Never follow a redirect to another origin: the login body and the
+			// bearer/refresh credentials would be handed to whoever the
+			// configured address redirects to (a wrong proxy, a hijacked
+			// endpoint). A same-origin redirect is still allowed.
+			CheckRedirect: sameOriginRedirect,
 		},
 		now: time.Now,
 	}
@@ -221,7 +228,7 @@ func (c *Client) validLocked(now time.Time) bool {
 // readable error (e.g. AUTH_SESSION_LIMIT) which is far more useful than the
 // bare HTTP status.
 type envelope struct {
-	Success bool            `json:"success"`
+	Success *bool           `json:"success"`
 	Message string          `json:"message"`
 	Code    string          `json:"code"`
 	Data    json.RawMessage `json:"data"`
@@ -266,7 +273,15 @@ func (c *Client) do(method, path string, body any, out any) error {
 
 // doWithOrigin is do plus an explicit Origin header, for the one route that
 // needs it (the refresh; see Client.Refresh).
-func (c *Client) doWithOrigin(method, path string, body any, out any, origin string) error {
+func (c *Client) doWithOrigin(method, path string, body any, out any, origin string) (result error) {
+	// Only AddQuota is non-idempotent here. Do not infer certainty from an
+	// unreadable acknowledgement after dispatch, or retry inside this client.
+	uncertain := false
+	defer func() {
+		if result != nil && uncertain {
+			result = &AmbiguousWriteError{Err: result}
+		}
+	}()
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -290,6 +305,7 @@ func (c *Client) doWithOrigin(method, path string, body any, out any, origin str
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
+	uncertain = method == http.MethodPost && path == "/api/user/manage"
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, path, err)
@@ -301,6 +317,14 @@ func (c *Client) doWithOrigin(method, path string, body any, out any, origin str
 		// Name the call: "response body is too large" alone leaves the operator
 		// guessing which of the sweep's many requests hit it.
 		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+
+	// A 5xx can follow a committed write, including a misleading success body.
+	if resp.StatusCode >= 500 {
+		return &HTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Message: "gateway server failure"}
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		uncertain = false
 	}
 
 	// The rate limiter answers with a bare status and an empty body, so it must
@@ -316,33 +340,35 @@ func (c *Client) doWithOrigin(method, path string, body any, out any, origin str
 		// A non-JSON body is a proxy or an HTML error page, not the gateway's
 		// own envelope. Name the status; do not paste the page into a message
 		// the operator will read in a toast.
-		return fmt.Errorf("%s %s: 网关返回了非 JSON 响应（HTTP %d，%d 字节）", method, path, resp.StatusCode, len(raw))
+		return &HTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Message: fmt.Sprintf("网关返回了非 JSON 响应（%d 字节）", len(raw))}
 	}
-	if !env.Success {
-		// A machine-readable code makes the failure diagnosable, and two of them
-		// are states the caller can act on rather than just report.
+	if env.Success != nil && !*env.Success {
+		uncertain = false
 		switch env.Code {
 		case "AUTH_SESSION_LIMIT":
 			return &SessionLimitError{Method: method, Path: path}
 		case "AUTH_SESSION_ISSUANCE_LIMIT":
-			// Too many logins in the issuance window; waiting is the fix, and
-			// the window is what the caller needs to know.
 			return &RateLimitError{Method: method, Path: path}
 		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Code: env.Code, Message: env.Message}
+	}
+	if env.Success == nil {
+		return fmt.Errorf("%s %s: missing required success", method, path)
+	}
+	if !*env.Success {
+		uncertain = false
 		msg := env.Message
-		if env.Code != "" {
-			if msg != "" {
-				msg = env.Code + ": " + msg
-			} else {
-				msg = env.Code
-			}
-		}
 		if msg == "" {
 			msg = strings.TrimSpace(string(raw))
 		}
-		return fmt.Errorf("%s %s: %s (HTTP %d)", method, path, msg, resp.StatusCode)
+		return &HTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Code: env.Code, Message: msg}
 	}
-	if out != nil && len(env.Data) > 0 {
+	if out != nil {
+		if len(env.Data) == 0 || string(env.Data) == "null" {
+			return fmt.Errorf("%s %s: missing required data", method, path)
+		}
 		if err := json.Unmarshal(env.Data, out); err != nil {
 			return fmt.Errorf("%s %s: decode data: %w", method, path, err)
 		}
@@ -504,10 +530,6 @@ func (c *Client) loginWithRetry(username, password string) error {
 // server's maximum, so a realistic result set is covered in one round trip.
 const searchPageSize = 100
 
-// maxSearchPages bounds the scan so a pathological result set cannot make the
-// client loop forever.
-const maxSearchPages = 20
-
 // FindUserByEmail returns the account whose email equals addr, ignoring case.
 // It returns (nil, nil) when nothing matches and ErrAmbiguousEmail when more
 // than one does.
@@ -522,30 +544,14 @@ func (c *Client) FindUserByEmail(addr string) (*User, error) {
 		return nil, nil
 	}
 
+	users, err := c.readUsers("/api/user/search?keyword=" + queryEscape(addr) + "&")
+	if err != nil {
+		return nil, err
+	}
 	var matches []User
-	for page := 1; page <= maxSearchPages; page++ {
-		var resp struct {
-			Items []User `json:"items"`
-			Total int    `json:"total"`
-		}
-		path := fmt.Sprintf("/api/user/search?keyword=%s&p=%d&page_size=%d",
-			queryEscape(addr), page, searchPageSize)
-		if err := c.do(http.MethodGet, path, nil, &resp); err != nil {
-			return nil, err
-		}
-		for _, u := range resp.Items {
-			if strings.ToLower(strings.TrimSpace(u.Email)) == want {
-				matches = append(matches, u)
-			}
-		}
-
-		// Stop once the pages are exhausted. A short page also means the end,
-		// which covers servers that ignore page_size.
-		if len(resp.Items) == 0 || len(resp.Items) < searchPageSize {
-			break
-		}
-		if resp.Total > 0 && page*searchPageSize >= resp.Total {
-			break
+	for _, u := range users {
+		if strings.ToLower(strings.TrimSpace(u.Email)) == want {
+			matches = append(matches, u)
 		}
 	}
 
@@ -567,28 +573,7 @@ func (c *Client) FindUserByEmail(addr string) (*User, error) {
 // treat the result as complete - a partial read must never be cached as if it
 // were the full roster (see store.ReplaceNewAPIUsers).
 func (c *Client) ListUsers() ([]User, error) {
-	var out []User
-	for page := 1; page <= maxSearchPages; page++ {
-		var resp struct {
-			Items []User `json:"items"`
-			Total int    `json:"total"`
-		}
-		path := fmt.Sprintf("/api/user/?p=%d&page_size=%d", page, searchPageSize)
-		if err := c.do(http.MethodGet, path, nil, &resp); err != nil {
-			return nil, err
-		}
-		out = append(out, resp.Items...)
-
-		// Stop once the pages are exhausted. A short page also means the end,
-		// which covers servers that ignore page_size.
-		if len(resp.Items) == 0 || len(resp.Items) < searchPageSize {
-			break
-		}
-		if resp.Total > 0 && page*searchPageSize >= resp.Total {
-			break
-		}
-	}
-	return out, nil
+	return c.readUsers("/api/user/?")
 }
 
 // SetGroup moves an account into group. new-api's PUT /api/user/ takes the full
@@ -609,6 +594,9 @@ func (c *Client) SetGroup(u *User, group string) error {
 // AddQuota grants quota to an account. new-api records the change itself, so
 // this service keeps no ledger of its own.
 func (c *Client) AddQuota(userID, value int) error {
+	if userID <= 0 {
+		return errors.New("user id must be positive")
+	}
 	if value <= 0 {
 		return fmt.Errorf("quota value must be positive, got %d", value)
 	}
@@ -622,9 +610,15 @@ func (c *Client) AddQuota(userID, value int) error {
 
 // GetUser loads one account by id.
 func (c *Client) GetUser(id int) (*User, error) {
+	if id <= 0 {
+		return nil, errors.New("user id must be positive")
+	}
 	var u User
 	if err := c.do(http.MethodGet, fmt.Sprintf("/api/user/%d", id), nil, &u); err != nil {
 		return nil, err
+	}
+	if u.ID <= 0 || u.ID != id {
+		return nil, errors.New("gateway returned a mismatched user id")
 	}
 	return &u, nil
 }

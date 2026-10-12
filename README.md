@@ -21,14 +21,14 @@ new-api 账号，按规则把账号从源分组提升到目标分组，并发放
 | 手动换绑 | 面板里从**任一侧**发起：选 QQ 或选账号，两侧都是下拉选择；**解绑前弹确认框**（写明 QQ、账号与「无法撤销」） |
 | 分组转换 | 规则驱动：触发方式用**复选框**选择（绑定成功时 / 按巡检周期，可同时勾选）+ 源分组 + 目标分组 + 可选条件；**删除规则前弹确认框** |
 | 签到记录 | 两条来源写同一行：打卡榜轮询（带排名）与群消息（指令或任意消息，可配）；按 `(qq, 日期)` 幂等，多轮结果是**并集**；**未绑定成员不记签到**（奖励发不出去），绑定后下一轮补记 |
-| 签到奖励 | 每天每人一次，额度（单位 new-api 的 **quota**）在 `[下限, 上限]` 内随机；先落库再发放，失败释放重试 |
+| 签到奖励 | 每天每人一次，额度（单位 new-api 的 **quota**）在 `[下限, 上限]` 内随机；首次抽取即持久化；明确拒绝可按原额度重试，结果不明保留领取占位待核对 |
 | 用户目录 | 以 **QQ 与 new-api 账号双键**取并集，回答「谁没进群」；显示今日签到的来源 |
 | 连接测试 | 逐通道探测（new-api 登录 / NapCat WebUI / OneBot HTTP / 事件 WS），失败时指明是哪一段 |
 | NapCat 自动配置 | 只填 WebUI 地址即可自动开启 OneBot 适配器并回填连接信息（热改，无需重启） |
 
 **每一类自动化都有独立开关**（绑定指令 / 进群绑定 / 绑定巡检 / 消息签到 / 打卡榜巡检 /
-群成员巡检），关掉的功能不会产生任何请求。绑定与签到的三条自动路径都只处理**未绑定**的
-成员，打开任一开关都不会覆盖手动换绑的结果。
+群成员巡检），关掉的自动路径不会产生请求。**三条自动绑定路径**（指令、进群、巡检）只处理
+**未绑定**成员，不覆盖手动换绑；管理员可手动换绑。**签到路径相反，要求成员已经绑定**。
 
 界面为简体中文。
 
@@ -73,13 +73,50 @@ docker compose up -d --build
 
 打开 `http://<主机>:4096/`，登录后在「连接配置」里填写 new-api 与 NapCat。
 
-数据（SQLite 库 + `config.yaml`）存在命名卷 `qqbot-data` 里，容器重建不丢：
+数据（SQLite 库 + `config.yaml`）存在 Compose 逻辑卷 `qqbot-data` 里，容器重建不丢。
+**实际卷名通常为 `<项目名>_qqbot-data`，不是裸 `qqbot-data`**；不要为了套用备份命令给卷
+新增固定 `name:` 或更改项目名，那会挂到另一只空卷，看起来像生产数据消失。
+
+以下在 Bash 中从部署目录执行，需要 Python 3。`dc` 必须与部署时使用相同的 `-p`、`-f`、
+`--env-file` 参数（包括 override 文件）；没用过这些选项就保持示例。先从有效配置解析实际卷名，
+并确认卷已存在，避免备份命令悄悄创建空卷。备份和恢复都通过 **qqbot 服务自身的挂载**访问数据。
 
 ```bash
-# 备份
-docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar czf /b/qqbot-data.tgz -C /d .
-# 恢复
-docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar xzf /b/qqbot-data.tgz -C /d
+set -euo pipefail
+dc() { docker compose "$@"; }  # 如部署用了 -p mybot，在这里也加上
+volume=$(dc config --format json | python3 -c 'import json,sys; c=json.load(sys.stdin); mounts=[v for v in c["services"]["qqbot"]["volumes"] if v["target"]=="/app/data"]; assert len(mounts)==1 and mounts[0]["type"]=="volume", "unexpected data mount"; print(c["volumes"][mounts[0]["source"]]["name"])')
+docker volume inspect "$volume" >/dev/null
+printf '数据卷：%s\n' "$volume"
+# 核对与现有部署一致后继续；确认没有其他容器或进程写入该卷。
+
+# 离线备份：先停服务，SQLite 主文件、WAL/SHM 与配置一起归档。
+umask 077
+dc stop qqbot
+dc run --rm --no-deps -T --user 0 --entrypoint tar qqbot \
+  czf - -C /app/data . > qqbot-data.tgz.part
+tar tzf qqbot-data.tgz.part >/dev/null
+mv qqbot-data.tgz.part qqbot-data.tgz
+dc start qqbot
+```
+
+这是**离线一致性备份**，不可在服务仍写入时直接 tar SQLite 文件。失败时保持服务停止、排查后再启动；
+不要使用 `docker compose down -v`。备份含密码、会话与指纹密钥，需限制权限并加密异地保存；
+部署用的 `.env` 不在卷内，要另行安全备份。已有同名归档会被覆盖，请先移走旧备份。
+
+恢复会**清空实际卷中的现有文件**。先用上面步骤把现状另存为独立的回滚备份，再在同一 Bash 会话
+中执行下面的恢复；若新开终端，先重新执行 `set`、`dc`、`volume` 与检查步骤。归档必须来自可信来源。
+
+```bash
+# qqbot-data.tgz 是要恢复的归档，不是刚做的回滚备份。
+tar tzf qqbot-data.tgz >/dev/null
+docker volume inspect "$volume" >/dev/null
+dc stop qqbot  # 恢复前必须停止，且没有其它写入者
+# 清掉旧 WAL/SHM 等残留，避免把两个数据库快照混在一起；tar 保留归档中的属主。
+dc run --rm --no-deps -T --user 0 --entrypoint sh qqbot -ec \
+  'find /app/data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; tar xzf - -C /app/data' \
+  < qqbot-data.tgz
+dc start qqbot
+# 登录面板，核对群、绑定与签到数据；不要仅凭 HTTP 健康就认定恢复成功。
 ```
 
 > 卷里还有 **new-api 的登录会话与设备指纹密钥**，所以**保留这个卷**（含重建容器、升级镜像）
@@ -94,18 +131,18 @@ docker run --rm -v qqbot-data:/d -v "$PWD":/b alpine tar xzf /b/qqbot-data.tgz -
 
 ### 方式二：直接运行二进制
 
-需要 Go 1.27+；面板是预构建的前端产物，改前端才需要 Node。
+需要 **Go 1.27.2 或更新的受支持安全版本**（标准库安全修复）及 Node.js 22 / npm。
+全新克隆不带 `web/dist`，要使用面板必须先安装并构建前端；Docker 构建会自动完成这一步。
 
 ```bash
+(cd web && npm ci && npm run build)
 go build -o qqbot ./cmd/qqbot
 ./qqbot -addr :4096 -data data -web web/dist
 ```
 
-前端（仅在改动 `web/` 后需要）：
-
-```bash
-cd web && npm install && npm run build
-```
+之后修改前端也需重跑上述前端构建。若只用 API，可以不装 Node、不构建前端；
+缺少 `web/dist` 时服务显示说明页，而不是完整面板。已有二进制也必须用安全版本 Go 重新构建，
+只升级宿主机 Go 不会修复旧二进制内的标准库。
 
 ---
 
@@ -135,7 +172,7 @@ QQBOT_PORT=4096
 | new-api URL / 账号 / 密码 | 需要一个**管理员**账号（能改用户分组与额度） |
 | NapCat WebUI 地址 / Token | 面板地址，如 `http://127.0.0.1:6099`；填好后可点「自动配置」 |
 | OneBot HTTP URL / Token | 巡检调用动作走这里，自动配置会填好 |
-| 事件 WebSocket URL / Token | 接收进群与绑定指令；留空也能工作，只是反应慢 |
+| 事件 WebSocket URL / Token | 接收进群、绑定指令与消息签到；留空不影响成员/打卡榜巡检，但指令与消息签到不可用 |
 
 配置同时写入 `data/config.yaml` 与数据库，两种改法都有效且不会互相覆盖：
 
@@ -200,9 +237,10 @@ OneBot 适配器可以在「连接配置 → NapCat → 自动配置 → 高级�
 | 群成员巡检 | 开，120 分钟 | 兜底；新成员进群与绑定成功会立即记录；间隔最小 1 |
 | 时区 | `Asia/Shanghai` | 决定「今天」的边界 |
 
-指令的匹配规则：**整条消息**与某一行完全一致才生效，前后空格忽略；`/表达式/` 与
-`/表达式/i`（忽略大小写）为正则。写错的正则在保存时就会被拒绝（400），不会变成一条永远
-不生效的指令。签到指令列表**留空**表示任意消息都算签到。
+指令先忽略消息前后空格。**字面量**必须与整条消息完全一致，例如 `/签到`。
+`/表达式/` 与 `/表达式/i`（忽略大小写）是正则，使用**搜索匹配**，默认不要求整条消息匹配：
+`/签到/` 也会匹配「今天签到成功」。需要整匹配时显式加 `^`、`$`，例如 `/^签到$/`
+或 `/^checkin$/i`。非法正则在保存时返回 400。签到指令列表**留空**表示任意消息都算签到。
 
 ### 手动触发
 
@@ -230,7 +268,7 @@ go build ./...                  # 编译
 go test ./internal/...          # 全部测试（离线，两个外部系统都用假实现）
 go vet ./... && gofmt -l internal/ cmd/
 
-cd web && npm install && npm run build   # 前端：先 tsc 类型检查再打包
+cd web && npm ci && npm run build   # 前端：先 tsc 类型检查再打包
 ```
 
 测试是纯 Go 且使用假实现，**不需要网络或真实服务**。任何要与真实网关或 NapCat 交互的验证
@@ -245,7 +283,7 @@ cd web && npm install && npm run build   # 前端：先 tsc 类型检查再打�
 更多设计背景见 `docs/`：
 
 - `docs/design-notes.md` — 已实测确认的事实
-- `docs/adr/` — 决策记录（为什么绑定存本地、为什么轮询是唯一真相来源等）
+- `docs/adr/` — 决策记录（为什么绑定存本地、为什么成员名册与打卡榜以轮询为准等）
 - `docs/implementation.md` — 已实现的形态与验证方式
 - `AGENTS.md` — 给自动化协作者的约定与陷阱清单
 

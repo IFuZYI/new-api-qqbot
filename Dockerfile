@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ---------- stage 1: build the WebUI ----------
 # Kept separate so the Node toolchain never reaches the runtime image.
 FROM node:22-alpine AS web
@@ -17,7 +15,7 @@ RUN npm run build
 
 
 # ---------- stage 2: build the server ----------
-FROM golang:1.27-alpine AS server
+FROM golang:1.27.2-alpine AS server
 
 WORKDIR /src
 

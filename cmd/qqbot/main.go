@@ -45,7 +45,7 @@ func main() {
 	// briefly open to whoever reaches it first.
 	env, err := config.LoadEnv(*dataDir)
 	if err != nil {
-		log.Printf("warning: could not read the env file: %v", err)
+		log.Fatalf("read env file (refusing to start): %v", err)
 	}
 
 	// Precedence for the listen address: an explicit -addr flag wins, then
@@ -90,15 +90,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go sched.Run(ctx)
+	var workers sync.WaitGroup
+	workers.Go(func() { sched.Run(ctx) })
 
 	// The event listener only shortens reaction time (binding commands); the
 	// sweeps above remain the source of truth, so a missing event stream is
 	// harmless. It blocks until shutdown, so it must run in its own goroutine.
-	go events.New(func() (string, string) {
+	listener := events.New(func() (string, string) {
 		c := cfgMgr.MustLoad()
 		return c.NapCat.EventWSURL, c.NapCat.EventWSToken
-	}, bindAdapter{svc}).Run(ctx)
+	}, bindAdapter{svc})
+	workers.Go(func() { listener.Run(ctx) })
 
 	router := api.NewRouter(st, svc, cfgMgr, *webDist)
 	router.SetNapCatAdmin(napcatAdmin{})
@@ -136,9 +138,16 @@ func main() {
 
 	<-ctx.Done()
 	log.Print("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownRuntime(srv, &workers, 10*time.Second)
+}
+
+func shutdownRuntime(srv *http.Server, workers *sync.WaitGroup, timeout time.Duration) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+	// A sweep that is already in flight still holds the database: Close runs
+	// after main returns, so the join has to happen here, not via defer.
+	workers.Wait()
 }
 
 // lazyGateway builds a new-api client from stored configuration and reuses it
@@ -378,8 +387,8 @@ func (l *lazyQQ) onebot() (*napcat.Client, error) {
 	return napcat.New(cfg.NapCat.OneBotURL, cfg.NapCat.OneBotToken), nil
 }
 
-// webuiClient returns a logged-in bridge, re-authenticating only when the
-// stored address or token changes.
+// webuiClient returns a logged-in bridge, re-authenticating when the stored
+// address or token changes, or when the cached credential is refused.
 func (l *lazyQQ) webuiClient() (*napcat.WebUI, error) {
 	cfg := l.cfg.MustLoad()
 	if cfg.NapCat.WebUIURL == "" {
@@ -401,6 +410,25 @@ func (l *lazyQQ) webuiClient() (*napcat.WebUI, error) {
 	return w, nil
 }
 
+// invalidateWebUI drops the cached bridge when a call proves its credential was
+// refused.
+//
+// The credential is signed with NapCat's per-process secret unless
+// NAPCAT_WEBUI_JWT_SECRET_KEY is set, so it dies with a NapCat restart — a
+// routine event. Without this, the cached bridge kept replaying a dead
+// credential and the fallback path stayed broken until the operator changed
+// the configuration or restarted this service. The invalidation is narrow (see
+// napcat.IsAuthFailure): a transport error or a business failure must not spend
+// NapCat's login rate limit on a re-login.
+func (l *lazyQQ) invalidateWebUI(err error) {
+	if !napcat.IsAuthFailure(err) {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.webui, l.webuiK = nil, ""
+}
+
 func (l *lazyQQ) GetGroupList() ([]napcat.Group, error) {
 	return napcat.Failover(
 		func() ([]napcat.Group, error) {
@@ -415,7 +443,9 @@ func (l *lazyQQ) GetGroupList() ([]napcat.Group, error) {
 			if err != nil {
 				return nil, err
 			}
-			return w.GetGroupList()
+			gs, err := w.GetGroupList()
+			l.invalidateWebUI(err)
+			return gs, err
 		},
 	)
 }
@@ -434,7 +464,9 @@ func (l *lazyQQ) GetGroupMemberList(groupID int64) ([]napcat.GroupMember, error)
 			if err != nil {
 				return nil, err
 			}
-			return w.GetGroupMemberList(groupID)
+			ms, err := w.GetGroupMemberList(groupID)
+			l.invalidateWebUI(err)
+			return ms, err
 		},
 	)
 }
@@ -453,7 +485,9 @@ func (l *lazyQQ) GetGroupSignedList(groupID int64) ([]napcat.SignedMember, error
 			if err != nil {
 				return nil, err
 			}
-			return w.GetGroupSignedList(groupID)
+			ss, err := w.GetGroupSignedList(groupID)
+			l.invalidateWebUI(err)
+			return ss, err
 		},
 	)
 }
@@ -489,13 +523,31 @@ type prober struct {
 }
 
 // ProbeGateway reports the account behind the credentials.
+//
+// While the live gateway is in a login cooldown the probe refuses instead of
+// spending another attempt: the cooldown exists because the gateway answered a
+// rate limit, and a connection test is exactly the kind of repeated click that
+// keeps the window from closing. The operator gets the remaining wait.
 func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool, error) {
+	if p.gw != nil && p.gw.lockout != nil {
+		if err := p.gw.lockout.Blocked(); err != nil {
+			return nil, false, err
+		}
+	}
 	if p.gw != nil && p.gw.matches(url, username, password) {
 		c, err := p.gw.client()
 		if err == nil {
 			u, err := c.Self()
 			if err == nil {
 				return u, true, nil
+			}
+		}
+		// The live attempt may have just been rate-limited, which arms the
+		// cooldown. Retrying raw would spend the attempt the cooldown exists to
+		// save, so report the wait instead.
+		if p.gw.lockout != nil {
+			if blocked := p.gw.lockout.Blocked(); blocked != nil {
+				return nil, false, blocked
 			}
 		}
 		// Fall through to a real login: the live session could not answer, and
@@ -511,6 +563,11 @@ func (p prober) ProbeGateway(url, username, password string) (*newapi.User, bool
 		}
 	}
 	if err := c.Login(username, password); err != nil {
+		// A rejected test arms the same cooldown a sweep would: without it the
+		// next click tries again immediately and the window never closes.
+		if p.gw != nil && p.gw.lockout != nil {
+			p.gw.lockout.Fail(err)
+		}
 		// Known limit: if the gateway minted a session but the response did not
 		// arrive intact (a transport drop, an unreadable body), that session is
 		// not revoked — we hold no usable cookie to revoke it with. It ages out
@@ -565,6 +622,19 @@ func (prober) ProbeEventWS(wsURL, token string) error {
 // event rather than cached here, so an operator's change in the WebUI takes
 // effect on the next message with no restart.
 type bindAdapter struct{ svc *service.Service }
+
+// MessageIsToday prevents delayed/replayed events from earning today's reward.
+func (b bindAdapter) MessageIsToday(timestamp int64) bool {
+	cfg, err := b.svc.Settings()
+	if err != nil || timestamp <= 0 {
+		return false
+	}
+	loc, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return false
+	}
+	return time.Unix(timestamp, 0).In(loc).Format("2006-01-02") == time.Now().In(loc).Format("2006-01-02")
+}
 
 func (b bindAdapter) IsMonitoredGroup(groupID int64) (bool, error) {
 	return b.svc.IsMonitoredGroup(groupID)

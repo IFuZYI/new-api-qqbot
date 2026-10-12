@@ -24,8 +24,15 @@ import (
 //     points at the previous bundle — the operator sees the old UI after an
 //     upgrade and only a manual hard-refresh fixes it.
 func staticHandler(dir string) http.Handler {
-	index := filepath.Join(dir, "index.html")
-	if _, err := os.Stat(index); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err == nil {
+		_, err = root.Stat("index.html")
+		_ = root.Close()
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return http.NotFoundHandler()
+	}
+	if err != nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				http.NotFound(w, r)
@@ -40,23 +47,42 @@ func staticHandler(dir string) http.Handler {
 		})
 	}
 
-	fileServer := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
 		}
+		// Keep every lookup and open beneath the same root, including when a
+		// symlink changes between the metadata check and the file server's open.
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer root.Close()
 		clean := filepath.Clean("/" + r.URL.Path)
-		full := filepath.Join(dir, filepath.FromSlash(clean))
-		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+		name := strings.TrimPrefix(filepath.ToSlash(clean), "/")
+		if name == "" {
+			name = "."
+		}
+		info, err := root.Stat(name)
+		if err != nil && !os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		if err == nil && !info.IsDir() {
 			w.Header().Set("Cache-Control", assetCacheControl(clean))
-			fileServer.ServeHTTP(w, r)
+			http.FileServerFS(root.FS()).ServeHTTP(w, r)
 			return
 		}
 		// The SPA fallback always serves index.html, so it takes index.html's
 		// caching rule whatever the requested path looked like.
+		if _, err := root.Stat("index.html"); err != nil {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Cache-Control", indexCacheControl)
-		http.ServeFile(w, r, index)
+		http.ServeFileFS(w, r, root.FS(), "index.html")
 	})
 }
 

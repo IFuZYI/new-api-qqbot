@@ -12,8 +12,13 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"time"
+
 	"errors"
 	"fmt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -97,6 +102,13 @@ func (m *Manager) Path() string { return m.path }
 // file is not an error. A malformed one is reported and the database copy is
 // returned unchanged, so a typo cannot wipe a working configuration.
 func (m *Manager) Load() (Config, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.loadLocked()
+}
+
+// Locked helpers never acquire mu again. All read/merge/write sequences use it.
+func (m *Manager) loadLocked() (Config, error) {
 	if err := m.syncFromFile(); err != nil {
 		return m.fromStore(), err
 	}
@@ -121,9 +133,7 @@ func (m *Manager) syncFromFile() error {
 	}
 
 	sum := hashBytes(raw)
-	m.mu.Lock()
 	unchanged := sum == m.lastHash
-	m.mu.Unlock()
 	if unchanged {
 		return nil
 	}
@@ -139,17 +149,8 @@ func (m *Manager) syncFromFile() error {
 	// before writing is enough to trigger it), so a file that carries no values
 	// at all is ignored. Clearing the configuration is done from the WebUI.
 	if c.isZero() {
-		m.mu.Lock()
-		m.lastHash = sum
-		m.mu.Unlock()
 		return nil
 	}
-
-	// Record the hash before writing, so Save's own file write is not later
-	// mistaken for an external edit.
-	m.mu.Lock()
-	m.lastHash = sum
-	m.mu.Unlock()
 
 	// Merge over the stored copy rather than adopting the file wholesale: an
 	// operator who adds or fixes a single line must not silently lose the
@@ -157,7 +158,11 @@ func (m *Manager) syncFromFile() error {
 	// carries a non-empty value for is adopted, so a hand edit can add or
 	// correct a value but cannot blank a stored one.
 	merged := c.MergeFields(m.fromStore())
-	return m.saveToStore(merged)
+	if err := m.saveToStore(merged); err != nil {
+		return err
+	}
+	m.lastHash = sum
+	return nil
 }
 
 // MergeFields overlays c onto base, but only with the non-empty fields c
@@ -205,14 +210,22 @@ func (c Config) isZero() bool {
 		c.NapCat.EventWSURL == "" && c.NapCat.EventWSToken == ""
 }
 
-// Revision identifies the current configuration so a writer can detect that it
-// changed underneath them. It is a hash of the file's content when the file is
-// present, and of the stored copy otherwise.
+// Revision identifies the effective configuration, not its YAML formatting.
+// Hashing the same snapshot returned to a reader keeps stale content from being
+// paired with a newer writer's revision.
 func (m *Manager) Revision() string {
-	if raw, err := os.ReadFile(m.path); err == nil {
-		return hashBytes(raw)
-	}
-	c := m.fromStore()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.revisionLocked()
+}
+
+func (m *Manager) revisionLocked() string {
+	c, _ := m.loadLocked()
+	return c.Revision()
+}
+
+// Revision is computed before redaction, so secret changes also invalidate forms.
+func (c Config) Revision() string {
 	raw, err := yaml.Marshal(c)
 	if err != nil {
 		return ""
@@ -228,12 +241,63 @@ func (m *Manager) fromStore() Config {
 	return c
 }
 
-// Save stores the configuration in both the database and the file.
+// Save serializes a full replacement. File errors roll back the SQLite write;
+// a commit error attempts to restore the previous file. This is NOT a crash-
+// atomic transaction across SQLite and the filesystem.
 func (m *Manager) Save(c Config) error {
-	if err := m.saveToStore(c); err != nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.saveLocked(c)
+}
+
+func (m *Manager) saveLocked(c Config) error {
+	before, err := os.ReadFile(m.path)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
 		return err
 	}
-	return m.writeFile(c)
+	body, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	content := append([]byte(fileHeader), body...)
+	err = m.st.DB().Connection(func(conn *gorm.DB) error {
+		renamed := false
+		err := conn.Transaction(func(tx *gorm.DB) error {
+			if err := saveSettings(tx, c); err != nil {
+				return err
+			}
+			if err := m.writeBytes(content); err != nil {
+				return err
+			}
+			renamed = true
+			return nil
+		})
+		if err == nil || !renamed {
+			return err
+		}
+		// database/sql marks a failed Commit done, but SQLite can still have
+		// an open transaction (deferred FK failure). Roll back on the SAME
+		// pinned connection before returning it to the pool.
+		rollbackErr := conn.Exec("ROLLBACK").Error
+		var restoreErr error
+		if missing {
+			restoreErr = os.Remove(m.path)
+		} else {
+			restoreErr = m.writeBytes(before)
+		}
+		if restoreErr != nil {
+			// Never cache the rejected file; Load must retry/reconcile it.
+			m.lastHash = ""
+			return fmt.Errorf("config commit failed: %w; file restoration failed: %v; rollback: %v", err, restoreErr, rollbackErr)
+		}
+		return fmt.Errorf("config commit failed (previous file restored): %w; rollback: %v", err, rollbackErr)
+	})
+	if err != nil {
+		return err
+	}
+	m.lastHash = hashBytes(content)
+	return nil
 }
 
 // SectionNewAPI and SectionNapCat identify the two independently-editable
@@ -253,7 +317,18 @@ const (
 // spurious conflicts. Hashing just the section means each form is only told
 // "no" when its own half actually moved.
 func (m *Manager) SectionRevision(section string) string {
-	c := m.MustLoad()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, _ := m.loadLocked()
+	return sectionRevision(c, section)
+}
+
+// SectionRevision identifies one section of this exact snapshot.
+func (c Config) SectionRevision(section string) string {
+	return sectionRevision(c, section)
+}
+
+func sectionRevision(c Config, section string) string {
 	var raw []byte
 	var err error
 	switch section {
@@ -277,48 +352,124 @@ func (m *Manager) SectionRevision(section string) string {
 // rather than overwritten with the form's stale copy. The redaction placeholder
 // keeps the stored secret when the operator did not retype it.
 func (m *Manager) SaveSection(section string, in Config) error {
-	cur := m.MustLoad()
+	_, err := m.SaveSectionCAS(section, in, "")
+	return err
+}
+
+// ErrConflict means the caller must reload before attempting another write.
+var ErrConflict = errors.New("配置已被修改，请重新载入后再保存。")
+
+// ValidationError distinguishes bad form input from persistence failures.
+type ValidationError struct{ Err error }
+
+func (e *ValidationError) Error() string { return e.Err.Error() }
+func (e *ValidationError) Unwrap() error { return e.Err }
+
+// SaveCAS checks the whole revision and merges redacted secrets under one lock.
+// An empty revision retains compatibility with unconditional saves.
+func (m *Manager) SaveCAS(in Config, revision string) (Config, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, err := m.loadLocked()
+	if err != nil {
+		return Config{}, err
+	}
+	if revision != "" && revision != cur.Revision() {
+		return Config{}, ErrConflict
+	}
+	in = in.Merge(cur)
+	if err := in.NewAPI.Validate(); err != nil {
+		return Config{}, &ValidationError{err}
+	}
+	if err := in.NapCat.Validate(); err != nil {
+		return Config{}, &ValidationError{err}
+	}
+	return in, m.saveLocked(in)
+}
+
+// SaveSectionCAS compares, merges, validates and saves without an unlocked gap.
+func (m *Manager) SaveSectionCAS(section string, in Config, revision string) (Config, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, err := m.loadLocked()
+	if err != nil {
+		return Config{}, err
+	}
+	if revision != "" && revision != sectionRevision(cur, section) {
+		return Config{}, ErrConflict
+	}
+	return m.saveSectionLocked(section, in, cur)
+}
+
+// UpdateSectionCAS holds the Manager lock through a revision-guarded external
+// operation and persistence. The callback receives current secrets and MUST NOT
+// call Manager methods. A stale waiter never enters the callback. External side
+// effects cannot be rolled back if local persistence subsequently fails.
+func (m *Manager) UpdateSectionCAS(section, revision string, update func(Config) (Config, error)) (Config, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, err := m.loadLocked()
+	if err != nil {
+		return Config{}, err
+	}
+	if section != SectionNewAPI && section != SectionNapCat {
+		return Config{}, &ValidationError{fmt.Errorf("unknown config section %q", section)}
+	}
+	if revision != "" && revision != sectionRevision(cur, section) {
+		return Config{}, ErrConflict
+	}
+	in, err := update(cur)
+	if err != nil {
+		return Config{}, err
+	}
+	return m.saveSectionLocked(section, in, cur)
+}
+
+func (m *Manager) saveSectionLocked(section string, in, cur Config) (Config, error) {
+	in = in.Merge(cur)
 	switch section {
 	case SectionNewAPI:
-		n := in.NewAPI
-		if n.Password == RedactedPassword || n.Password == "" {
-			n.Password = cur.NewAPI.Password
+		if err := in.NewAPI.Validate(); err != nil {
+			return Config{}, &ValidationError{err}
 		}
-		if err := n.Validate(); err != nil {
-			return err
-		}
-		cur.NewAPI = n
+		cur.NewAPI = in.NewAPI
 	case SectionNapCat:
-		n := in.NapCat
-		if n.WebUIToken == RedactedPassword || n.WebUIToken == "" {
-			n.WebUIToken = cur.NapCat.WebUIToken
+		if err := in.NapCat.Validate(); err != nil {
+			return Config{}, &ValidationError{err}
 		}
-		if n.OneBotToken == RedactedPassword || n.OneBotToken == "" {
-			n.OneBotToken = cur.NapCat.OneBotToken
-		}
-		if n.EventWSToken == RedactedPassword || n.EventWSToken == "" {
-			n.EventWSToken = cur.NapCat.EventWSToken
-		}
-		if err := n.Validate(); err != nil {
-			return err
-		}
-		cur.NapCat = n
+		cur.NapCat = in.NapCat
 	default:
-		return fmt.Errorf("unknown config section %q", section)
+		return Config{}, &ValidationError{fmt.Errorf("unknown config section %q", section)}
 	}
-	return m.Save(cur)
+	return cur, m.saveLocked(cur)
 }
 
 func (m *Manager) saveToStore(c Config) error {
-	if err := m.st.PutSetting(newAPIKey, c.NewAPI); err != nil {
-		return err
+	return m.st.DB().Transaction(func(tx *gorm.DB) error { return saveSettings(tx, c) })
+}
+
+func saveSettings(tx *gorm.DB, c Config) error {
+	for _, entry := range []struct {
+		key   string
+		value any
+	}{{newAPIKey, c.NewAPI}, {napCatKey, c.NapCat}} {
+		raw, err := json.Marshal(entry.value)
+		if err != nil {
+			return err
+		}
+		row := store.Setting{Key: entry.key, Value: string(raw), UpdatedAt: time.Now().Unix()}
+		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"})}).Create(&row).Error; err != nil {
+			return err
+		}
 	}
-	return m.st.PutSetting(napCatKey, c.NapCat)
+	return nil
 }
 
 // EnsureFile creates the config file when it is missing, so an operator has
 // something to edit. Existing content is never touched.
 func (m *Manager) EnsureFile() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, err := os.Stat(m.path); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -332,20 +483,23 @@ func (m *Manager) EnsureFile() error {
 // writeFile writes the config atomically: a crash mid-write cannot leave a
 // truncated file that would then fail to parse.
 func (m *Manager) writeFile(c Config) error {
-	dir := filepath.Dir(m.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	body, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
 	content := append([]byte(fileHeader), body...)
-
-	m.mu.Lock()
+	if err := m.writeBytes(content); err != nil {
+		return err
+	}
 	m.lastHash = hashBytes(content)
-	m.mu.Unlock()
+	return nil
+}
 
+func (m *Manager) writeBytes(content []byte) error {
+	dir := filepath.Dir(m.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".config-*.yaml")
 	if err != nil {
 		return err
@@ -369,7 +523,10 @@ func (m *Manager) writeFile(c Config) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, m.path)
+	if err := os.Rename(tmpName, m.path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func hashBytes(b []byte) string {

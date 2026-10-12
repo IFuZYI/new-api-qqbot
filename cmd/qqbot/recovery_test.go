@@ -82,11 +82,23 @@ func (g *deadSessionGateway) handler() http.Handler {
 			writeEnvelopeErr(w, "AUTH_SESSION_REVOKED")
 			return
 		}
-		writeEnvelope(w, map[string]any{"items": []any{}, "total": 0})
+		// The real PageInfo shape: the strict reader validates page metadata,
+		// and an absent page/page_size would read as a failed directory scan.
+		writeEnvelope(w, map[string]any{"items": []any{}, "total": 0, "page": 1, "page_size": 100})
 	}
 	mux.HandleFunc("/api/user/search", func(w http.ResponseWriter, r *http.Request) { serve(w) })
 	mux.HandleFunc("/api/user/", func(w http.ResponseWriter, r *http.Request) { serve(w) })
-	mux.HandleFunc("/api/user/1", func(w http.ResponseWriter, r *http.Request) { serve(w) })
+	// The single-account read returns the user object itself (the real shape);
+	// the strict client rejects an id-less envelope rather than binding to a
+	// phantom account.
+	mux.HandleFunc("/api/user/1", func(w http.ResponseWriter, r *http.Request) {
+		if g.isRevoked() {
+			w.WriteHeader(http.StatusUnauthorized)
+			writeEnvelopeErr(w, "AUTH_SESSION_REVOKED")
+			return
+		}
+		writeEnvelope(w, map[string]any{"id": 1, "username": "u", "email": "x@qq.com"})
+	})
 	mux.HandleFunc("/api/user/groups", func(w http.ResponseWriter, r *http.Request) {
 		if g.isRevoked() {
 			w.WriteHeader(http.StatusUnauthorized)

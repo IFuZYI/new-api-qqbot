@@ -40,6 +40,10 @@ type UserRow struct {
 	CheckinSource string `json:"checkin_source,omitempty"`
 	CheckinDays   int    `json:"checkin_days"`
 	RewardToday   int    `json:"reward_today"`
+	// RewardState mirrors the check-in's reward state so the directory can
+	// show an uncertain outcome instead of presenting it as paid.
+	RewardState string `json:"reward_state,omitempty"`
+	RewardError string `json:"reward_error,omitempty"`
 }
 
 // UserFilter narrows the directory. Every field is optional; the zero value
@@ -60,9 +64,9 @@ type UserFilter struct {
 
 // UserDirectory builds the operator-facing table for date.
 //
-// It is a union of three sources: every known member (with their binding and
-// check-in), and every cached new-api account that no member row already
-// accounts for. The account list is the cache refreshed by SyncNewAPIUsers;
+// It is a union of members, bindings (even without member rows), and cached
+// new-api accounts not represented by either. The account list is the cache
+// refreshed by SyncNewAPIUsers;
 // when it has never been synced the directory still works, it just cannot show
 // accounts nobody has joined with.
 func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, error) {
@@ -76,10 +80,8 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 		return nil, err
 	}
 	byQQ := make(map[int64]store.Binding, len(bindings))
-	qqByUserID := make(map[int]int64, len(bindings))
 	for _, b := range bindings {
 		byQQ[b.QQ] = b
-		qqByUserID[b.NewAPIUserID] = b.QQ
 	}
 	accounts, err := s.st.ListNewAPIUsers()
 	if err != nil {
@@ -110,7 +112,9 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 	// Accounts a member row already represents, so the account loop below does
 	// not emit a duplicate.
 	shown := make(map[int]bool, len(members))
+	shownQQ := make(map[int64]bool, len(members))
 	for _, m := range members {
+		shownQQ[m.QQ] = true
 		row := UserRow{
 			Kind:     "member",
 			QQ:       m.QQ,
@@ -129,6 +133,8 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 			row.BindSource = b.Source
 			shown[b.NewAPIUserID] = true
 			if a, ok := byID[b.NewAPIUserID]; ok {
+				row.NewAPIUser = a.Username
+				row.NewAPIEmail = a.Email
 				row.NewAPIGroup = a.Group
 				row.NewAPIStatus = a.Status
 			}
@@ -137,16 +143,39 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 			row.CheckedToday = true
 			row.CheckinSource = c.Source
 			row.RewardToday = c.RewardQuota
+			row.RewardState, row.RewardError = c.RewardState, c.RewardError
 		}
 		row.CheckinDays = totals[m.QQ]
 		rows = append(rows, row)
 	}
 
-	// Every remaining account. An account no member row accounts for is the
-	// whole point of keying on the new-api side as well - but it must be
-	// emitted whether or not it is bound: a binding to a QQ with no member row
-	// (an orphan, which the manual bind path can create) would otherwise make a
-	// real, bound account vanish from the table.
+	// Bindings are keyed by QQ, not account: several orphan QQs may point to
+	// one account, including an account already represented by a member row.
+	for _, b := range bindings {
+		if shownQQ[b.QQ] {
+			continue
+		}
+		row := UserRow{
+			Kind: "account", QQ: b.QQ, GroupIDs: []int64{}, Bound: true,
+			NewAPIUserID: b.NewAPIUserID, NewAPIUser: b.NewAPIUsername,
+			NewAPIEmail: b.NewAPIEmail, BindSource: b.Source,
+			CheckinDays: totals[b.QQ],
+		}
+		if a, ok := byID[b.NewAPIUserID]; ok {
+			row.NewAPIUser, row.NewAPIEmail = a.Username, a.Email
+			row.NewAPIGroup, row.NewAPIStatus = a.Group, a.Status
+			row.Nickname = a.DisplayName
+		}
+		if c, ok := checkinByQQ[b.QQ]; ok {
+			row.CheckedToday = true
+			row.CheckinSource, row.RewardToday = c.Source, c.RewardQuota
+			row.RewardState, row.RewardError = c.RewardState, c.RewardError
+		}
+		shown[b.NewAPIUserID] = true
+		rows = append(rows, row)
+	}
+
+	// Every remaining account has no represented binding.
 	for _, a := range accounts {
 		if shown[a.ID] {
 			continue
@@ -159,11 +188,6 @@ func (s *Service) UserDirectory(filter UserFilter, date string) ([]UserRow, erro
 			NewAPIGroup:  a.Group,
 			NewAPIStatus: a.Status,
 			Nickname:     a.DisplayName,
-		}
-		if qq, ok := qqByUserID[a.ID]; ok {
-			row.QQ = qq
-			row.Bound = true
-			row.BindSource = byQQ[qq].Source
 		}
 		rows = append(rows, row)
 	}
@@ -262,6 +286,17 @@ func (s *Service) SyncNewAPIUsers() (int, error) {
 // accepts, so sending a sparse object blanks display_name. It also keeps the
 // cached group honest, since the gateway is the source of truth.
 func (s *Service) SetUserGroup(userID int, group string) error {
+	// Serialise against the rule sweeps and the bulk path: the read, the
+	// decision and the write must not interleave with another writer for the
+	// same account, or the final group depends on completion order.
+	s.groupMu.Lock()
+	defer s.groupMu.Unlock()
+	return s.setUserGroupLocked(userID, group)
+}
+
+// setUserGroupLocked is the body of SetUserGroup for callers that already hold
+// groupMu (the bulk path holds it across the whole selection).
+func (s *Service) setUserGroupLocked(userID int, group string) error {
 	group = strings.TrimSpace(group)
 	if group == "" {
 		return errors.New("目标分组不能为空")
@@ -312,6 +347,8 @@ func (s *Service) SetUserGroups(userIDs []int, group string) ([]GroupChangeResul
 	if len(userIDs) == 0 {
 		return nil, errors.New("请先选择要调整的账号")
 	}
+	s.groupMu.Lock()
+	defer s.groupMu.Unlock()
 	bindings, err := s.st.BindingsByNewAPIUser()
 	if err != nil {
 		return nil, err
@@ -327,7 +364,7 @@ func (s *Service) SetUserGroups(userIDs []int, group string) ([]GroupChangeResul
 		if u, err := s.gw.GetUser(id); err == nil {
 			res.Username = u.Username
 		}
-		if err := s.SetUserGroup(id, group); err != nil {
+		if err := s.setUserGroupLocked(id, group); err != nil {
 			res.Error = err.Error()
 		} else {
 			res.OK = true
