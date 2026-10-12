@@ -750,6 +750,10 @@ func (r *Router) saveSettings(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) listCheckins(w http.ResponseWriter, req *http.Request) {
 	date := req.URL.Query().Get("date")
+	// An ABSENT date means today; a present-but-empty one does too, which is the
+	// same convention the panel uses (Logs.tsx sends '' for 今天). Both are
+	// deliberate: the alternative — refusing an empty value — would break that
+	// client. A non-empty value must still parse.
 	if date == "" {
 		d, err := r.svc.Today()
 		if err != nil {
