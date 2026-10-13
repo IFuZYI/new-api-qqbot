@@ -356,18 +356,45 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 	var firstErr error
 	for _, e := range entries {
 		day, ok := dayOf(e.Name())
-		if !ok || e.IsDir() || day >= cutoff {
+		// Anything this package did not write is left alone, directory or not.
+		if !ok || e.IsDir() {
 			continue
 		}
-		if err := m.removeExpired(filepath.Join(m.dir, e.Name())); err != nil {
-			if firstErr == nil {
-				firstErr = err
+		if day < cutoff {
+			if err := m.removeExpired(filepath.Join(m.dir, e.Name())); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
+			removed++
 			continue
 		}
-		removed++
+		// Inside the retention window: kept, but its MODE is still this
+		// service's responsibility. A past day's file is never written again, so
+		// the Chmod-on-open in dayFile.Write can never reach it — an operator
+		// upgrading from a version that wrote 0644 would keep that mode on every
+		// file older than today, which is exactly the data the hardening is for.
+		// The sweep runs at start-up and hourly, so this is where the window is
+		// brought in line. Found by running the real service: today's file was
+		// 0600 and yesterday's was still 0644.
+		if err := m.tightenFile(filepath.Join(m.dir, e.Name())); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return removed, firstErr
+}
+
+// tightenFile makes an existing day file owner-only.
+//
+// Create modes apply only to NEW files, so a file written by an older version
+// keeps 0644 until something rewrites it — and a past day's file is never
+// written again. Cleanup is the only code that visits every file in the window.
+func (m *Manager) tightenFile(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // removeExpired deletes one expired day file.
