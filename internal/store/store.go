@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,19 @@ func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir %s: %w", dir, err)
+		}
+		// MkdirAll applies its mode only to directories it CREATES, so an
+		// existing data directory keeps whatever mode it already had. That is
+		// not hypothetical: Docker creates a named volume's mount point as
+		// 0755 + setgid, and it stayed 2755 on every deployment — the log
+		// directory inside it was 0700 while the directory holding it was
+		// world-traversable. Tighten it explicitly, tolerating a failure (the
+		// store still works, and the file modes are what carry the secrets).
+		if err := os.Chmod(dir, 0o700); err != nil {
+			// Only report; do not fail the open. A read-only mount or a
+			// directory owned by another user would otherwise make the service
+			// refuse to start over a permission bit.
+			slog.Warn("数据目录权限收紧失败", "dir", dir, "err", err)
 		}
 	}
 	// _txlock=immediate makes every transaction take the write lock at BEGIN

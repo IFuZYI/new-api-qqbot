@@ -82,3 +82,57 @@ func TestReopeningTightensAnExistingDatabase(t *testing.T) {
 		t.Errorf("after reopening, mode = %04o, want 0600", got)
 	}
 }
+
+// A data directory that ALREADY exists must be tightened too, not just one this
+// code creates.
+//
+// MkdirAll applies its mode only to directories it creates, so an existing
+// directory keeps whatever it had. That is the Docker case: a named volume's
+// mount point is created by Docker as 0755 + setgid, and it stayed 2755 on every
+// deployment while the log directory inside it was 0700 — the directory holding
+// the database and the logs was world-traversable. Found by running the real
+// container.
+func TestAnExistingWorldReadableDataDirIsTightened(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(filepath.Join(dir, "qqbot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := di.Mode().Perm(); got != 0o700 {
+		t.Errorf("an existing data dir stayed %04o, want 0700", got)
+	}
+}
+
+// A data directory that cannot be tightened must not stop the service.
+//
+// The chmod can fail (a read-only mount, a directory owned by someone else), and
+// refusing to start over a permission bit would be worse than the bit itself:
+// the database files carry their own modes. This is asserted so a future change
+// cannot turn the warning into a hard failure unnoticed.
+func TestAnUntightenableDataDirStillOpens(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(filepath.Join(dir, "qqbot.db"))
+	if err != nil {
+		t.Fatalf("Open must not fail over a directory mode: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.PutSetting("still-works", map[string]any{"ok": true}); err != nil {
+		t.Errorf("the store is unusable: %v", err)
+	}
+}
