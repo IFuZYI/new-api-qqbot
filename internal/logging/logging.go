@@ -324,9 +324,18 @@ func (d *dayFile) Close() error {
 // survives. The date comes from the name, not the modification time: copying
 // or restoring the directory resets mtimes, and the name is what says which day
 // a file holds.
+//
+// keepDays is clamped here as well as at the settings boundary: `today.Day() -
+// (keepDays-1)` overflows for an absurd value, and MaxInt64 wraps the cutoff
+// forward to a date in the FUTURE, which would delete today's file. The service
+// already bounds the setting, so this is the function being safe on its own
+// terms rather than a reachable bug.
 func (m *Manager) Cleanup(keepDays int) (int, error) {
 	if keepDays <= 0 {
 		return 0, nil
+	}
+	if keepDays > MaxRetentionDays {
+		keepDays = MaxRetentionDays
 	}
 	today := m.now().In(m.Location())
 	cutoff := time.Date(today.Year(), today.Month(), today.Day()-(keepDays-1), 0, 0, 0, 0, time.UTC).Format(time.DateOnly)

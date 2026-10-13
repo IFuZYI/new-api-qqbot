@@ -42,6 +42,13 @@ const (
 	MaxLimit     = 2000
 )
 
+// MaxRetentionDays bounds Cleanup's own input. The settings boundary
+// (service.MaxLogRetentionDays) enforces the same ceiling on the operator's
+// value; this one keeps Cleanup safe for any caller, because
+// `today.Day() - (keepDays-1)` overflows for an absurd value and MaxInt64 wraps
+// the cutoff FORWARD, deleting today's file.
+const MaxRetentionDays = 3650
+
 // Result is a query's answer.
 type Result struct {
 	Day     string         `json:"day"`
@@ -119,7 +126,13 @@ func (m *Manager) Query(q Query) (Result, error) {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), maxLine)
-	var matched []Entry
+	// A ring of at most `limit` entries, newest last: only the newest `limit`
+	// records are ever returned, so retaining every match made the panel's
+	// unfiltered whole-day open allocate with the day's size — measured 122 MB
+	// heap on a 27 MB / 200k-line day inside one handler. Everything older than
+	// the ring's oldest entry is dropped as it arrives, so peak memory is the
+	// limit, not the file.
+	ring := newEntryRing(limit)
 	for sc.Scan() {
 		line := sc.Bytes()
 		// The level is read from the raw bytes first: counting the day's
@@ -142,7 +155,9 @@ func (m *Manager) Query(q Query) (Result, error) {
 		if search != "" && !matchesSearch(e, search) {
 			continue
 		}
-		matched = append(matched, e)
+		if ring.add(e) {
+			res.Truncated = true
+		}
 	}
 	if err := sc.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
@@ -153,14 +168,53 @@ func (m *Manager) Query(q Query) (Result, error) {
 			return res, err
 		}
 	}
-	if len(matched) > limit {
-		matched = matched[len(matched)-limit:]
-		res.Truncated = true
-	}
-	for i := len(matched) - 1; i >= 0; i-- {
-		res.Entries = append(res.Entries, matched[i])
-	}
+	res.Entries = ring.newestFirst()
 	return res, nil
+}
+
+// entryRing keeps the newest n entries with a fixed capacity.
+//
+// It exists so a query's memory is bounded by its limit rather than by the size
+// of the day it reads: the panel asks for 200 records out of a file that can
+// hold hundreds of thousands, and an unbounded slice retained every match.
+type entryRing struct {
+	buf   []Entry
+	limit int
+	// dropped records that at least one entry was evicted, i.e. the result is a
+	// truncation of a longer match set.
+	dropped bool
+}
+
+func newEntryRing(limit int) *entryRing {
+	if limit < 1 {
+		limit = 1
+	}
+	return &entryRing{buf: make([]Entry, 0, limit), limit: limit}
+}
+
+// add appends e, evicting the oldest entry if the ring is full. It reports
+// whether an eviction happened, which is what makes the result Truncated.
+func (r *entryRing) add(e Entry) bool {
+	if len(r.buf) == r.limit {
+		// Shift rather than reslice: reslicing would keep the backing array
+		// growing, and the evicted Entry must be released so its attribute map
+		// can be collected.
+		copy(r.buf, r.buf[1:])
+		r.buf = r.buf[:r.limit-1]
+		r.dropped = true
+	}
+	r.buf = append(r.buf, e)
+	return r.dropped
+}
+
+// newestFirst returns the retained entries, newest first. It never allocates
+// more than the ring's capacity.
+func (r *entryRing) newestFirst() []Entry {
+	out := make([]Entry, 0, len(r.buf))
+	for i := len(r.buf) - 1; i >= 0; i-- {
+		out = append(out, r.buf[i])
+	}
+	return out
 }
 
 // scanLevel reads a record's own level field out of the raw line.

@@ -430,8 +430,17 @@ func (s *Store) attachGroups(ms []Member) ([]Member, error) {
 	if len(ms) == 0 {
 		return ms, nil
 	}
+	// Only the memberships of the members being returned. The previous version
+	// loaded every row of member_groups and filtered in Go, so a one-group
+	// listing (or the unbound list) read the whole table on every panel request
+	// — the same class of issue CheckinTotalsByQQ was introduced to fix, one
+	// function away.
+	qqs := make([]int64, 0, len(ms))
+	for _, m := range ms {
+		qqs = append(qqs, m.QQ)
+	}
 	var links []MemberGroup
-	if err := s.db.Find(&links).Error; err != nil {
+	if err := s.db.Where("qq IN ?", qqs).Find(&links).Error; err != nil {
 		return nil, err
 	}
 	byQQ := make(map[int64][]int64, len(links))
