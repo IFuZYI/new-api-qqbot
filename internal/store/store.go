@@ -140,6 +140,41 @@ var ErrNotFound = gorm.ErrRecordNotFound
 // Store is the database handle.
 type Store struct{ db *gorm.DB }
 
+// chmodDir is os.Chmod, swappable so a test can exercise the failure path.
+//
+// The suite runs as root, and root's chmod on its own directory always succeeds,
+// so a test that simply calls Open cannot reach the tolerant branch: an
+// independent reviewer made the failure fatal and the test still passed. The
+// property ("a failed chmod must not stop Open") is only guarded by a hook.
+var chmodDir = os.Chmod
+
+// isOwnedDataDir reports whether this directory is one the service may tighten.
+//
+// The chmod below removes group and other access, so it must not be pointed at a
+// shared parent: `-data /var` or `-data /` would take access away from unrelated
+// directories. A directory the operator names for this service is a normal path
+// like /app/data or ./data; the filesystem root and the usual top-level system
+// directories are not. The check is deliberately a deny-list of those few names
+// rather than an allow-list, so a legitimate deployment under /srv, /opt or a
+// home directory keeps working.
+func isOwnedDataDir(dir string) bool {
+	clean := filepath.Clean(dir)
+	if clean == "/" || clean == "." {
+		return false
+	}
+	// Only a DIRECT top-level system path is refused (e.g. "/etc"); a real data
+	// directory is always deeper, or is a relative path.
+	if filepath.Dir(clean) != "/" {
+		return true
+	}
+	switch filepath.Base(clean) {
+	case "bin", "boot", "dev", "etc", "home", "lib", "lib64", "media", "mnt",
+		"opt", "proc", "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var":
+		return false
+	}
+	return true
+}
+
 // Open opens (creating if needed) the SQLite database at path and migrates it.
 //
 // The pragmas matter: the member and check-in patrols run on separate
@@ -165,11 +200,17 @@ func Open(path string) (*Store, error) {
 		// directory inside it was 0700 while the directory holding it was
 		// world-traversable. Tighten it explicitly, tolerating a failure (the
 		// store still works, and the file modes are what carry the secrets).
-		if err := os.Chmod(dir, 0o700); err != nil {
-			// Only report; do not fail the open. A read-only mount or a
-			// directory owned by another user would otherwise make the service
-			// refuse to start over a permission bit.
-			slog.Warn("数据目录权限收紧失败", "dir", dir, "err", err)
+		//
+		// The chmod is gated on isOwnedDataDir, NOT the creation above: a
+		// shared parent like /tmp must still be created if missing, it just must
+		// not have its mode changed under other users' feet.
+		if isOwnedDataDir(dir) {
+			if err := chmodDir(dir, 0o700); err != nil {
+				// Only report; do not fail the open. A read-only mount or a
+				// directory owned by another user would otherwise make the
+				// service refuse to start over a permission bit.
+				slog.Warn("数据目录权限收紧失败", "dir", dir, "err", err)
+			}
 		}
 	}
 	// _txlock=immediate makes every transaction take the write lock at BEGIN

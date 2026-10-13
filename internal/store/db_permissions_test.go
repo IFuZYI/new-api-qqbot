@@ -1,10 +1,60 @@
 package store
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
+
+// captureStoreLog installs a JSON handler as the process default logger and
+// returns a reader for what it recorded. The store logs through the
+// package-level slog, so this is the only way to assert on its records.
+func captureStoreLog(t *testing.T) {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&lockedWriter{mu: &mu, buf: &buf}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		storeLogCapture = nil
+	})
+	storeLogCapture = func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+}
+
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// loggedWarn reports whether the captured log carries a WARN with this message.
+func loggedWarn(t *testing.T, msg string) bool {
+	t.Helper()
+	if storeLogCapture == nil {
+		t.Fatal("loggedWarn needs captureStoreLog to be installed first")
+	}
+	out := storeLogCapture()
+	return strings.Contains(out, `"level":"WARN"`) && strings.Contains(out, msg)
+}
+
+// storeLogCapture is set by captureStoreLog so loggedWarn can read it without
+// threading the reader through every call.
+var storeLogCapture func() string
 
 // The database file, its WAL/SHM siblings and the data directory must be
 // owner-only.
@@ -118,15 +168,28 @@ func TestAnExistingWorldReadableDataDirIsTightened(t *testing.T) {
 
 // A data directory that cannot be tightened must not stop the service.
 //
-// The chmod can fail (a read-only mount, a directory owned by someone else), and
+// The chmod can fail (a read-only mount, a directory owned by another user), and
 // refusing to start over a permission bit would be worse than the bit itself:
-// the database files carry their own modes. This is asserted so a future change
-// cannot turn the warning into a hard failure unnoticed.
+// the database files carry their own modes.
+//
+// This test MUST inject the failure: the suite runs as root, and root's chmod on
+// its own directory always succeeds, so a test that simply calls Open never
+// reaches the tolerant branch. An independent reviewer proved that by making the
+// failure fatal — the original version of this test still passed. The chmodDir
+// hook is what makes the property observable.
 func TestAnUntightenableDataDirStillOpens(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	captureStoreLog(t)
+
+	// Make the chmod fail, as a foreign-owned or read-only directory would.
+	orig := chmodDir
+	chmodDir = func(string, os.FileMode) error { return os.ErrPermission }
+	t.Cleanup(func() { chmodDir = orig })
+
 	st, err := Open(filepath.Join(dir, "qqbot.db"))
 	if err != nil {
 		t.Fatalf("Open must not fail over a directory mode: %v", err)
@@ -134,5 +197,102 @@ func TestAnUntightenableDataDirStillOpens(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	if err := st.PutSetting("still-works", map[string]any{"ok": true}); err != nil {
 		t.Errorf("the store is unusable: %v", err)
+	}
+	// The failure must be REPORTED, not silently swallowed: the operator has to
+	// learn that the directory could not be tightened.
+	if !loggedWarn(t, "数据目录权限收紧失败") {
+		t.Error("the chmod failure was not reported")
+	}
+}
+
+// The chmod must not be pointed at a shared parent: `-data /var` or `-data /`
+// would remove group/other access from unrelated directories.
+func TestSharedParentsAreNotTightened(t *testing.T) {
+	for _, dir := range []string{"/", "/var", "/etc", "/tmp", "/usr", "/home", "/srv", "/opt", "/root"} {
+		if isOwnedDataDir(dir) {
+			t.Errorf("isOwnedDataDir(%q) = true; a shared parent must not be chmod'd", dir)
+		}
+	}
+	// A real data directory — the documented ones, and a relative path — must
+	// still be tightened.
+	for _, dir := range []string{"/app/data", "/home/qqbot/data", "/srv/qqbot/data", "data", "./data", "/tmp/qqbot", "/opt/qqbot/data", "/var/lib/qqbot"} {
+		if !isOwnedDataDir(dir) {
+			t.Errorf("isOwnedDataDir(%q) = false; a real data directory must be tightened", dir)
+		}
+	}
+}
+
+// A shared parent must still be CREATED when missing — the gate is on the chmod,
+// not on MkdirAll. /tmp/qqbot-<random> is exactly that case.
+func TestASharedParentIsStillCreated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A path whose parent is a shared directory that does NOT yet exist.
+	shared := filepath.Join(dir, "sub")
+	st, err := Open(filepath.Join(shared, "qqbot.db"))
+	if err != nil {
+		t.Fatalf("Open must create a missing parent even when it will not chmod it: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := os.Stat(shared); err != nil {
+		t.Errorf("the parent directory was not created: %v", err)
+	}
+}
+
+// Open must not TOUCH a shared parent's mode.
+//
+// The predicate test above pins isOwnedDataDir's ANSWERS, not that Open consults
+// it: removing the gate from Open's call site leaves that test green. This one
+// records which paths Open actually chmods, so it fails if the gate is removed.
+func TestOpenDoesNotChmodASharedParent(t *testing.T) {
+	var chmodded []string
+	orig := chmodDir
+	chmodDir = func(path string, mode os.FileMode) error {
+		chmodded = append(chmodded, path)
+		return orig(path, mode)
+	}
+	t.Cleanup(func() { chmodDir = orig })
+
+	// The chmod target is filepath.Dir(path) — the directory HOLDING the
+	// database. So the refused-parent case is `-data /tmp` (the db sits directly
+	// in /tmp), not `-data /tmp/qqbot` (whose dir is /tmp/qqbot, which is fine).
+	// Use a uniquely-named database so nothing else in /tmp is disturbed, and
+	// assert /tmp itself is never chmod'd.
+	probe := filepath.Join("/tmp", fmt.Sprintf("qqbot-shared-probe-%d.db", os.Getpid()))
+	st, err := Open(probe)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = st.Close()
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			_ = os.Remove(probe + suffix)
+		}
+	})
+
+	for _, p := range chmodded {
+		if p == "/tmp" || p == "/" {
+			t.Errorf("Open chmod'd %q, a shared parent; the gate is not wired in", p)
+		}
+	}
+	// And the positive control: a normal data directory IS chmod'd, so the
+	// assertion above cannot pass by chmodding nothing at all.
+	chmodded = nil
+	dir := filepath.Join(t.TempDir(), "data")
+	st2, err := Open(filepath.Join(dir, "qqbot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st2.Close() })
+	found := false
+	for _, p := range chmodded {
+		if p == dir {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a normal data directory was not chmod'd at all (recorded: %v); the control is vacuous", chmodded)
 	}
 }
