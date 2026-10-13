@@ -68,7 +68,7 @@ func Open(o Options) (*Manager, error) {
 	if o.Dir == "" {
 		return nil, fmt.Errorf("log directory is required")
 	}
-	if err := os.MkdirAll(o.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
 		return nil, err
 	}
 	if o.Stderr == nil {
@@ -263,10 +263,18 @@ func (d *dayFile) Write(p []byte) (int, error) {
 			_ = d.file.Close()
 			d.file = nil
 		}
-		f, err := os.OpenFile(filepath.Join(d.dir, fileName(day)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		path := filepath.Join(d.dir, fileName(day))
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			d.reportOpenFailure(err, day)
 			return 0, err
+		}
+		// The create mode only applies when the file is NEW; an operator
+		// upgrading from a version that wrote 0644 keeps that mode on the
+		// existing file, so tighten it explicitly. A failure here is not fatal:
+		// the file is open and the day's records must still be written.
+		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+			d.reportOpenFailure(err, day)
 		}
 		d.file, d.day = f, day
 		d.lastErr = ""
