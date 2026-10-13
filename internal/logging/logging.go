@@ -378,8 +378,16 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 		// The sweep runs at start-up and hourly, so this is where the window is
 		// brought in line. Found by running the real service: today's file was
 		// 0600 and yesterday's was still 0644.
-		if err := m.tightenFile(filepath.Join(m.dir, e.Name())); err != nil && firstErr == nil {
-			firstErr = err
+		//
+		// A failure here is NOT a cleanup failure and must not be returned as
+		// one: the sweep's job — deleting the expired files — succeeded. Folding
+		// it into the error made Apply report 清理过期日志失败 on every hourly
+		// tick while the file it named had in fact been removed (measured as a
+		// non-root user with a root-owned file in the window). It is reported on
+		// its own, at WARN, because the operator should still know the mode
+		// could not be tightened.
+		if err := m.tightenFile(filepath.Join(m.dir, e.Name())); err != nil {
+			m.logger.Warn("日志文件权限收紧失败", "file", e.Name(), "err", err)
 		}
 	}
 	return removed, firstErr
@@ -391,11 +399,19 @@ func (m *Manager) Cleanup(keepDays int) (int, error) {
 // keeps 0644 until something rewrites it — and a past day's file is never
 // written again. Cleanup is the only code that visits every file in the window.
 func (m *Manager) tightenFile(path string) error {
-	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := chmodFile(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
+
+// chmodFile is os.Chmod, swappable so a test can exercise the failure path.
+//
+// The suite runs as root, and root can chmod anything it owns, so a test that
+// only calls Cleanup cannot reach the failure branch. The reviewer's probe made
+// it reachable by running as nobody against a root-owned file; a hook is the
+// in-suite equivalent.
+var chmodFile = os.Chmod
 
 // removeExpired deletes one expired day file.
 //
@@ -406,12 +422,19 @@ func (m *Manager) tightenFile(path string) error {
 // directly — the racy version of the test only caught it in ~3% of runs, because
 // the ENOENT landed in whichever goroutine happened to lose.
 func (m *Manager) removeExpired(path string) error {
-	err := os.Remove(path)
+	err := removeFn(path)
 	if err != nil && errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
 }
+
+// removeFn is os.Remove, swappable so a test can make a removal fail.
+//
+// A temp directory as root resists nothing, and the fixture that would fail
+// (a non-empty directory named like a day file) is skipped by design, so the
+// error-propagation path needs a hook to be observable.
+var removeFn = os.Remove
 
 // dayOf extracts the date from a daily file's name.
 func dayOf(name string) (string, bool) {
